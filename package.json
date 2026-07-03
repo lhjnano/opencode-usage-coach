@@ -1,7 +1,7 @@
 {
   "name": "opencode-usage-coach",
-  "version": "0.1.1",
-  "description": "opencode closed-loop usage coach — quota SENSE -> coaching DECIDE -> loop ACT + TUI integration",
+  "version": "0.1.2",
+  "description": "opencode closed-loop usage coach \u2014 quota SENSE -> coaching DECIDE -> loop ACT + TUI integration",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -26,7 +26,16 @@
     "README.md",
     "LICENSE"
   ],
-  "keywords": ["opencode", "opencode-plugin", "quota", "usage", "coach", "loop", "zai", "glm"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "quota",
+    "usage",
+    "coach",
+    "loop",
+    "zai",
+    "glm"
+  ],
   "license": "MIT",
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.14",

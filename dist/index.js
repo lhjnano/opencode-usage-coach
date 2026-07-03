@@ -1,16 +1,28 @@
 // src/index.ts
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "fs";
 import { spawn } from "child_process";
+import { createHash } from "crypto";
 import { homedir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 import { tool } from "@opencode-ai/plugin";
 var PLUGIN_NAME = "opencode-usage-coach";
-var STATE_DIR = process.env.UC_STATE_DIR ?? join(homedir(), ".cache", "opencode-usage-coach");
+var DEBUG = process.env.UC_DEBUG === "1";
+var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
+var STATE_DIR = join(homedir(), ".cache", "opencode-usage-coach");
 var STATE_FILE = join(STATE_DIR, "state.json");
 var HARNESS_FILE = join(STATE_DIR, "harness.json");
 var LOG_FILE = join(STATE_DIR, "coach.log");
-var DEBUG = process.env.UC_DEBUG === "1";
-var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
+function projectStateDir(dir) {
+  const abs = resolve(dir || ".");
+  const h = createHash("sha1").update(abs).digest("hex").slice(0, 12);
+  return join(homedir(), ".cache", "opencode-usage-coach", "projects", h);
+}
+function setStateDir(dir) {
+  STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(dir);
+  STATE_FILE = join(STATE_DIR, "state.json");
+  HARNESS_FILE = join(STATE_DIR, "harness.json");
+  LOG_FILE = join(STATE_DIR, "coach.log");
+}
 var NOOP_HOOKS = {};
 function log(msg) {
   if (DEBUG) try {
@@ -63,14 +75,72 @@ function humanRemaining(iso) {
     const mins = Math.floor((new Date(iso).getTime() - Date.now()) / 6e4);
     if (mins < 0) return "resets soon";
     if (mins < 60) return `resets in ${mins}m`;
-    if (mins < 1440) return `resets in ${Math.floor(mins / 60)}h`;
-    return `resets in ${Math.floor(mins / 1440)}d`;
+    if (mins < 1440) return `resets in ${Math.floor(mins / 60)}h ${mins % 60}m`;
+    return `${Math.floor(mins / 1440)}d left`;
   } catch {
     return "";
   }
 }
+function captureStdout(args) {
+  return new Promise((resolve2) => {
+    let out = "";
+    let p;
+    try {
+      p = spawn("codexbar", args, { stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      return resolve2("");
+    }
+    p.stdout?.on("data", (d) => {
+      out += d.toString();
+    });
+    p.on("error", () => resolve2(""));
+    p.on("close", () => resolve2(out));
+  });
+}
+async function fetchEnabledProviders() {
+  const out = await captureStdout(["config", "providers"]);
+  const ids = [];
+  for (const line of out.split("\n")) {
+    const m = line.match(/^\s*([a-zA-Z0-9_-]+):\s*enabled/);
+    if (m) ids.push(m[1]);
+  }
+  return ids;
+}
+function providerAdvice(h5, wk) {
+  const S5H = STOP_5H, SWK = STOP_WK, T5H = THR_5H, TWK = THR_WK;
+  if (h5 >= S5H || wk >= SWK) return "STOP \u2014 finish current only";
+  if (h5 >= T5H && wk >= TWK) return "small tasks only \u2014 big ones will hit both limits";
+  if (h5 >= T5H) return "small tasks only \u2014 5h window nearly full, big tasks after reset";
+  if (wk >= TWK) return "small tasks only \u2014 big ones will strain late-week";
+  if (h5 >= 50 || wk >= 50) return "moderate tasks OK \u2014 save big ones for headroom";
+  return "big tasks OK \u2014 short & long limits comfortable";
+}
+async function fetchProvidersCoach() {
+  const ids = await fetchEnabledProviders();
+  const results = await Promise.all(ids.map(async (id) => {
+    try {
+      const out = await captureStdout(["usage", "--provider", id, "--json"]);
+      const u = JSON.parse(out)[0]?.usage;
+      if (!u) return null;
+      const h5 = Math.round(u.tertiary?.usedPercent ?? 0);
+      const wk = Math.round(u.primary?.usedPercent ?? 0);
+      return {
+        id,
+        name: id,
+        fiveHour: h5,
+        weekly: wk,
+        fiveHourReset: humanRemaining(u.tertiary?.resetsAt),
+        weeklyReset: humanRemaining(u.primary?.resetsAt),
+        advice: providerAdvice(h5, wk)
+      };
+    } catch {
+      return null;
+    }
+  }));
+  return results.filter(Boolean);
+}
 function fetchQuota() {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     let out = "";
     let p;
     try {
@@ -78,21 +148,21 @@ function fetchQuota() {
         stdio: ["ignore", "pipe", "ignore"]
       });
     } catch {
-      return resolve(null);
+      return resolve2(null);
     }
     p.stdout?.on("data", (d) => {
       out += d.toString();
     });
-    p.on("error", () => resolve(null));
+    p.on("error", () => resolve2(null));
     p.on("close", () => {
       try {
         const text = out.trim();
-        if (!text || text === "[]") return resolve(null);
+        if (!text || text === "[]") return resolve2(null);
         const u = JSON.parse(text)[0]?.usage;
-        if (!u) return resolve(null);
-        resolve({ weekly: u.primary ?? { usedPercent: 0 }, monthly: u.secondary ?? { usedPercent: 0 }, fiveHour: u.tertiary ?? { usedPercent: 0 } });
+        if (!u) return resolve2(null);
+        resolve2({ weekly: u.primary ?? { usedPercent: 0 }, monthly: u.secondary ?? { usedPercent: 0 }, fiveHour: u.tertiary ?? { usedPercent: 0 } });
       } catch {
-        resolve(null);
+        resolve2(null);
       }
     });
   });
@@ -113,6 +183,7 @@ function coach(q) {
 var LOADING = { decision: "GO", advice: "quota loading\u2026", weekly: -1, monthly: -1, fiveHour: -1 };
 async function UsageCoachPlugin(input) {
   try {
+    setStateDir(input.directory);
     let last = null;
     let lastFetchedAt = 0;
     let refreshing = false;
@@ -121,12 +192,17 @@ async function UsageCoachPlugin(input) {
         if (refreshing) return;
         if (last && Date.now() - lastFetchedAt < TTL_MS) return;
         refreshing = true;
-        fetchQuota().then((q) => {
+        fetchQuota().then(async (q) => {
           try {
             last = coach(q);
             lastFetchedAt = Date.now();
-            writeState(last);
-            log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}%`);
+            let providers = [];
+            try {
+              providers = await fetchProvidersCoach();
+            } catch {
+            }
+            writeState({ ...last, providers, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+            log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
           } catch (e) {
             log(`refresh-in-then err: ${String(e)}`);
           }

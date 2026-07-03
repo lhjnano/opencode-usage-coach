@@ -14,11 +14,19 @@
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
-const STATE_DIR = join(homedir(), ".cache", "opencode-usage-coach");
-const HARNESS_FILE = join(STATE_DIR, "harness.json");
+// Per-directory state (matches the plugin & TUI). UC_STATE_DIR overrides (global).
+function projectStateDir(dir: string): string {
+  const abs = resolve(dir || ".");
+  const h = createHash("sha1").update(abs).digest("hex").slice(0, 12);
+  return join(homedir(), ".cache", "opencode-usage-coach", "projects", h);
+}
+
+let STATE_DIR = join(homedir(), ".cache", "opencode-usage-coach");
+let HARNESS_FILE = join(STATE_DIR, "harness.json");
 const TIMEOUT_MS = Number(process.env.UC_TASK_TIMEOUT_MS ?? 1800000);
 const GRADE_TIMEOUT_MS = Number(process.env.UC_GRADE_TIMEOUT_MS ?? 180000);
 const MAX_REVISIONS = Number(process.env.UC_MAX_REVISIONS ?? 2);
@@ -34,6 +42,7 @@ type HarnessState = {
   name: string; total: number; current: number;
   tasks: TaskState[]; usage: Record<string, Usage>;
   quotas?: Record<string, ProviderQuota>;
+  active?: boolean;
   startedAt: string; updatedAt?: string;
 };
 
@@ -131,7 +140,7 @@ function parseTasks(file: string): { id: number; title: string }[] {
 }
 
 /** Role -> model config from harness.config.json in the workdir. */
-type HarnessConfig = { generator?: string; grader?: string; taskTimeoutMs?: number; maxRevisions?: number };
+type HarnessConfig = { generator?: string; grader?: string; taskTimeoutMs?: number; maxRevisions?: number; parallel?: number };
 function loadConfig(dir: string): HarnessConfig {
   try {
     const p = join(dir, "harness.config.json");
@@ -155,6 +164,9 @@ async function decompose(title: string, dir: string, model: string): Promise<str
 
 async function main() {
   const dir = process.argv[2] ?? ".";
+  // per-directory state isolation (matches the TUI panel for this dir)
+  STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(dir);
+  HARNESS_FILE = join(STATE_DIR, "harness.json");
   const resolve = (p: string | undefined, def: string) => {
     const base = p ?? def;
     return base.startsWith("/") ? base : join(dir, base);
@@ -180,61 +192,52 @@ async function main() {
     state.quotas = q;
   };
 
-  const state: HarnessState = { name: "batch", total: tasks.length, current: 0, tasks: [], usage: {}, startedAt: new Date().toISOString() };
+  const state: HarnessState = { name: "batch", total: tasks.length, current: 0, tasks: [], usage: {}, active: true, startedAt: new Date().toISOString() };
   // per-model token accumulation
   const trackUsage = (model: string, tok: { input: number; output: number }) => {
     const u = state.usage[model] ?? { input: 0, output: 0, calls: 0 };
     u.input += tok.input; u.output += tok.output; u.calls += 1;
     state.usage[model] = u;
   };
+  const parallel = Math.max(1, cfg.parallel ?? 1);
+  let finished = 0;
   writeState(state);
-  console.log(`harness start: ${tasks.length} tasks, timeout ${taskTimeout}ms, max revisions ${maxRev}`);
+  console.log(`harness start: ${tasks.length} tasks, parallel=${parallel}, timeout ${taskTimeout}ms, max revisions ${maxRev}`);
 
-  for (let i = 0; i < tasks.length; i++) {
-    const t = tasks[i];
-    state.current = i + 1;
-    const task: TaskState = { id: t.id, title: t.title, status: "generating", model: MODEL, revisions: 0, score: null, note: "" };
+  // Process one task: generate (GENERATOR) -> grade/revise (GRADER/GENERATOR).
+  // Returns { split: subtasks (sequential-only auto-split on timeout), halt: quota STOP }.
+  const processTask = async (t: { id: number; title: string }): Promise<{ split: string[]; halt: boolean }> => {
+    const task: TaskState = { id: t.id, title: t.title, status: "generating", model: GENERATOR, revisions: 0, score: null, note: "" };
     state.tasks = state.tasks.filter((x) => x.id !== t.id);
     state.tasks.push(task);
+    state.current = finished;
     writeState(state);
 
-    // quota gate
     if (await quotaStop()) {
-      task.status = "halted_quota"; task.note = "quota STOP — loop halted"; writeState(state);
-      console.log(`quota STOP — halted at task ${t.id}`); break;
+      task.status = "halted_quota"; task.note = "quota STOP"; writeState(state);
+      console.log(`quota STOP @ task ${t.id}`); return { split: [], halt: true };
     }
-    // refresh per-provider quotas (5h etc.) for the panel, live
     await refreshQuotas();
     writeState(state);
 
-    // generate (GENERATOR model)
     console.log(`> task ${t.id} generating [${GENERATOR}]`);
     task.model = GENERATOR; writeState(state);
     const gen = await runOc(`Task: ${t.title}\nPerform it for real in the current directory (write/edit files).`, dir, GENERATOR, taskTimeout);
     trackUsage(GENERATOR, gen.tokens);
     writeState(state);
     if (gen.text === null) {
-      task.status = "timed_out"; task.note = `${taskTimeout}ms exceeded -> try split`;
-      writeState(state); console.log(`! task ${t.id} timeout (split)`);
-      // P3: on timeout, split into smaller subtasks (uses GENERATOR)
+      task.status = "timed_out"; task.note = `${taskTimeout}ms exceeded -> split`;
+      writeState(state); console.log(`! task ${t.id} timeout`);
       const subs = await decompose(t.title, dir, GENERATOR);
-      if (subs.length > 0) {
-        const base = t.id;
-        const newTasks = subs.map((s, k) => ({ id: Number(`${base}.${k + 1}`), title: s }));
-        tasks.splice(i + 1, 0, ...newTasks);
-        state.total = tasks.length;
-        task.note = `-> split into ${subs.length} subtasks`;
-      }
+      if (subs.length) task.note = `-> split into ${subs.length} subtasks`;
       writeState(state);
-      continue;
+      return { split: subs, halt: false };
     }
 
-    // grade / revise loop (GRADER grades, GENERATOR revises)
     for (let rev = 0; rev <= maxRev; rev++) {
       task.status = rev === 0 ? "grading" : "revising"; task.revisions = rev;
-      if (rev === 0) task.model = GRADER; else task.model = GENERATOR;
-      writeState(state);
-      console.log(`> task ${t.id} ${rev === 0 ? `grading [${GRADER}]` : `revise(${rev}) re-grade [${GRADER}]`}`);
+      task.model = rev === 0 ? GRADER : GENERATOR; writeState(state);
+      console.log(`> task ${t.id} ${rev === 0 ? "grading" : `revise(${rev})`} [${task.model}]`);
       const grade = await runOc(
         `Grade the directory's result against the rubric below.\n${rubric}\nTask to evaluate: ${t.title}\nOutput PASS or FAIL on the first line, and the reason on the second line.`,
         dir, GRADER, GRADE_TIMEOUT_MS,
@@ -243,7 +246,7 @@ async function main() {
       const pass = /^\s*PASS\b/im.test(grade.text ?? "");
       task.score = pass ? "PASS" : "FAIL";
       writeState(state);
-      if (pass) { task.status = "completed"; writeState(state); console.log(`+ task ${t.id} passed`); break; }
+      if (pass) { task.status = "completed"; writeState(state); console.log(`+ task ${t.id} passed`); return { split: [], halt: false }; }
       if (rev < maxRev) {
         task.status = "revising"; task.model = GENERATOR; writeState(state);
         console.log(`> task ${t.id} revising (${rev + 1}) [${GENERATOR}]`);
@@ -254,8 +257,40 @@ async function main() {
         writeState(state); console.log(`x task ${t.id} failed (giving up)`);
       }
     }
+    return { split: [], halt: false };
+  };
+
+  if (parallel <= 1) {
+    // sequential (with auto-split on timeout)
+    for (let i = 0; i < tasks.length; i++) {
+      const r = await processTask(tasks[i]);
+      finished++; state.current = finished;
+      await refreshQuotas(); writeState(state); // update quota after each task
+      if (r.halt) break;
+      if (r.split.length) {
+        const base = tasks[i].id;
+        tasks.splice(i + 1, 0, ...r.split.map((s, k) => ({ id: Number(`${base}.${k + 1}`), title: s })));
+        state.total = tasks.length;
+      }
+      writeState(state);
+    }
+  } else {
+    // parallel pool (concurrency = parallel). No auto-split in parallel — use sequential for that.
+    let next = 0; let halted = false;
+    const worker = async () => {
+      while (!halted) {
+        const my = next++;
+        if (my >= tasks.length) return;
+        const r = await processTask(tasks[my]);
+        finished++; state.current = finished;
+        await refreshQuotas(); writeState(state); // update quota after each task
+        if (r.halt) { halted = true; return; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(parallel, tasks.length) }, () => worker()));
   }
   state.current = state.tasks.length;
+  state.active = false; // done -> panel hides the harness section
   writeState(state);
   console.log("harness complete");
 }

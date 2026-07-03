@@ -5,19 +5,28 @@
 
 import type { TuiPlugin, TuiPluginApi, TuiSlotContext } from "@opencode-ai/plugin/tui";
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createRoot, createSignal, onCleanup } from "solid-js";
 
-const STATE_DIR = process.env.UC_STATE_DIR ?? join(homedir(), ".cache", "opencode-usage-coach");
-const STATE_FILE = join(STATE_DIR, "state.json");
-const HARNESS_FILE = join(STATE_DIR, "harness.json");
-const MARKER = join(STATE_DIR, "tui-loaded.txt");
+// Per-directory state (matches the server plugin & harness script). UC_STATE_DIR overrides.
+function projectStateDir(dir: string): string {
+  const abs = resolve(dir || ".");
+  const h = createHash("sha1").update(abs).digest("hex").slice(0, 12);
+  return join(homedir(), ".cache", "opencode-usage-coach", "projects", h);
+}
 
-type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number };
+let STATE_DIR = join(homedir(), ".cache", "opencode-usage-coach");
+let STATE_FILE = join(STATE_DIR, "state.json");
+let HARNESS_FILE = join(STATE_DIR, "harness.json");
+let MARKER = join(STATE_DIR, "tui-loaded.txt");
+
+type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number; providers?: ProviderCoach[] };
+type ProviderCoach = { id: string; name: string; fiveHour: number; weekly: number; fiveHourReset: string; weeklyReset: string; advice: string };
 type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null };
 type ProviderQuota = { weekly: number; monthly: number; fiveHour: number };
-type HarnessState = { name: string; total: number; current: number; tasks: TaskState[]; quotas?: Record<string, ProviderQuota> };
+type HarnessState = { name: string; total: number; current: number; tasks: TaskState[]; quotas?: Record<string, ProviderQuota>; active?: boolean };
 
 function readState(): State | null {
   try { if (!existsSync(STATE_FILE)) return null; return JSON.parse(readFileSync(STATE_FILE, "utf8")) as State; }
@@ -50,8 +59,13 @@ function short(s: string, n: number): string {
 }
 
 function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
+  // Per-directory state: scope to the session's working directory (matches harness/plugin).
+  STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(api.state.path.directory);
+  STATE_FILE = join(STATE_DIR, "state.json");
+  HARNESS_FILE = join(STATE_DIR, "harness.json");
+  MARKER = join(STATE_DIR, "tui-loaded.txt");
   // Load marker (diagnostic)
-  try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(MARKER, `loaded ${new Date().toISOString()}`); } catch { /* */ }
+  try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(MARKER, `loaded ${new Date().toISOString()} @ ${api.state.path.directory}`); } catch { /* */ }
 
   const [getState, setState] = createSignal<State | null>(readState());
   const [getHarness, setHarness] = createSignal<HarnessState | null>(readHarness());
@@ -59,14 +73,16 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
   onCleanup(() => clearInterval(timer));
   onCleanup(() => disposeRoot());
 
-  // status -> label (MCP-style dot ● prefix; color TBD via style prop in a follow-up)
-  const statusDot: Record<string, string> = {
-    generating: "●", grading: "●", revising: "●",
-    completed: "●", failed: "●", timed_out: "●", halted_quota: "●",
+  // status -> theme color key (MCP-style colored dot ●)
+  const statusKey: Record<string, string> = {
+    generating: "info", grading: "accent", revising: "warning",
+    completed: "success", failed: "error", timed_out: "error", halted_quota: "error",
   };
 
-  // panel(ctx) — one line per item. ctx reserved for theme colors (follow-up).
+  // panel(ctx) — one line per item. Color via style.foreground using theme (opentui convention).
   const panel = (ctx: TuiSlotContext & { session_id?: string }) => {
+    const th = (ctx.theme?.current ?? {}) as Record<string, any>;
+    const st = (k: string) => ({ fg: th[k] });
     let s: State | null = null;
     try { s = getState(); } catch { s = null; }
     let h: HarnessState | null = null;
@@ -74,30 +90,42 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
 
     const nodes: any[] = [];
     if (s) {
-      nodes.push(<text>usage-coach [{TAG[s.decision]}]</text>);
-      nodes.push(<text> 5h {bar(s.fiveHour)} {s.fiveHour}%</text>);
-      nodes.push(<text> wk {bar(s.weekly)} {s.weekly}%</text>);
-      nodes.push(<text> mo {bar(s.monthly)} {s.monthly}%</text>);
+      const dKey = s.decision === "GO" ? "success" : s.decision === "THROTTLE" ? "warning" : "error";
+      nodes.push(<text style={st(dKey)}>usage-coach [{TAG[s.decision]}]</text>);
+      // Coach view: per-provider breakdown (5h + wk + time remaining + big/small advice)
+      if (s.providers && s.providers.length > 0) {
+        for (const p of s.providers) {
+          nodes.push(<text style={st("textMuted")}> {p.name}</text>);
+          const k5 = p.fiveHour >= 70 ? "error" : p.fiveHour >= 40 ? "warning" : "success";
+          const kw = p.weekly >= 85 ? "error" : p.weekly >= 60 ? "warning" : "success";
+          nodes.push(<text style={st(k5)}>  5h {bar(p.fiveHour)} {p.fiveHour}%  {p.fiveHourReset}</text>);
+          nodes.push(<text style={st(kw)}>  wk {bar(p.weekly)} {p.weekly}%  {p.weeklyReset}</text>);
+          nodes.push(<text style={st(dKey)}>  {"->"} {p.advice}</text>);
+        }
+      } else {
+        nodes.push(<text> 5h {bar(s.fiveHour)} {s.fiveHour}%</text>);
+        nodes.push(<text> wk {bar(s.weekly)} {s.weekly}%</text>);
+        nodes.push(<text> mo {bar(s.monthly)} {s.monthly}%</text>);
+      }
     } else {
       nodes.push(<text>usage-coach: ...</text>);
     }
 
-    // Harness section: ALWAYS show a status line, then one line per task + inline 5h quota bar.
-    const hStatus = h && h.tasks.length > 0 ? `${h.name} ${h.current}/${h.total}` : "idle";
-    nodes.push(<text>{" "}</text>);
-    nodes.push(<text>harness: {hStatus}</text>);
-    if (h && h.tasks.length > 0) {
+    // Harness section: ONLY when a harness is active (running). Hidden when done (active===false).
+    if (h && h.active !== false && h.tasks.length > 0) {
+      nodes.push(<text>{" "}</text>);
+      nodes.push(<text style={st("textMuted")}>harness: {h.name} {h.current}/{h.total}</text>);
       for (const t of h.tasks) {
-        const dot = statusDot[t.status] ?? "·";
+        const sKey = statusKey[t.status] ?? "text";
         const lbl = TLABEL[t.status] ?? t.status;
         const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
         const mdl = t.model ? ` ${(t.model.split("/").pop() ?? t.model)}` : "";
-        nodes.push(<text> {dot} {t.id}{mdl} {lbl}{rev} {short(t.title, 12)}</text>);
-        // inline quota meter: 5h window of this task's model provider (0% for local LLMs)
+        nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev} {short(t.title, 12)}</text>);
         const pv = t.model ? (t.model.startsWith("zai") ? "zai" : (t.model.split("/")[0] ?? "").split("-")[0]) : "";
         const q = pv && h.quotas?.[pv] ? h.quotas[pv] : null;
         const pct = q ? q.fiveHour : 0;
-        nodes.push(<text>   5h {bar(pct)} {pct}%</text>);
+        const qKey = pct >= 70 ? "error" : pct >= 40 ? "warning" : "success";
+        nodes.push(<text style={st(qKey)}>   5h {bar(pct)} {pct}%</text>);
       }
     }
 

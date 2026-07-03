@@ -12,17 +12,32 @@
 
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 
 const PLUGIN_NAME = "opencode-usage-coach";
-const STATE_DIR = process.env.UC_STATE_DIR ?? join(homedir(), ".cache", "opencode-usage-coach");
-const STATE_FILE = join(STATE_DIR, "state.json");
-const HARNESS_FILE = join(STATE_DIR, "harness.json");
-const LOG_FILE = join(STATE_DIR, "coach.log");
 const DEBUG = process.env.UC_DEBUG === "1";
 const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
+
+// Per-directory state isolation: each project dir gets its own state/harness files,
+// so multiple sessions/dirs don't share harness state. UC_STATE_DIR overrides (global).
+let STATE_DIR = join(homedir(), ".cache", "opencode-usage-coach");
+let STATE_FILE = join(STATE_DIR, "state.json");
+let HARNESS_FILE = join(STATE_DIR, "harness.json");
+let LOG_FILE = join(STATE_DIR, "coach.log");
+function projectStateDir(dir: string): string {
+  const abs = resolve(dir || ".");
+  const h = createHash("sha1").update(abs).digest("hex").slice(0, 12);
+  return join(homedir(), ".cache", "opencode-usage-coach", "projects", h);
+}
+function setStateDir(dir: string) {
+  STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(dir);
+  STATE_FILE = join(STATE_DIR, "state.json");
+  HARNESS_FILE = join(STATE_DIR, "harness.json");
+  LOG_FILE = join(STATE_DIR, "coach.log");
+}
 
 type QuotaWindow = { resetDescription?: string; usedPercent: number; resetsAt?: string };
 type Quota = { weekly: QuotaWindow; monthly: QuotaWindow; fiveHour: QuotaWindow };
@@ -56,9 +71,68 @@ function humanRemaining(iso?: string): string {
     const mins = Math.floor((new Date(iso).getTime() - Date.now()) / 60000);
     if (mins < 0) return "resets soon";
     if (mins < 60) return `resets in ${mins}m`;
-    if (mins < 1440) return `resets in ${Math.floor(mins / 60)}h`;
-    return `resets in ${Math.floor(mins / 1440)}d`;
+    if (mins < 1440) return `resets in ${Math.floor(mins / 60)}h ${mins % 60}m`;
+    return `${Math.floor(mins / 1440)}d left`;
   } catch { return ""; }
+}
+
+type ProviderCoach = { id: string; name: string; fiveHour: number; weekly: number; fiveHourReset: string; weeklyReset: string; advice: string };
+
+/** spawn helper that captures stdout (never leaks to TUI). */
+function captureStdout(args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    let out = "";
+    let p;
+    try { p = spawn("codexbar", args, { stdio: ["ignore", "pipe", "ignore"] }); }
+    catch { return resolve(""); }
+    p.stdout?.on("data", (d) => { out += d.toString(); });
+    p.on("error", () => resolve(""));
+    p.on("close", () => resolve(out));
+  });
+}
+
+/** enabled provider ids from `codexbar config providers`. */
+async function fetchEnabledProviders(): Promise<string[]> {
+  const out = await captureStdout(["config", "providers"]);
+  const ids: string[] = [];
+  for (const line of out.split("\n")) {
+    const m = line.match(/^\s*([a-zA-Z0-9_-]+):\s*enabled/);
+    if (m) ids.push(m[1]);
+  }
+  return ids;
+}
+
+/** per-provider coaching advice: big vs small task guidance based on 5h + weekly capacity. */
+function providerAdvice(h5: number, wk: number): string {
+  const S5H = STOP_5H, SWK = STOP_WK, T5H = THR_5H, TWK = THR_WK;
+  if (h5 >= S5H || wk >= SWK) return "STOP — finish current only";
+  if (h5 >= T5H && wk >= TWK) return "small tasks only — big ones will hit both limits";
+  if (h5 >= T5H) return "small tasks only — 5h window nearly full, big tasks after reset";
+  if (wk >= TWK) return "small tasks only — big ones will strain late-week";
+  if (h5 >= 50 || wk >= 50) return "moderate tasks OK — save big ones for headroom";
+  return "big tasks OK — short & long limits comfortable";
+}
+
+/** fetch quota + advice for all enabled providers (coach view). */
+async function fetchProvidersCoach(): Promise<ProviderCoach[]> {
+  const ids = await fetchEnabledProviders();
+  const results = await Promise.all(ids.map(async (id) => {
+    try {
+      const out = await captureStdout(["usage", "--provider", id, "--json"]);
+      const u = (JSON.parse(out)[0]?.usage) as any;
+      if (!u) return null;
+      const h5 = Math.round(u.tertiary?.usedPercent ?? 0);
+      const wk = Math.round(u.primary?.usedPercent ?? 0);
+      return {
+        id, name: id,
+        fiveHour: h5, weekly: wk,
+        fiveHourReset: humanRemaining(u.tertiary?.resetsAt),
+        weeklyReset: humanRemaining(u.primary?.resetsAt),
+        advice: providerAdvice(h5, wk),
+      } as ProviderCoach;
+    } catch { return null; }
+  }));
+  return results.filter(Boolean) as ProviderCoach[];
 }
 
 // spawn codexbar — capture stdout in a pipe only, never leak to parent stdio (TUI).
@@ -109,6 +183,7 @@ export default async function UsageCoachPlugin(input: {
 }) {
   // Top-level guard: even if init fails, opencode keeps working.
   try {
+    setStateDir(input.directory); // per-directory state isolation
     let last: Coaching | null = null;
     let lastFetchedAt = 0;
     let refreshing = false;
@@ -119,8 +194,15 @@ export default async function UsageCoachPlugin(input: {
         if (refreshing) return;
         if (last && Date.now() - lastFetchedAt < TTL_MS) return;
         refreshing = true;
-        fetchQuota().then((q) => {
-          try { last = coach(q); lastFetchedAt = Date.now(); writeState(last); log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}%`); }
+        fetchQuota().then(async (q) => {
+          try {
+            last = coach(q); lastFetchedAt = Date.now();
+            // also fetch per-provider coach view (best-effort, non-blocking on failure)
+            let providers: ProviderCoach[] = [];
+            try { providers = await fetchProvidersCoach(); } catch { /* */ }
+            writeState({ ...last, providers, updatedAt: new Date().toISOString() } as any);
+            log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
+          }
           catch (e) { log(`refresh-in-then err: ${String(e)}`); }
         }).catch((e) => { log(`fetchQuota err: ${String(e)}`); }).finally(() => { refreshing = false; });
       } catch (e) { log(`refreshBackground err: ${String(e)}`); }

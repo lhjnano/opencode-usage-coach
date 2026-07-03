@@ -2,6 +2,7 @@
   "_comment": "Harness role -> model config. Each role runs on its specified model, so usage is tracked per model (works for local LLMs too). Missing roles fall back to UC_MODEL env.",
   "generator": "zai-coding-plan/glm-5.1",
   "grader": "zai-coding-plan/glm-5.1",
+  "parallel": 1,
   "taskTimeoutMs": 1800000,
   "maxRevisions": 2
 }
