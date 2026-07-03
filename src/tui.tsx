@@ -49,9 +49,11 @@ const TLABEL: Record<string, string> = {
   failed: "fail", timed_out: "timeout", halted_quota: "quota-halt",
 };
 
-function bar(p: number): string {
-  const n = Math.max(0, Math.min(10, Math.round(p / 10)));
-  return "█".repeat(n) + "░".repeat(10 - n);
+function barFill(p: number): string {
+  return "█".repeat(Math.max(0, Math.min(10, Math.round(p / 10))));
+}
+function barEmpty(p: number): string {
+  return "░".repeat(10 - Math.max(0, Math.min(10, Math.round(p / 10))));
 }
 // Truncate title to fit sidebar width
 function short(s: string, n: number): string {
@@ -113,16 +115,29 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
       if (s.providers && s.providers.length > 0) {
         for (const p of s.providers) {
           nodes.push(<text style={st("textMuted")}> {p.name}</text>);
-          const k5 = p.fiveHour >= 70 ? "error" : p.fiveHour >= 40 ? "warning" : "success";
-          const kw = p.weekly >= 85 ? "error" : p.weekly >= 60 ? "warning" : "success";
-          nodes.push(<text style={st(k5)}>  5h {bar(p.fiveHour)} {p.fiveHour}%  {p.fiveHourReset}</text>);
-          nodes.push(<text style={st(kw)}>  wk {bar(p.weekly)} {p.weekly}%  {p.weeklyReset}</text>);
+          nodes.push(<text>  5h </text>);
+          nodes.push(<text style={st("text")}>{barFill(p.fiveHour)}</text>);
+          nodes.push(<text style={st("textMuted")}>{barEmpty(p.fiveHour)}</text>);
+          nodes.push(<text> {p.fiveHour}%  {p.fiveHourReset}</text>);
+          nodes.push(<text>  wk </text>);
+          nodes.push(<text style={st("text")}>{barFill(p.weekly)}</text>);
+          nodes.push(<text style={st("textMuted")}>{barEmpty(p.weekly)}</text>);
+          nodes.push(<text> {p.weekly}%  {p.weeklyReset}</text>);
           nodes.push(<text style={st(dKey)}>  {"->"} {p.advice}</text>);
         }
       } else {
-        nodes.push(<text> 5h {bar(s.fiveHour)} {s.fiveHour}%</text>);
-        nodes.push(<text> wk {bar(s.weekly)} {s.weekly}%</text>);
-        nodes.push(<text> mo {bar(s.monthly)} {s.monthly}%</text>);
+        nodes.push(<text> 5h </text>);
+        nodes.push(<text style={st("text")}>{barFill(s.fiveHour)}</text>);
+        nodes.push(<text style={st("textMuted")}>{barEmpty(s.fiveHour)}</text>);
+        nodes.push(<text> {s.fiveHour}%</text>);
+        nodes.push(<text> wk </text>);
+        nodes.push(<text style={st("text")}>{barFill(s.weekly)}</text>);
+        nodes.push(<text style={st("textMuted")}>{barEmpty(s.weekly)}</text>);
+        nodes.push(<text> {s.weekly}%</text>);
+        nodes.push(<text> mo </text>);
+        nodes.push(<text style={st("text")}>{barFill(s.monthly)}</text>);
+        nodes.push(<text style={st("textMuted")}>{barEmpty(s.monthly)}</text>);
+        nodes.push(<text> {s.monthly}%</text>);
       }
     } else {
       nodes.push(<text>usage-coach: ...</text>);
@@ -141,8 +156,10 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         const pv = t.model ? (t.model.startsWith("zai") ? "zai" : (t.model.split("/")[0] ?? "").split("-")[0]) : "";
         const q = pv && h.quotas?.[pv] ? h.quotas[pv] : null;
         const pct = q ? q.fiveHour : 0;
-        const qKey = pct >= 70 ? "error" : pct >= 40 ? "warning" : "success";
-        nodes.push(<text style={st(qKey)}>   5h {bar(pct)} {pct}%</text>);
+        nodes.push(<text>   5h </text>);
+        nodes.push(<text style={st("text")}>{barFill(pct)}</text>);
+        nodes.push(<text style={st("textMuted")}>{barEmpty(pct)}</text>);
+        nodes.push(<text> {pct}%</text>);
       }
     }
 

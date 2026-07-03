@@ -49,9 +49,11 @@ var TLABEL = {
   timed_out: "timeout",
   halted_quota: "quota-halt"
 };
-function bar(p) {
-  const n = Math.max(0, Math.min(10, Math.round(p / 10)));
-  return "\u2588".repeat(n) + "\u2591".repeat(10 - n);
+function barFill(p) {
+  return "\u2588".repeat(Math.max(0, Math.min(10, Math.round(p / 10))));
+}
+function barEmpty(p) {
+  return "\u2591".repeat(10 - Math.max(0, Math.min(10, Math.round(p / 10))));
 }
 function short(s, n) {
   return s.length <= n ? s : s.slice(0, n - 1) + "\u2026";
@@ -154,90 +156,161 @@ function initializeTui(api, disposeRoot) {
             _$effect((_$p) => _$setProp(_el$7, "style", st("textMuted"), _$p));
             return _el$7;
           })());
-          const k5 = p.fiveHour >= 70 ? "error" : p.fiveHour >= 40 ? "warning" : "success";
-          const kw = p.weekly >= 85 ? "error" : p.weekly >= 60 ? "warning" : "success";
           nodes.push((() => {
-            var _el$9 = _$createElement("text"), _el$0 = _$createTextNode(` 5h `), _el$1 = _$createTextNode(` `), _el$10 = _$createTextNode(`% `);
-            _$insertNode(_el$9, _el$0);
-            _$insertNode(_el$9, _el$1);
-            _$insertNode(_el$9, _el$10);
-            _$insert(_el$9, () => bar(p.fiveHour), _el$1);
-            _$insert(_el$9, () => p.fiveHour, _el$10);
-            _$insert(_el$9, () => p.fiveHourReset, null);
-            _$effect((_$p) => _$setProp(_el$9, "style", st(k5), _$p));
+            var _el$9 = _$createElement("text");
+            _$insertNode(_el$9, _$createTextNode(` 5h `));
             return _el$9;
           })());
           nodes.push((() => {
-            var _el$11 = _$createElement("text"), _el$12 = _$createTextNode(` wk `), _el$13 = _$createTextNode(` `), _el$14 = _$createTextNode(`% `);
+            var _el$1 = _$createElement("text");
+            _$insert(_el$1, () => barFill(p.fiveHour));
+            _$effect((_$p) => _$setProp(_el$1, "style", st("text"), _$p));
+            return _el$1;
+          })());
+          nodes.push((() => {
+            var _el$10 = _$createElement("text");
+            _$insert(_el$10, () => barEmpty(p.fiveHour));
+            _$effect((_$p) => _$setProp(_el$10, "style", st("textMuted"), _$p));
+            return _el$10;
+          })());
+          nodes.push((() => {
+            var _el$11 = _$createElement("text"), _el$12 = _$createTextNode(` `), _el$13 = _$createTextNode(`% `);
             _$insertNode(_el$11, _el$12);
             _$insertNode(_el$11, _el$13);
-            _$insertNode(_el$11, _el$14);
-            _$insert(_el$11, () => bar(p.weekly), _el$13);
-            _$insert(_el$11, () => p.weekly, _el$14);
-            _$insert(_el$11, () => p.weeklyReset, null);
-            _$effect((_$p) => _$setProp(_el$11, "style", st(kw), _$p));
+            _$insert(_el$11, () => p.fiveHour, _el$13);
+            _$insert(_el$11, () => p.fiveHourReset, null);
             return _el$11;
           })());
           nodes.push((() => {
-            var _el$15 = _$createElement("text"), _el$16 = _$createTextNode(` -> `);
-            _$insertNode(_el$15, _el$16);
-            _$insert(_el$15, () => p.advice, null);
-            _$effect((_$p) => _$setProp(_el$15, "style", st(dKey), _$p));
-            return _el$15;
+            var _el$14 = _$createElement("text");
+            _$insertNode(_el$14, _$createTextNode(` wk `));
+            return _el$14;
+          })());
+          nodes.push((() => {
+            var _el$16 = _$createElement("text");
+            _$insert(_el$16, () => barFill(p.weekly));
+            _$effect((_$p) => _$setProp(_el$16, "style", st("text"), _$p));
+            return _el$16;
+          })());
+          nodes.push((() => {
+            var _el$17 = _$createElement("text");
+            _$insert(_el$17, () => barEmpty(p.weekly));
+            _$effect((_$p) => _$setProp(_el$17, "style", st("textMuted"), _$p));
+            return _el$17;
+          })());
+          nodes.push((() => {
+            var _el$18 = _$createElement("text"), _el$19 = _$createTextNode(` `), _el$20 = _$createTextNode(`% `);
+            _$insertNode(_el$18, _el$19);
+            _$insertNode(_el$18, _el$20);
+            _$insert(_el$18, () => p.weekly, _el$20);
+            _$insert(_el$18, () => p.weeklyReset, null);
+            return _el$18;
+          })());
+          nodes.push((() => {
+            var _el$21 = _$createElement("text"), _el$22 = _$createTextNode(` -> `);
+            _$insertNode(_el$21, _el$22);
+            _$insert(_el$21, () => p.advice, null);
+            _$effect((_$p) => _$setProp(_el$21, "style", st(dKey), _$p));
+            return _el$21;
           })());
         }
       } else {
         nodes.push((() => {
-          var _el$19 = _$createElement("text"), _el$20 = _$createTextNode(` 5h `), _el$21 = _$createTextNode(` `), _el$22 = _$createTextNode(`%`);
-          _$insertNode(_el$19, _el$20);
-          _$insertNode(_el$19, _el$21);
-          _$insertNode(_el$19, _el$22);
-          _$insert(_el$19, () => bar(s.fiveHour), _el$21);
-          _$insert(_el$19, () => s.fiveHour, _el$22);
-          return _el$19;
+          var _el$25 = _$createElement("text");
+          _$insertNode(_el$25, _$createTextNode(` 5h `));
+          return _el$25;
         })());
         nodes.push((() => {
-          var _el$23 = _$createElement("text"), _el$24 = _$createTextNode(` wk `), _el$25 = _$createTextNode(` `), _el$26 = _$createTextNode(`%`);
-          _$insertNode(_el$23, _el$24);
-          _$insertNode(_el$23, _el$25);
-          _$insertNode(_el$23, _el$26);
-          _$insert(_el$23, () => bar(s.weekly), _el$25);
-          _$insert(_el$23, () => s.weekly, _el$26);
-          return _el$23;
-        })());
-        nodes.push((() => {
-          var _el$27 = _$createElement("text"), _el$28 = _$createTextNode(` mo `), _el$29 = _$createTextNode(` `), _el$30 = _$createTextNode(`%`);
-          _$insertNode(_el$27, _el$28);
-          _$insertNode(_el$27, _el$29);
-          _$insertNode(_el$27, _el$30);
-          _$insert(_el$27, () => bar(s.monthly), _el$29);
-          _$insert(_el$27, () => s.monthly, _el$30);
+          var _el$27 = _$createElement("text");
+          _$insert(_el$27, () => barFill(s.fiveHour));
+          _$effect((_$p) => _$setProp(_el$27, "style", st("text"), _$p));
           return _el$27;
+        })());
+        nodes.push((() => {
+          var _el$28 = _$createElement("text");
+          _$insert(_el$28, () => barEmpty(s.fiveHour));
+          _$effect((_$p) => _$setProp(_el$28, "style", st("textMuted"), _$p));
+          return _el$28;
+        })());
+        nodes.push((() => {
+          var _el$29 = _$createElement("text"), _el$30 = _$createTextNode(` `), _el$31 = _$createTextNode(`%`);
+          _$insertNode(_el$29, _el$30);
+          _$insertNode(_el$29, _el$31);
+          _$insert(_el$29, () => s.fiveHour, _el$31);
+          return _el$29;
+        })());
+        nodes.push((() => {
+          var _el$32 = _$createElement("text");
+          _$insertNode(_el$32, _$createTextNode(` wk `));
+          return _el$32;
+        })());
+        nodes.push((() => {
+          var _el$34 = _$createElement("text");
+          _$insert(_el$34, () => barFill(s.weekly));
+          _$effect((_$p) => _$setProp(_el$34, "style", st("text"), _$p));
+          return _el$34;
+        })());
+        nodes.push((() => {
+          var _el$35 = _$createElement("text");
+          _$insert(_el$35, () => barEmpty(s.weekly));
+          _$effect((_$p) => _$setProp(_el$35, "style", st("textMuted"), _$p));
+          return _el$35;
+        })());
+        nodes.push((() => {
+          var _el$36 = _$createElement("text"), _el$37 = _$createTextNode(` `), _el$38 = _$createTextNode(`%`);
+          _$insertNode(_el$36, _el$37);
+          _$insertNode(_el$36, _el$38);
+          _$insert(_el$36, () => s.weekly, _el$38);
+          return _el$36;
+        })());
+        nodes.push((() => {
+          var _el$39 = _$createElement("text");
+          _$insertNode(_el$39, _$createTextNode(` mo `));
+          return _el$39;
+        })());
+        nodes.push((() => {
+          var _el$41 = _$createElement("text");
+          _$insert(_el$41, () => barFill(s.monthly));
+          _$effect((_$p) => _$setProp(_el$41, "style", st("text"), _$p));
+          return _el$41;
+        })());
+        nodes.push((() => {
+          var _el$42 = _$createElement("text");
+          _$insert(_el$42, () => barEmpty(s.monthly));
+          _$effect((_$p) => _$setProp(_el$42, "style", st("textMuted"), _$p));
+          return _el$42;
+        })());
+        nodes.push((() => {
+          var _el$43 = _$createElement("text"), _el$44 = _$createTextNode(` `), _el$45 = _$createTextNode(`%`);
+          _$insertNode(_el$43, _el$44);
+          _$insertNode(_el$43, _el$45);
+          _$insert(_el$43, () => s.monthly, _el$45);
+          return _el$43;
         })());
       }
     } else {
       nodes.push((() => {
-        var _el$31 = _$createElement("text");
-        _$insertNode(_el$31, _$createTextNode(`usage-coach: ...`));
-        return _el$31;
+        var _el$46 = _$createElement("text");
+        _$insertNode(_el$46, _$createTextNode(`usage-coach: ...`));
+        return _el$46;
       })());
     }
     if (h && h.active !== false && h.tasks.length > 0) {
       nodes.push((() => {
-        var _el$33 = _$createElement("text");
-        _$insertNode(_el$33, _$createTextNode(` `));
-        return _el$33;
+        var _el$48 = _$createElement("text");
+        _$insertNode(_el$48, _$createTextNode(` `));
+        return _el$48;
       })());
       nodes.push((() => {
-        var _el$35 = _$createElement("text"), _el$36 = _$createTextNode(`harness: `), _el$37 = _$createTextNode(` `), _el$38 = _$createTextNode(`/`);
-        _$insertNode(_el$35, _el$36);
-        _$insertNode(_el$35, _el$37);
-        _$insertNode(_el$35, _el$38);
-        _$insert(_el$35, () => h.name, _el$37);
-        _$insert(_el$35, () => h.current, _el$38);
-        _$insert(_el$35, () => h.total, null);
-        _$effect((_$p) => _$setProp(_el$35, "style", st("textMuted"), _$p));
-        return _el$35;
+        var _el$50 = _$createElement("text"), _el$51 = _$createTextNode(`harness: `), _el$52 = _$createTextNode(` `), _el$53 = _$createTextNode(`/`);
+        _$insertNode(_el$50, _el$51);
+        _$insertNode(_el$50, _el$52);
+        _$insertNode(_el$50, _el$53);
+        _$insert(_el$50, () => h.name, _el$52);
+        _$insert(_el$50, () => h.current, _el$53);
+        _$insert(_el$50, () => h.total, null);
+        _$effect((_$p) => _$setProp(_el$50, "style", st("textMuted"), _$p));
+        return _el$50;
       })());
       for (const t of h.tasks) {
         const sKey = statusKey[t.status] ?? "text";
@@ -245,39 +318,52 @@ function initializeTui(api, disposeRoot) {
         const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
         const mdl = t.model ? ` ${t.model.split("/").pop() ?? t.model}` : "";
         nodes.push((() => {
-          var _el$39 = _$createElement("text"), _el$40 = _$createTextNode(` \u25CF `), _el$41 = _$createTextNode(` `), _el$42 = _$createTextNode(` `);
-          _$insertNode(_el$39, _el$40);
-          _$insertNode(_el$39, _el$41);
-          _$insertNode(_el$39, _el$42);
-          _$insert(_el$39, () => t.id, _el$41);
-          _$insert(_el$39, mdl, _el$41);
-          _$insert(_el$39, lbl, _el$42);
-          _$insert(_el$39, rev, _el$42);
-          _$insert(_el$39, () => short(t.title, 12), null);
-          _$effect((_$p) => _$setProp(_el$39, "style", st(sKey), _$p));
-          return _el$39;
+          var _el$54 = _$createElement("text"), _el$55 = _$createTextNode(` \u25CF `), _el$56 = _$createTextNode(` `), _el$57 = _$createTextNode(` `);
+          _$insertNode(_el$54, _el$55);
+          _$insertNode(_el$54, _el$56);
+          _$insertNode(_el$54, _el$57);
+          _$insert(_el$54, () => t.id, _el$56);
+          _$insert(_el$54, mdl, _el$56);
+          _$insert(_el$54, lbl, _el$57);
+          _$insert(_el$54, rev, _el$57);
+          _$insert(_el$54, () => short(t.title, 12), null);
+          _$effect((_$p) => _$setProp(_el$54, "style", st(sKey), _$p));
+          return _el$54;
         })());
         const pv = t.model ? t.model.startsWith("zai") ? "zai" : (t.model.split("/")[0] ?? "").split("-")[0] : "";
         const q = pv && h.quotas?.[pv] ? h.quotas[pv] : null;
         const pct = q ? q.fiveHour : 0;
-        const qKey = pct >= 70 ? "error" : pct >= 40 ? "warning" : "success";
         nodes.push((() => {
-          var _el$43 = _$createElement("text"), _el$44 = _$createTextNode(` 5h `), _el$45 = _$createTextNode(` `), _el$46 = _$createTextNode(`%`);
-          _$insertNode(_el$43, _el$44);
-          _$insertNode(_el$43, _el$45);
-          _$insertNode(_el$43, _el$46);
-          _$insert(_el$43, () => bar(pct), _el$45);
-          _$insert(_el$43, pct, _el$46);
-          _$effect((_$p) => _$setProp(_el$43, "style", st(qKey), _$p));
-          return _el$43;
+          var _el$58 = _$createElement("text");
+          _$insertNode(_el$58, _$createTextNode(` 5h `));
+          return _el$58;
+        })());
+        nodes.push((() => {
+          var _el$60 = _$createElement("text");
+          _$insert(_el$60, () => barFill(pct));
+          _$effect((_$p) => _$setProp(_el$60, "style", st("text"), _$p));
+          return _el$60;
+        })());
+        nodes.push((() => {
+          var _el$61 = _$createElement("text");
+          _$insert(_el$61, () => barEmpty(pct));
+          _$effect((_$p) => _$setProp(_el$61, "style", st("textMuted"), _$p));
+          return _el$61;
+        })());
+        nodes.push((() => {
+          var _el$62 = _$createElement("text"), _el$63 = _$createTextNode(` `), _el$64 = _$createTextNode(`%`);
+          _$insertNode(_el$62, _el$63);
+          _$insertNode(_el$62, _el$64);
+          _$insert(_el$62, pct, _el$64);
+          return _el$62;
         })());
       }
     }
     return (() => {
-      var _el$47 = _$createElement("box");
-      _$setProp(_el$47, "flexDirection", "column");
-      _$insert(_el$47, nodes);
-      return _el$47;
+      var _el$65 = _$createElement("box");
+      _$setProp(_el$65, "flexDirection", "column");
+      _$insert(_el$65, nodes);
+      return _el$65;
     })();
   };
   api.slots.register({
@@ -288,9 +374,9 @@ function initializeTui(api, disposeRoot) {
           return panel(ctx);
         } catch {
           return (() => {
-            var _el$48 = _$createElement("text");
-            _$insertNode(_el$48, _$createTextNode(`usage-coach`));
-            return _el$48;
+            var _el$66 = _$createElement("text");
+            _$insertNode(_el$66, _$createTextNode(`usage-coach`));
+            return _el$66;
           })();
         }
       },
@@ -299,9 +385,9 @@ function initializeTui(api, disposeRoot) {
           return panel(ctx);
         } catch {
           return (() => {
-            var _el$50 = _$createElement("text");
-            _$insertNode(_el$50, _$createTextNode(`usage-coach`));
-            return _el$50;
+            var _el$68 = _$createElement("text");
+            _$insertNode(_el$68, _$createTextNode(`usage-coach`));
+            return _el$68;
           })();
         }
       }

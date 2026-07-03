@@ -1,6 +1,6 @@
 {
   "name": "opencode-usage-coach",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "opencode closed-loop usage coach \u2014 quota SENSE -> coaching DECIDE -> loop ACT + TUI integration",
   "type": "module",
   "main": "./dist/index.js",
