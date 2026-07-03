@@ -1,0 +1,13 @@
+[
+  {
+    "provider": "zai",
+    "source": "api",
+    "usage": {
+      "primary":   { "resetDescription": "1 week window", "usedPercent": 10, "windowMinutes": 10080, "resetsAt": "2026-07-08T10:46:01Z" },
+      "secondary": { "resetDescription": "Monthly",       "usedPercent": 0,  "resetsAt": "2026-07-10T10:46:01Z" },
+      "tertiary":  { "resetDescription": "5 hours window","usedPercent": 1,  "windowMinutes": 300, "resetsAt": "2026-07-02T05:30:41Z" },
+      "updatedAt": "2026-07-02T04:27:10Z",
+      "identity":  { "providerID": "zai" }
+    }
+  }
+]
