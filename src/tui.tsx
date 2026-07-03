@@ -115,29 +115,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
       if (s.providers && s.providers.length > 0) {
         for (const p of s.providers) {
           nodes.push(<text style={st("textMuted")}> {p.name}</text>);
-          nodes.push(<text>  5h </text>);
-          nodes.push(<text style={st("text")}>{barFill(p.fiveHour)}</text>);
-          nodes.push(<text style={st("textMuted")}>{barEmpty(p.fiveHour)}</text>);
-          nodes.push(<text> {p.fiveHour}%  {p.fiveHourReset}</text>);
-          nodes.push(<text>  wk </text>);
-          nodes.push(<text style={st("text")}>{barFill(p.weekly)}</text>);
-          nodes.push(<text style={st("textMuted")}>{barEmpty(p.weekly)}</text>);
-          nodes.push(<text> {p.weekly}%  {p.weeklyReset}</text>);
+          nodes.push(<box flexDirection="row"><text>  5h </text><text style={st("text")}>{barFill(p.fiveHour)}</text><text style={st("textMuted")}>{barEmpty(p.fiveHour)}</text><text> {p.fiveHour}%  {p.fiveHourReset}</text></box>);
+          nodes.push(<box flexDirection="row"><text>  wk </text><text style={st("text")}>{barFill(p.weekly)}</text><text style={st("textMuted")}>{barEmpty(p.weekly)}</text><text> {p.weekly}%  {p.weeklyReset}</text></box>);
           nodes.push(<text style={st(dKey)}>  {"->"} {p.advice}</text>);
         }
       } else {
-        nodes.push(<text> 5h </text>);
-        nodes.push(<text style={st("text")}>{barFill(s.fiveHour)}</text>);
-        nodes.push(<text style={st("textMuted")}>{barEmpty(s.fiveHour)}</text>);
-        nodes.push(<text> {s.fiveHour}%</text>);
-        nodes.push(<text> wk </text>);
-        nodes.push(<text style={st("text")}>{barFill(s.weekly)}</text>);
-        nodes.push(<text style={st("textMuted")}>{barEmpty(s.weekly)}</text>);
-        nodes.push(<text> {s.weekly}%</text>);
-        nodes.push(<text> mo </text>);
-        nodes.push(<text style={st("text")}>{barFill(s.monthly)}</text>);
-        nodes.push(<text style={st("textMuted")}>{barEmpty(s.monthly)}</text>);
-        nodes.push(<text> {s.monthly}%</text>);
+        nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("textMuted")}>{barEmpty(s.fiveHour)}</text><text> {s.fiveHour}%</text></box>);
+        nodes.push(<box flexDirection="row"><text> wk </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("textMuted")}>{barEmpty(s.weekly)}</text><text> {s.weekly}%</text></box>);
+        nodes.push(<box flexDirection="row"><text> mo </text><text style={st("text")}>{barFill(s.monthly)}</text><text style={st("textMuted")}>{barEmpty(s.monthly)}</text><text> {s.monthly}%</text></box>);
       }
     } else {
       nodes.push(<text>usage-coach: ...</text>);
@@ -156,10 +141,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         const pv = t.model ? (t.model.startsWith("zai") ? "zai" : (t.model.split("/")[0] ?? "").split("-")[0]) : "";
         const q = pv && h.quotas?.[pv] ? h.quotas[pv] : null;
         const pct = q ? q.fiveHour : 0;
-        nodes.push(<text>   5h </text>);
-        nodes.push(<text style={st("text")}>{barFill(pct)}</text>);
-        nodes.push(<text style={st("textMuted")}>{barEmpty(pct)}</text>);
-        nodes.push(<text> {pct}%</text>);
+        nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("textMuted")}>{barEmpty(pct)}</text><text> {pct}%</text></box>);
       }
     }
 
