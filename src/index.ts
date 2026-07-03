@@ -58,6 +58,38 @@ function writeHarness(h: HarnessJson) {
   try { mkdirSync(STATE_DIR, { recursive: true }); h.updatedAt = new Date().toISOString(); writeFileSync(HARNESS_FILE, JSON.stringify(h, null, 2)); } catch { /* */ }
 }
 
+// Read harness role models from config (workdir > global). Used by generate/grade tools.
+type HarnessCfg = { generator?: string; grader?: string };
+function readHarnessCfg(dir: string): HarnessCfg {
+  const tryRead = (p: string): HarnessCfg => {
+    try { if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8")); } catch { /* */ }
+    return {};
+  };
+  return { ...tryRead(join(homedir(), ".config", "opencode-usage-coach", "harness.config.json")),
+           ...tryRead(join(dir, "harness.config.json")) };
+}
+
+// Run a specific model in a NEW session on the SAME server (no deadlock), return its text response.
+// This lets the harness agent use per-role models (generator/grader) in 1 terminal.
+async function runModel(client: any, model: string, prompt: string, directory: string): Promise<string | null> {
+  try {
+    const slash = model.indexOf("/");
+    const providerID = slash >= 0 ? model.slice(0, slash) : model;
+    const modelID = slash >= 0 ? model.slice(slash + 1) : "";
+    const s: any = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
+    const id = s?.data?.info?.id;
+    if (!id) return null;
+    const r: any = await client.session.prompt({
+      path: { id },
+      body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] },
+    });
+    const parts: any[] = r?.data?.parts ?? [];
+    const text = parts.filter((p) => p?.type === "text").map((p) => p?.text ?? "").join("");
+    try { await client.session.remove?.({ path: { id } }); } catch { /* */ }
+    return text.trim() || null;
+  } catch (e) { log(`runModel err (${model}): ${String(e)}`); return null; }
+}
+
 const PROVIDER = process.env.UC_PROVIDER ?? "zai";
 const num = (e: string, d: number) => { try { const v = Number(process.env[e]); return Number.isFinite(v) && v >= 0 ? v : d; } catch { return d; } };
 const STOP_5H = num("UC_STOP_5H", 92), THR_5H = num("UC_THROTTLE_5H", 70);
@@ -277,6 +309,28 @@ export default async function UsageCoachPlugin(input: {
             const h = readHarness();
             if (h) { h.current = h.total; writeHarness(h); }
             return "Harness complete.";
+          },
+        }),
+        // Per-role model execution (config-driven). Runs a NEW session with the configured model
+        // on the same server — enables multi-model (e.g. GLM generate + free mimo grade) in 1 terminal.
+        generate: tool({
+          description: "Run the GENERATOR model (from harness.config.json) on a prompt. Returns the model's text response. The generator can use tools (write/edit files) in the directory. Use for the 'do the work' step.",
+          args: { prompt: tool.schema.string() },
+          async execute(args: { prompt: string }, ctx: any) {
+            const cfg = readHarnessCfg(ctx.directory);
+            const model = cfg.generator ?? "zai-coding-plan/glm-5.1";
+            const out = await runModel(input.client, model, args.prompt, ctx.directory);
+            return out ?? `(generator ${model} produced no text)`;
+          },
+        }),
+        grade: tool({
+          description: "Run the GRADER model (from harness.config.json) on a prompt. Returns the model's text response (expect PASS/FAIL on the first line). Use for the 'evaluate the result' step. Falls back to the generator if the grader has no quota.",
+          args: { prompt: tool.schema.string() },
+          async execute(args: { prompt: string }, ctx: any) {
+            const cfg = readHarnessCfg(ctx.directory);
+            const model = cfg.grader ?? cfg.generator ?? "opencode/mimo-v2.5-free";
+            const out = await runModel(input.client, model, args.prompt, ctx.directory);
+            return out ?? `(grader ${model} produced no text)`;
           },
         }),
       },

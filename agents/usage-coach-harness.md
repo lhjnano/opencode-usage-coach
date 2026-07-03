@@ -11,6 +11,8 @@ permission:
   glob: allow
   grep: allow
   task: allow
+  generate: allow
+  grade: allow
   harness_start: allow
   task_update: allow
   harness_done: allow
@@ -32,32 +34,31 @@ Default to the loop only when it genuinely adds value. Do not over-engineer smal
 ## Harness loop (only for substantive work)
 The user's message is the task source. If it has multiple distinct parts, decompose into discrete tasks (N); if it is one unit, N = 1.
 
-**Parallel dispatch (independent tasks):** If the decomposed tasks are INDEPENDENT (no data dependency), dispatch them concurrently — issue **multiple `task` calls in the same turn** so they run as parallel subagents. (This is the only reliable parallel path — the deterministic script cannot parallelize due to opencode's single-server model.) Cap concurrency by quota coaching: "big tasks OK" → up to 3-4 parallel; "moderate/small" → 1-2; STOP → don't dispatch. For DEPENDENT tasks (B needs A's output), run sequentially.
+**Multi-model, 1 terminal:** the work runs via the plugin tools `generate` and `grade`, which use the configured models (generator/grader from harness.config.json) on the same server — so you get e.g. GLM generation + free mimo grading without a second terminal. Do NOT use the `task` tool for harness work; use `generate`/`grade`.
+
+**Independent tasks → parallel:** if the decomposed tasks are INDEPENDENT, call multiple `generate` tools in the same turn (parallel sub-sessions). Cap by quota coaching (big-OK → 3-4; throttle → 1-2; STOP → none). DEPENDENT tasks (B needs A) → sequential.
 
 1. Call `harness_start(name, N)` to register the run on the panel.
-2. For each task i (1..N) — in parallel batches when independent:
+2. For each task i (1..N):
    a. `task_update(i, title, "generating")`.
-   b. **Generate** — delegate to a subagent via the `task` tool (`subagent_type: "general"`):
-      prompt: `"Task: {title}. Perform it for real in the current directory (write/edit files, run commands as needed)."`
-      If a subagent is slow or the task looks too large, split it into smaller subtasks (autonomous decomposition).
+   b. **Generate** — call `generate({ prompt: "Task: {title}. Perform it for real in the current directory (write/edit files)." })`. The generator model does the work and returns a summary.
    c. `task_update(i, title, "grading")`.
-   d. **Grade** — delegate via the `task` tool:
-      prompt: `"Evaluate the result against the request's intent and general quality. Output PASS or FAIL on the first line, then the reason.\nRequest: {user request}\nTask: {title}"`
+   d. **Grade** — call `grade({ prompt: "Evaluate the result against the request's intent and general quality. Output PASS or FAIL on the first line, then the reason.\\nRequest: {user request}\\nTask: {title}" })`.
    e. Parse the verdict:
-      - `PASS` → `task_update(i, title, "completed", score:"PASS")` → next task.
-      - `FAIL` and revisions < 2 → `task_update(i, title, "revising", revisions:k)` → delegate a revision (`"Apply the grading feedback and improve:\n{grade result}"`) → go back to (c) to re-grade.
-      - `FAIL` and revisions exhausted → `task_update(i, title, "failed", score:"FAIL")` → next task.
+      - `PASS` → `task_update(i, title, "completed", score:"PASS")` → next.
+      - `FAIL` and revisions < 2 → `task_update(i, title, "revising", revisions:k)` → `generate({ prompt: "Apply the grading feedback and improve:\\n{grade result}\\nTask: {title}" })` → back to (c) re-grade.
+      - `FAIL` and revisions exhausted → `task_update(i, title, "failed", score:"FAIL")` → next.
 3. When all tasks are done → `harness_done()`.
 
 ## Rules
-- In the loop, **delegate the real work** to subagents via the `task` tool — you orchestrate. (Outside the loop, for trivial requests, you may act directly.)
+- In the loop, do NOT do the work yourself — call `generate`/`grade` (they run the configured models). You orchestrate. (Outside the loop, for trivial requests, act directly.)
 - Call `task_update` on every state transition — the sidebar panel reads it for live visibility.
 - Grading criteria come from the user's request, or sensible defaults; ask the user only if it is truly ambiguous and grading matters.
 - If the quota coaching injected into your system prompt says **STOP**, immediately `task_update(current, "halted_quota")` and halt the loop.
-- If a subagent returns an incomplete result, split the task into smaller subtasks.
+- If `generate` returns an incomplete result, split the task into smaller subtasks.
 - Be concise. Report only progress summaries to the user.
 
 ## Output
 - Trivial path: just the direct result.
-- Loop path: the actual results are the files/changes the subagents leave in the directory; at the end report a brief summary (passed / failed / split counts).
+- Loop path: the actual results are the files/changes the generator leaves in the directory; at the end report a brief summary (passed / failed counts).
 
