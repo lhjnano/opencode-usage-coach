@@ -243,15 +243,24 @@ async function main() {
       return { split: subs, halt: false };
     }
 
+    // pick grader: GRADER if its quota is fine, else fall back to GENERATOR; null if both out.
+    const pickGrader = async (): Promise<string | null> => {
+      if (!(await quotaStop(codexbarProvider(GRADER)))) return GRADER;
+      if (!(await quotaStop(codexbarProvider(GENERATOR)))) { console.log(`! grader quota out -> grading with generator [${GENERATOR}]`); return GENERATOR; }
+      return null;
+    };
+
     for (let rev = 0; rev <= maxRev; rev++) {
       task.status = rev === 0 ? "grading" : "revising"; task.revisions = rev;
-      task.model = rev === 0 ? GRADER : GENERATOR; writeState(state);
-      console.log(`> task ${t.id} ${rev === 0 ? "grading" : `revise(${rev})`} [${task.model}]`);
+      const gm = await pickGrader();
+      if (!gm) { task.status = "halted_grade"; task.note = "generator & grader quota both out"; writeState(state); console.log(`!! task ${t.id} cannot grade (both quotas out)`); return { split: [], halt: true }; }
+      task.model = gm; writeState(state);
+      console.log(`> task ${t.id} ${rev === 0 ? "grading" : `revise(${rev}) re-grade`} [${gm}]`);
       const grade = await runOc(
         `Grade the directory's result against the rubric below.\n${rubric}\nTask to evaluate: ${t.title}\nOutput PASS or FAIL on the first line, and the reason on the second line.`,
-        dir, GRADER, GRADE_TIMEOUT_MS,
+        dir, gm, GRADE_TIMEOUT_MS,
       );
-      trackUsage(GRADER, grade.tokens);
+      trackUsage(gm, grade.tokens);
       const pass = /^\s*PASS\b/im.test(grade.text ?? "");
       task.score = pass ? "PASS" : "FAIL";
       writeState(state);
