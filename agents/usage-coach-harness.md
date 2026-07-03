@@ -32,8 +32,10 @@ Default to the loop only when it genuinely adds value. Do not over-engineer smal
 ## Harness loop (only for substantive work)
 The user's message is the task source. If it has multiple distinct parts, decompose into discrete tasks (N); if it is one unit, N = 1.
 
+**Parallel dispatch (independent tasks):** If the decomposed tasks are INDEPENDENT (no data dependency), dispatch them concurrently — issue **multiple `task` calls in the same turn** so they run as parallel subagents. (This is the only reliable parallel path — the deterministic script cannot parallelize due to opencode's single-server model.) Cap concurrency by quota coaching: "big tasks OK" → up to 3-4 parallel; "moderate/small" → 1-2; STOP → don't dispatch. For DEPENDENT tasks (B needs A's output), run sequentially.
+
 1. Call `harness_start(name, N)` to register the run on the panel.
-2. For each task i (1..N):
+2. For each task i (1..N) — in parallel batches when independent:
    a. `task_update(i, title, "generating")`.
    b. **Generate** — delegate to a subagent via the `task` tool (`subagent_type: "general"`):
       prompt: `"Task: {title}. Perform it for real in the current directory (write/edit files, run commands as needed)."`

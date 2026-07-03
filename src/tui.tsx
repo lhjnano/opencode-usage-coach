@@ -73,16 +73,33 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
   onCleanup(() => clearInterval(timer));
   onCleanup(() => disposeRoot());
 
+  // Toggle (collapsible) via command + keybind (Alt+H). MCP-style collapsible section.
+  const [collapsed, setCollapsed] = createSignal(false);
+  let cmdDispose: (() => void) | undefined;
+  try {
+    cmdDispose = api.command?.register?.(() => [{
+      title: "Toggle usage-coach panel",
+      value: "usage-coach-toggle",
+      category: "usage-coach",
+      keybind: "alt+h",
+      onSelect: () => { setCollapsed((c) => !c); },
+    }]) as (() => void) | undefined;
+  } catch { /* command API unavailable — toggle disabled */ }
+  onCleanup(() => { try { cmdDispose?.(); } catch { /* */ } });
+
   // status -> theme color key (MCP-style colored dot ●)
   const statusKey: Record<string, string> = {
     generating: "info", grading: "accent", revising: "warning",
     completed: "success", failed: "error", timed_out: "error", halted_quota: "error",
   };
 
-  // panel(ctx) — one line per item. Color via style.foreground using theme (opentui convention).
+  // panel(ctx) — one line per item. Color via style.fg using theme (opentui convention).
   const panel = (ctx: TuiSlotContext & { session_id?: string }) => {
     const th = (ctx.theme?.current ?? {}) as Record<string, any>;
     const st = (k: string) => ({ fg: th[k] });
+    if (collapsed()) {
+      return (<box><text style={st("textMuted")}>usage-coach (hidden — Alt+H)</text></box>);
+    }
     let s: State | null = null;
     try { s = getState(); } catch { s = null; }
     let h: HarnessState | null = null;
