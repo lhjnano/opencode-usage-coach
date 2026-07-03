@@ -30,7 +30,6 @@ let HARNESS_FILE = join(STATE_DIR, "harness.json");
 const TIMEOUT_MS = Number(process.env.UC_TASK_TIMEOUT_MS ?? 1800000);
 const GRADE_TIMEOUT_MS = Number(process.env.UC_GRADE_TIMEOUT_MS ?? 180000);
 const MAX_REVISIONS = Number(process.env.UC_MAX_REVISIONS ?? 2);
-const MODEL = process.env.UC_MODEL ?? "zai-coding-plan/glm-5.1";
 
 type TaskState = {
   id: number; title: string; status: string;
@@ -80,15 +79,17 @@ function runOc(prompt: string, dir: string, model: string, timeoutMs: number): P
 }
 
 /** quota gate: returns true (halt) if codexbar zai is at STOP threshold. */
-function quotaStop(): Promise<boolean> {
+/** quota gate: true (halt) if the given provider's 5h/weekly is at STOP. Free/local providers with no quota -> never halts. */
+function quotaStop(provider: string): Promise<boolean> {
   return new Promise((resolve) => {
     let out = "";
-    const p = spawn("codexbar", ["usage", "--provider", "zai", "--json"], { stdio: ["ignore", "pipe", "ignore"] });
+    const p = spawn("codexbar", ["usage", "--provider", provider, "--json"], { stdio: ["ignore", "pipe", "ignore"] });
     p.stdout.on("data", (d) => { out += d.toString(); });
     p.on("error", () => resolve(false));
     p.on("close", () => {
       try {
         const u = JSON.parse(out)[0]?.usage;
+        if (!u) return resolve(false); // no quota for this provider (e.g. free/local) -> never halt
         const s5h = Number(process.env.UC_STOP_5H ?? 92), swk = Number(process.env.UC_STOP_WEEKLY ?? 95);
         if ((u?.tertiary?.usedPercent ?? 0) >= s5h) return resolve(true);
         if ((u?.primary?.usedPercent ?? 0) >= swk) return resolve(true);
@@ -139,14 +140,18 @@ function parseTasks(file: string): { id: number; title: string }[] {
   });
 }
 
-/** Role -> model config from harness.config.json in the workdir. */
+/** Role -> model config. Lookup order: workdir harness.config.json > global ~/.config/opencode-usage-coach/harness.config.json > defaults. */
 type HarnessConfig = { generator?: string; grader?: string; taskTimeoutMs?: number; maxRevisions?: number; parallel?: number };
+// Models come ONLY from config (workdir harness.config.json > global ~/.config/opencode-usage-coach/harness.config.json).
+// No hardcoded model defaults — see harness.config.example.json for the reference defaults.
 function loadConfig(dir: string): HarnessConfig {
-  try {
-    const p = join(dir, "harness.config.json");
-    if (!existsSync(p)) return {};
-    return JSON.parse(readFileSync(p, "utf8")) as HarnessConfig;
-  } catch { return {}; }
+  const tryRead = (p: string): HarnessConfig => {
+    try { if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8")) as HarnessConfig; } catch { /* */ }
+    return {};
+  };
+  const globalCfg = tryRead(join(homedir(), ".config", "opencode-usage-coach", "harness.config.json"));
+  const dirCfg = tryRead(join(dir, "harness.config.json"));
+  return { ...globalCfg, ...dirCfg }; // workdir overrides global
 }
 
 /** P3: split a timed-out task into smaller subtasks. */
@@ -176,10 +181,14 @@ async function main() {
   const rubric = readFileSync(rubricFile, "utf8");
   const tasks = parseTasks(tasksFile);
 
-  // Role-based models from harness.config.json (fallback to UC_MODEL). Per-model usage is tracked.
+  // Role-based models — from config ONLY (workdir > global). No code defaults.
   const cfg = loadConfig(dir);
-  const GENERATOR = cfg.generator ?? MODEL;
-  const GRADER = cfg.grader ?? MODEL;
+  if (!cfg.generator || !cfg.grader) {
+    console.error("harness: generator/grader missing. Set them in ./harness.config.json or ~/.config/opencode-usage-coach/harness.config.json (see harness.config.example.json).");
+    process.exit(1);
+  }
+  const GENERATOR = cfg.generator;
+  const GRADER = cfg.grader;
   const taskTimeout = cfg.taskTimeoutMs ?? TIMEOUT_MS;
   const maxRev = cfg.maxRevisions ?? MAX_REVISIONS;
   console.log(`models: generator=${GENERATOR} grader=${GRADER}`);
@@ -213,7 +222,7 @@ async function main() {
     state.current = finished;
     writeState(state);
 
-    if (await quotaStop()) {
+    if (await quotaStop(codexbarProvider(GENERATOR))) {
       task.status = "halted_quota"; task.note = "quota STOP"; writeState(state);
       console.log(`quota STOP @ task ${t.id}`); return { split: [], halt: true };
     }

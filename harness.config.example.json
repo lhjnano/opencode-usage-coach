@@ -1,7 +1,7 @@
 {
-  "_comment": "Harness role -> model config. Each role runs on its specified model, so usage is tracked per model (works for local LLMs too). Missing roles fall back to UC_MODEL env.",
-  "generator": "zai-coding-plan/glm-5.1",
-  "grader": "zai-coding-plan/glm-5.1",
+  "_comment": "Harness role -> model config. Defaults: generator=deepseek-v4-flash-free, grader=mimo-v2.5-free (both free). Override per-workdir or in ~/.config/opencode-usage-coach/harness.config.json. Free models have no quota -> never gated.",
+  "generator": "opencode/deepseek-v4-flash-free",
+  "grader": "opencode/mimo-v2.5-free",
   "parallel": 1,
   "taskTimeoutMs": 1800000,
   "maxRevisions": 2
