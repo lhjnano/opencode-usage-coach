@@ -13,15 +13,16 @@ the loop** — and ships a harness agent mode + a deterministic orchestrator.
 - Senses z.ai quota windows via the `codexbar` CLI.
 - On STOP threshold: blocks tool calls (`tool.execute.before` throws) → the agent self-stops.
 - Injects coaching (how to use right now) into the system prompt (double defense).
-- Surfaces a sidebar panel: quota meters + harness task states + per-model token usage.
+- Surfaces a sidebar panel: per-provider quota meters + harness task states + coaching.
 - Defensive: any plugin error never breaks opencode.
 
-**Harness (two ways):**
-- **Agent mode** (`usage-coach-harness`): triages each request — trivial → do directly;
-  unclear → clarify; substantive → generate(delegate)→grade(delegate)→revise→advance.
-  Conversation-driven, no file required. Adaptive (best-effort).
-- **Deterministic script** (`harness.ts`): `tasks.txt` + `rubric.md` → guaranteed loop.
-  Reliable for batch jobs. Tracks per-model tokens, auto-splits on timeout.
+**Harness (agent mode, 1 terminal):**
+- The `usage-coach-harness` agent triages each request — trivial → do directly;
+  unclear → clarify; substantive → generate→grade→revise→advance.
+- Multi-model via plugin tools `generate`/`grade`: run the configured generator/grader model
+  (from `harness.config.json`) in a new session on the same server — no second terminal.
+  e.g. GLM generation + free mimo grading in one opencode session.
+- Reports progress via `task_update` → the sidebar panel shows live task states.
 
 ## Requirements
 - opencode (tested on 1.17.13) with a z.ai coding-plan provider configured.
@@ -118,8 +119,8 @@ opencode's bundled solid); TUI plugins must be compiled + loaded via `tui.json` 
 `codexbar` must be called via `spawn` (the `$` BunShell leaks output to the TUI).
 
 ## Status
-- ✅ M0–M2 quota guardian + TUI panel
-- ✅ M3 harness: agent mode (triage) + deterministic script (per-model tokens, auto-split)
-- ⏳ M4 npm packaging
+- ✅ M0–M2 quota guardian + TUI panel (per-provider coach view, colors, collapsible Alt+H)
+- ✅ M3 harness: agent mode (triage) with generate/grade model-specific tools (1 terminal, multi-model)
+- ✅ M4 npm packaging (`opencode plugin install opencode-usage-coach`)
 
 License: MIT.

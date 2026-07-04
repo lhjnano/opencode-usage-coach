@@ -152,7 +152,6 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     order: 80,
     slots: {
       sidebar_footer(ctx: TuiSlotContext & { session_id?: string }) { try { return panel(ctx); } catch { return <text>usage-coach</text>; } },
-      home_footer(ctx: TuiSlotContext & { session_id?: string }) { try { return panel(ctx); } catch { return <text>usage-coach</text>; } },
     },
   });
 }

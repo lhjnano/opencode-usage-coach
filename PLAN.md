@@ -160,8 +160,16 @@
 - [ ] 🟡 시각 검증: 대화형 `opencode` 사이드바 하단 패널 — 사용자 확인 필요(헤드리스 TTY 불가).
 - **완료 기준(빌드/런타임)**: ✅. 시각: 보류.
 
-### M3 — 서브에이전트 하네스 (표적 경험의 완성)
-- [ ] "생성 → 채점(rubric) → 합격 시 다음 작업" 폐루프 커맨드(`/run-loop` 또는 스크립트).
+### M3 — 서브에이전트 하네스 ✅ (에이전트 모드 + generate/grade 툴)
+- [x] "생성 → 채점 → 합격 시 다음 작업" 폐루프 — **generate/grade 커스텀 툴**(config의 generator/grader 모델을 같은 서버에서 session.create+prompt 로 실행). 1-터미널 다중모델.
+- [x] harness_start/task_update/harness_done 툴로 패널 가시화.
+- [x] 스크립트(harness.ts)는 버림 — 에이전트 모드가 유일한 경로.
+- [x] 트리지(사소함/불명확/본질적) + quota 코칭 자기정지 + grader 폴백.
+- [ ] 🟡 런타임 검증: generate/grade 툴 + 에이전트가 실제로 루프를 도는지(대화형이라 개발환경에서 못 봄).
+
+### M4 — 패키징 / 배포 ✅
+- [x] npm: opencode-usage-coach@0.2.0 (peer + external solid, tsup prepack)
+- [x] GitHub: github.com/lhjnano/opencode-usage-coach
 - [ ] 활성 서브에이전트 표시: **어떤 모델 + 어떤 작업 + 상태**(M2와 통합). "작업"은 서브에이전트 task 본문/요약에서 추출(Q4).
 - [ ] 채점 합격/불합격 분기 → 다음 작업 진행 / 개선 재시도.
 - **완료 기준**: 사용자가 작업 목록 + rubric을 주면 자동으로 생성-채점-진행 하며 quota 위반 시 자기 정지.

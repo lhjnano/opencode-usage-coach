@@ -379,17 +379,6 @@ function initializeTui(api, disposeRoot) {
             return _el$72;
           })();
         }
-      },
-      home_footer(ctx) {
-        try {
-          return panel(ctx);
-        } catch {
-          return (() => {
-            var _el$74 = _$createElement("text");
-            _$insertNode(_el$74, _$createTextNode(`usage-coach`));
-            return _el$74;
-          })();
-        }
       }
     }
   });
