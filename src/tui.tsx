@@ -96,6 +96,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
   };
 
   // panel(ctx) — one line per item. Color via style.fg using theme (opentui convention).
+  // Harness is read per-SESSION (ctx.session_id), so each session sees only its own harness.
   const panel = (ctx: TuiSlotContext & { session_id?: string }) => {
     const th = (ctx.theme?.current ?? {}) as Record<string, any>;
     const st = (k: string) => ({ fg: th[k] });
@@ -104,8 +105,15 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     }
     let s: State | null = null;
     try { s = getState(); } catch { s = null; }
+    // read harness from this SESSION's path (per-session isolation)
     let h: HarnessState | null = null;
-    try { h = getHarness(); } catch { h = null; }
+    try {
+      const sid = ctx.session_id ?? "";
+      if (sid) {
+        const hf = join(STATE_DIR, sid, "harness.json");
+        if (existsSync(hf)) h = JSON.parse(readFileSync(hf, "utf8")) as HarnessState;
+      }
+    } catch { h = null; }
 
     const nodes: any[] = [];
     if (s) {

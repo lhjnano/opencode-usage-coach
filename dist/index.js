@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } fr
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { homedir } from "os";
-import { join, resolve } from "path";
+import { join, resolve, dirname } from "path";
 import { tool } from "@opencode-ai/plugin";
 var PLUGIN_NAME = "opencode-usage-coach";
 var DEBUG = process.env.UC_DEBUG === "1";
@@ -38,19 +38,24 @@ function writeState(c) {
   } catch {
   }
 }
-function readHarness() {
+function harnessFile(sessionID) {
+  return join(STATE_DIR, sessionID || "_default", "harness.json");
+}
+function readHarness(sessionID) {
   try {
-    if (!existsSync(HARNESS_FILE)) return null;
-    return JSON.parse(readFileSync(HARNESS_FILE, "utf8"));
+    const f = harnessFile(sessionID);
+    if (!existsSync(f)) return null;
+    return JSON.parse(readFileSync(f, "utf8"));
   } catch {
     return null;
   }
 }
-function writeHarness(h) {
+function writeHarness(sessionID, h) {
   try {
-    mkdirSync(STATE_DIR, { recursive: true });
+    const f = harnessFile(sessionID);
+    mkdirSync(dirname(f), { recursive: true });
     h.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    writeFileSync(HARNESS_FILE, JSON.stringify(h, null, 2));
+    writeFileSync(f, JSON.stringify(h, null, 2));
   } catch {
   }
 }
@@ -298,8 +303,8 @@ async function UsageCoachPlugin(input) {
         harness_start: tool({
           description: "Start the harness: register the total task count on the panel. Call once when the harness loop begins.",
           args: { name: tool.schema.string(), total: tool.schema.number() },
-          async execute(args) {
-            writeHarness({ name: args.name, total: args.total, current: 0, tasks: [], usage: {}, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
+          async execute(args, ctx) {
+            writeHarness(ctx.sessionID, { name: args.name, total: args.total, current: 0, tasks: [], usage: {}, active: true, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
             return `Harness '${args.name}' started (${args.total} tasks). Now report each task's status via task_update and run the loop.`;
           }
         }),
@@ -313,31 +318,31 @@ async function UsageCoachPlugin(input) {
             score: tool.schema.string().optional().describe("PASS | FAIL"),
             model: tool.schema.string().optional()
           },
-          async execute(args) {
-            const h = readHarness() ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {} };
+          async execute(args, ctx) {
+            const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
             h.tasks = h.tasks.filter((x) => x.id !== args.id);
             h.tasks.push({ id: args.id, title: args.title, status: args.status, model: args.model ?? "", revisions: args.revisions ?? 0, score: args.score ?? null });
             if (args.id > h.current) h.current = args.id;
-            writeHarness(h);
+            writeHarness(ctx.sessionID, h);
             return `task ${args.id} -> ${args.status}${args.score ? ` (${args.score})` : ""}`;
           }
         }),
         harness_done: tool({
           description: "Mark the harness as complete \u2014 call when the loop ends.",
           args: {},
-          async execute() {
-            const h = readHarness();
+          async execute(_args, ctx) {
+            const h = readHarness(ctx.sessionID);
             if (h) {
               h.current = h.total;
-              writeHarness(h);
+              h.active = false;
+              writeHarness(ctx.sessionID, h);
             }
             return "Harness complete.";
           }
         }),
-        // Per-role model execution (config-driven). Runs a NEW session with the configured model
-        // on the same server — enables multi-model (e.g. GLM generate + free mimo grade) in 1 terminal.
+        // Per-role model execution (config-driven, same server, no deadlock).
         generate: tool({
-          description: "Run the GENERATOR model (from harness.config.json) on a prompt. Returns the model's text response. The generator can use tools (write/edit files) in the directory. Use for the 'do the work' step.",
+          description: "Run the GENERATOR model on a prompt. The generator can use tools (write/edit files). Returns the model's text response.",
           args: { prompt: tool.schema.string() },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
@@ -346,8 +351,21 @@ async function UsageCoachPlugin(input) {
             return out ?? `(generator ${model} produced no text)`;
           }
         }),
+        generate_batch: tool({
+          description: "Run the GENERATOR model on MULTIPLE tasks in PARALLEL. Pass an array of {id, prompt}. Returns all results at once. Use for INDEPENDENT tasks (much faster than sequential generate calls).",
+          args: { tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), prompt: tool.schema.string() })) },
+          async execute(args, ctx) {
+            const cfg = readHarnessCfg(ctx.directory);
+            const model = cfg.generator ?? "zai-coding-plan/glm-5.1";
+            const results = await Promise.all(args.tasks.map(async (t) => {
+              const out = await runModel(input.client, model, t.prompt, ctx.directory);
+              return `[task ${t.id}] ${out ?? "(no output)"}`;
+            }));
+            return results.join("\n\n");
+          }
+        }),
         grade: tool({
-          description: "Run the GRADER model (from harness.config.json) on a prompt. Returns the model's text response (expect PASS/FAIL on the first line). Use for the 'evaluate the result' step. Falls back to the generator if the grader has no quota.",
+          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line. Falls back to generator if grader quota is out.",
           args: { prompt: tool.schema.string() },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);

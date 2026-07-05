@@ -14,7 +14,7 @@ import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } fr
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 
 const PLUGIN_NAME = "opencode-usage-coach";
@@ -49,13 +49,14 @@ const NOOP_HOOKS = {}; // returned on init failure so opencode keeps working
 function log(msg: string) { if (DEBUG) try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`); } catch { /* */ } }
 function writeState(c: Coaching) { try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(STATE_FILE, JSON.stringify({ ...c, updatedAt: new Date().toISOString() })); } catch { /* */ } }
 
-// Harness state (agent mode reports via custom tools -> TUI panel reads it)
-type HarnessJson = { name: string; total: number; current: number; tasks: any[]; usage?: Record<string, any>; startedAt?: string; updatedAt?: string };
-function readHarness(): HarnessJson | null {
-  try { if (!existsSync(HARNESS_FILE)) return null; return JSON.parse(readFileSync(HARNESS_FILE, "utf8")); } catch { return null; }
+// Harness state — per-SESSION (each opencode session sees only its own harness)
+type HarnessJson = { name: string; total: number; current: number; tasks: any[]; usage?: Record<string, any>; startedAt?: string; updatedAt?: string; active?: boolean };
+function harnessFile(sessionID: string): string { return join(STATE_DIR, sessionID || "_default", "harness.json"); }
+function readHarness(sessionID: string): HarnessJson | null {
+  try { const f = harnessFile(sessionID); if (!existsSync(f)) return null; return JSON.parse(readFileSync(f, "utf8")); } catch { return null; }
 }
-function writeHarness(h: HarnessJson) {
-  try { mkdirSync(STATE_DIR, { recursive: true }); h.updatedAt = new Date().toISOString(); writeFileSync(HARNESS_FILE, JSON.stringify(h, null, 2)); } catch { /* */ }
+function writeHarness(sessionID: string, h: HarnessJson) {
+  try { const f = harnessFile(sessionID); mkdirSync(dirname(f), { recursive: true }); h.updatedAt = new Date().toISOString(); writeFileSync(f, JSON.stringify(h, null, 2)); } catch { /* */ }
 }
 
 // Read harness role models from config (workdir > global). Used by generate/grade tools.
@@ -278,8 +279,8 @@ export default async function UsageCoachPlugin(input: {
         harness_start: tool({
           description: "Start the harness: register the total task count on the panel. Call once when the harness loop begins.",
           args: { name: tool.schema.string(), total: tool.schema.number() },
-          async execute(args: { name: string; total: number }) {
-            writeHarness({ name: args.name, total: args.total, current: 0, tasks: [], usage: {}, startedAt: new Date().toISOString() });
+          async execute(args: { name: string; total: number }, ctx: any) {
+            writeHarness(ctx.sessionID, { name: args.name, total: args.total, current: 0, tasks: [], usage: {}, active: true, startedAt: new Date().toISOString() });
             return `Harness '${args.name}' started (${args.total} tasks). Now report each task's status via task_update and run the loop.`;
           },
         }),
@@ -293,28 +294,27 @@ export default async function UsageCoachPlugin(input: {
             score: tool.schema.string().optional().describe("PASS | FAIL"),
             model: tool.schema.string().optional(),
           },
-          async execute(args: { id: number; title: string; status: string; revisions?: number; score?: string; model?: string }) {
-            const h = readHarness() ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {} };
+          async execute(args: { id: number; title: string; status: string; revisions?: number; score?: string; model?: string }, ctx: any) {
+            const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
             h.tasks = h.tasks.filter((x: any) => x.id !== args.id);
             h.tasks.push({ id: args.id, title: args.title, status: args.status, model: args.model ?? "", revisions: args.revisions ?? 0, score: args.score ?? null });
             if (args.id > h.current) h.current = args.id;
-            writeHarness(h);
+            writeHarness(ctx.sessionID, h);
             return `task ${args.id} -> ${args.status}${args.score ? ` (${args.score})` : ""}`;
           },
         }),
         harness_done: tool({
           description: "Mark the harness as complete — call when the loop ends.",
           args: {},
-          async execute() {
-            const h = readHarness();
-            if (h) { h.current = h.total; writeHarness(h); }
+          async execute(_args: any, ctx: any) {
+            const h = readHarness(ctx.sessionID);
+            if (h) { h.current = h.total; h.active = false; writeHarness(ctx.sessionID, h); }
             return "Harness complete.";
           },
         }),
-        // Per-role model execution (config-driven). Runs a NEW session with the configured model
-        // on the same server — enables multi-model (e.g. GLM generate + free mimo grade) in 1 terminal.
+        // Per-role model execution (config-driven, same server, no deadlock).
         generate: tool({
-          description: "Run the GENERATOR model (from harness.config.json) on a prompt. Returns the model's text response. The generator can use tools (write/edit files) in the directory. Use for the 'do the work' step.",
+          description: "Run the GENERATOR model on a prompt. The generator can use tools (write/edit files). Returns the model's text response.",
           args: { prompt: tool.schema.string() },
           async execute(args: { prompt: string }, ctx: any) {
             const cfg = readHarnessCfg(ctx.directory);
@@ -323,8 +323,21 @@ export default async function UsageCoachPlugin(input: {
             return out ?? `(generator ${model} produced no text)`;
           },
         }),
+        generate_batch: tool({
+          description: "Run the GENERATOR model on MULTIPLE tasks in PARALLEL. Pass an array of {id, prompt}. Returns all results at once. Use for INDEPENDENT tasks (much faster than sequential generate calls).",
+          args: { tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), prompt: tool.schema.string() })) },
+          async execute(args: { tasks: Array<{ id: number; prompt: string }> }, ctx: any) {
+            const cfg = readHarnessCfg(ctx.directory);
+            const model = cfg.generator ?? "zai-coding-plan/glm-5.1";
+            const results = await Promise.all(args.tasks.map(async (t) => {
+              const out = await runModel(input.client, model, t.prompt, ctx.directory);
+              return `[task ${t.id}] ${out ?? "(no output)"}`;
+            }));
+            return results.join("\n\n");
+          },
+        }),
         grade: tool({
-          description: "Run the GRADER model (from harness.config.json) on a prompt. Returns the model's text response (expect PASS/FAIL on the first line). Use for the 'evaluate the result' step. Falls back to the generator if the grader has no quota.",
+          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line. Falls back to generator if grader quota is out.",
           args: { prompt: tool.schema.string() },
           async execute(args: { prompt: string }, ctx: any) {
             const cfg = readHarnessCfg(ctx.directory);

@@ -132,7 +132,11 @@ function initializeTui(api, disposeRoot) {
     }
     let h = null;
     try {
-      h = getHarness();
+      const sid = ctx.session_id ?? "";
+      if (sid) {
+        const hf = join(STATE_DIR, sid, "harness.json");
+        if (existsSync(hf)) h = JSON.parse(readFileSync(hf, "utf8"));
+      }
     } catch {
       h = null;
     }
