@@ -73,6 +73,7 @@ function readHarnessCfg(dir) {
   };
 }
 async function runModel(client, model, prompt, directory) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   try {
     const slash = model.indexOf("/");
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
@@ -80,11 +81,20 @@ async function runModel(client, model, prompt, directory) {
     const s = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
     const id = s?.data?.info?.id;
     if (!id) return null;
-    const r = await client.session.prompt({
+    await client.session.prompt({
       path: { id },
       body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] }
     });
-    const parts = r?.data?.parts ?? [];
+    for (let i = 0; i < 600; i++) {
+      await sleep(1e3);
+      const st = await client.session.status({ path: { id } });
+      const status = st?.data?.[id]?.status ?? st?.data?.status;
+      if (status === "idle" || status === "completed" || !status) break;
+    }
+    const msgs = await client.session.messages({ path: { id } });
+    const all = msgs?.data ?? [];
+    const lastAssistant = all.filter((m) => m?.info?.role === "assistant").pop();
+    const parts = lastAssistant?.parts ?? [];
     const text = parts.filter((p) => p?.type === "text").map((p) => p?.text ?? "").join("");
     try {
       await client.session.remove?.({ path: { id } });

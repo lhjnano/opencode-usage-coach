@@ -71,8 +71,9 @@ function readHarnessCfg(dir: string): HarnessCfg {
 }
 
 // Run a specific model in a NEW session on the SAME server (no deadlock), return its text response.
-// This lets the harness agent use per-role models (generator/grader) in 1 terminal.
+// Polls session.status until the agent loop (including tool use / file writes) completes.
 async function runModel(client: any, model: string, prompt: string, directory: string): Promise<string | null> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   try {
     const slash = model.indexOf("/");
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
@@ -80,12 +81,24 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     const s: any = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
     const id = s?.data?.info?.id;
     if (!id) return null;
-    const r: any = await client.session.prompt({
+    // send the prompt (starts the agent loop)
+    await client.session.prompt({
       path: { id },
       body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] },
     });
-    const parts: any[] = r?.data?.parts ?? [];
-    const text = parts.filter((p) => p?.type === "text").map((p) => p?.text ?? "").join("");
+    // poll until the session is idle (agent loop done — including file writes)
+    for (let i = 0; i < 600; i++) { // 600 * 1s = 10min max
+      await sleep(1000);
+      const st: any = await client.session.status({ path: { id } });
+      const status = st?.data?.[id]?.status ?? st?.data?.status;
+      if (status === "idle" || status === "completed" || !status) break;
+    }
+    // read the final assistant message text
+    const msgs: any = await client.session.messages({ path: { id } });
+    const all = msgs?.data ?? [];
+    const lastAssistant = all.filter((m: any) => m?.info?.role === "assistant").pop();
+    const parts: any[] = lastAssistant?.parts ?? [];
+    const text = parts.filter((p: any) => p?.type === "text").map((p: any) => p?.text ?? "").join("");
     try { await client.session.remove?.({ path: { id } }); } catch { /* */ }
     return text.trim() || null;
   } catch (e) { log(`runModel err (${model}): ${String(e)}`); return null; }
