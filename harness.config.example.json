@@ -1,8 +1,7 @@
 {
-  "_comment": "Harness role -> model config. Defaults: generator=deepseek-v4-flash-free, grader=mimo-v2.5-free (both free). Override per-workdir or in ~/.config/opencode-usage-coach/harness.config.json. Free models have no quota -> never gated.",
+  "_comment": "Harness config. Override per-workdir or in ~/.config/opencode-usage-coach/harness.config.json. provider: which codexbar quota to watch (empty = codexbar default). lighterModel: suggested when throttling. Free models have no quota -> never gated.",
   "generator": "opencode/deepseek-v4-flash-free",
   "grader": "opencode/mimo-v2.5-free",
-  "parallel": 1,
-  "taskTimeoutMs": 1800000,
-  "maxRevisions": 2
+  "provider": "",
+  "lighterModel": ""
 }

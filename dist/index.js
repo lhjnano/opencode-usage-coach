@@ -106,7 +106,6 @@ async function runModel(client, model, prompt, directory) {
     return null;
   }
 }
-var PROVIDER = process.env.UC_PROVIDER ?? "zai";
 var num = (e, d) => {
   try {
     const v = Number(process.env[e]);
@@ -120,7 +119,6 @@ var THR_5H = num("UC_THROTTLE_5H", 70);
 var STOP_WK = num("UC_STOP_WEEKLY", 95);
 var THR_WK = num("UC_THROTTLE_WEEKLY", 85);
 var STOP_MO = num("UC_STOP_MONTHLY", 98);
-var LIGHTER = process.env.UC_LIGHTER_MODEL ?? "glm-4.5-air";
 function humanRemaining(iso) {
   try {
     if (!iso) return "";
@@ -191,12 +189,13 @@ async function fetchProvidersCoach() {
   }));
   return results.filter(Boolean);
 }
-function fetchQuota() {
+function fetchQuota(provider) {
   return new Promise((resolve2) => {
     let out = "";
     let p;
     try {
-      p = spawn("codexbar", ["usage", "--provider", PROVIDER, "--json"], {
+      const args = provider ? ["usage", "--provider", provider, "--json"] : ["usage", "--json"];
+      p = spawn("codexbar", args, {
         stdio: ["ignore", "pipe", "ignore"]
       });
     } catch {
@@ -219,12 +218,12 @@ function fetchQuota() {
     });
   });
 }
-function coach(q) {
+function coach(q, lighter) {
   if (!q) return { decision: "GO", advice: "quota unavailable \u2014 proceeding cautiously.", weekly: -1, monthly: -1, fiveHour: -1 };
   const wk = Math.round(q.weekly?.usedPercent ?? 0), mo = Math.round(q.monthly?.usedPercent ?? 0), h5 = Math.round(q.fiveHour?.usedPercent ?? 0);
   const wkR = humanRemaining(q.weekly?.resetsAt), h5R = humanRemaining(q.fiveHour?.resetsAt);
   const stop = (r) => ({ decision: "STOP", advice: `STOP recommend \u2014 ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk, monthly: mo, fiveHour: h5 });
-  const thr = (r) => ({ decision: "THROTTLE", advice: `Throttle recommend \u2014 ${r}. switch to lighter model (${LIGHTER}) or wait for window reset.`, weekly: wk, monthly: mo, fiveHour: h5 });
+  const thr = (r) => ({ decision: "THROTTLE", advice: `Throttle recommend \u2014 ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk, monthly: mo, fiveHour: h5 });
   if (h5 >= STOP_5H) return stop(`5h window ${h5}% (${h5R})`);
   if (wk >= STOP_WK) return stop(`weekly ${wk}% (${wkR})`);
   if (mo >= STOP_MO) return stop(`monthly ${mo}%`);
@@ -236,6 +235,9 @@ var LOADING = { decision: "GO", advice: "quota loading\u2026", weekly: -1, month
 async function UsageCoachPlugin(input) {
   try {
     setStateDir(input.directory);
+    const cfg0 = readHarnessCfg(input.directory);
+    const PROVIDER = process.env.UC_PROVIDER ?? cfg0.provider ?? "";
+    const LIGHTER = process.env.UC_LIGHTER_MODEL ?? cfg0.lighterModel ?? "a lighter model";
     let last = null;
     let lastFetchedAt = 0;
     let refreshing = false;
@@ -244,9 +246,9 @@ async function UsageCoachPlugin(input) {
         if (refreshing) return;
         if (last && Date.now() - lastFetchedAt < TTL_MS) return;
         refreshing = true;
-        fetchQuota().then(async (q) => {
+        fetchQuota(PROVIDER).then(async (q) => {
           try {
-            last = coach(q);
+            last = coach(q, LIGHTER);
             lastFetchedAt = Date.now();
             let providers = [];
             try {
@@ -356,9 +358,9 @@ async function UsageCoachPlugin(input) {
           args: { prompt: tool.schema.string() },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
-            const model = cfg.generator ?? "zai-coding-plan/glm-5.1";
-            const out = await runModel(input.client, model, args.prompt, ctx.directory);
-            return out ?? `(generator ${model} produced no text)`;
+            if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
+            const out = await runModel(input.client, cfg.generator, args.prompt, ctx.directory);
+            return out ?? `(generator ${cfg.generator} produced no text)`;
           }
         }),
         generate_batch: tool({
@@ -366,9 +368,9 @@ async function UsageCoachPlugin(input) {
           args: { tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), prompt: tool.schema.string() })) },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
-            const model = cfg.generator ?? "zai-coding-plan/glm-5.1";
+            if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
             const results = await Promise.all(args.tasks.map(async (t) => {
-              const out = await runModel(input.client, model, t.prompt, ctx.directory);
+              const out = await runModel(input.client, cfg.generator, t.prompt, ctx.directory);
               return `[task ${t.id}] ${out ?? "(no output)"}`;
             }));
             return results.join("\n\n");
@@ -379,7 +381,8 @@ async function UsageCoachPlugin(input) {
           args: { prompt: tool.schema.string() },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
-            const model = cfg.grader ?? cfg.generator ?? "opencode/mimo-v2.5-free";
+            const model = cfg.grader ?? cfg.generator;
+            if (!model) return 'ERROR: no grader/generator model configured. Set "grader" (and "generator") in harness.config.json (see harness.config.example.json).';
             const out = await runModel(input.client, model, args.prompt, ctx.directory);
             return out ?? `(grader ${model} produced no text)`;
           }

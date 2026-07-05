@@ -146,7 +146,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
         const mdl = t.model ? ` ${(t.model.split("/").pop() ?? t.model)}` : "";
         nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev} {short(t.title, 12)}</text>);
-        const pv = t.model ? (t.model.startsWith("zai") ? "zai" : (t.model.split("/")[0] ?? "").split("-")[0]) : "";
+        const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
         const q = pv && h.quotas?.[pv] ? h.quotas[pv] : null;
         const pct = q ? q.fiveHour : 0;
         nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("textMuted")}>{barEmpty(pct)}</text><text> {pct}%</text></box>);

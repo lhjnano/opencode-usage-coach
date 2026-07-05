@@ -1,16 +1,17 @@
 # opencode-usage-coach
 
 A closed-loop usage coach and harness for [OpenCode](https://opencode.ai). Built for
-flat-rate coding plans (e.g. z.ai / GLM) where USD cost is meaningless, so it tracks
-**quota windows (5h / weekly / monthly)** and turns them into coaching + loop control.
+flat-rate coding plans (e.g. z.ai / GLM, or any quota-metered provider) where USD cost
+is meaningless, so it tracks **quota windows (5h / weekly / monthly)** and turns them
+into coaching + loop control. Provider-agnostic — configure via `harness.config.json`.
 
 Existing plugins only *display* usage. This one **senses quota → coaches → stops/advances
-the loop** — and ships a harness agent mode + a deterministic orchestrator.
+the loop** — and ships a harness agent mode.
 
 ## What it does
 
 **Always-on guardian (plugin):**
-- Senses z.ai quota windows via the `codexbar` CLI.
+- Senses provider quota windows via the `codexbar` CLI (config-driven — any provider codexbar knows).
 - On STOP threshold: blocks tool calls (`tool.execute.before` throws) → the agent self-stops.
 - Injects coaching (how to use right now) into the system prompt (double defense).
 - Surfaces a sidebar panel: per-provider quota meters + harness task states + coaching.
@@ -21,12 +22,11 @@ the loop** — and ships a harness agent mode + a deterministic orchestrator.
   unclear → clarify; substantive → generate→grade→revise→advance.
 - Multi-model via plugin tools `generate`/`grade`: run the configured generator/grader model
   (from `harness.config.json`) in a new session on the same server — no second terminal.
-  e.g. GLM generation + free mimo grading in one opencode session.
 - Reports progress via `task_update` → the sidebar panel shows live task states.
 
 ## Requirements
-- opencode (tested on 1.17.13) with a z.ai coding-plan provider configured.
-- `codexbar` CLI with the z.ai key wired (`codexbar config set-api-key --provider zai --stdin`).
+- opencode (tested on 1.17.13) with a quota-metered provider configured.
+- `codexbar` CLI with your provider key wired (e.g. `codexbar config set-api-key --provider zai --stdin`).
 
 ## Install (from npm)
 ```jsonc
@@ -69,29 +69,29 @@ This plugin has **four config surfaces**. Only the first two are required to run
 
 ### 2. codexbar (quota data source)
 ```bash
-printf '%s' "$Z_AI_API_KEY" | codexbar config set-api-key --provider zai --stdin
+printf '%s' "$YOUR_PROVIDER_API_KEY" | codexbar config set-api-key --provider <id> --stdin
 ```
 
 ### 3. Harness config — `harness.config.json` (role → model) ★ the main one
-Place in the **work directory** beside `tasks.txt`/`rubric.md`. Each role runs on its model,
-so per-model quota is tracked (works for local LLMs — they show 0%).
+Place in the **work directory**. Each role runs on its model, so per-model quota is tracked
+(works for local LLMs — they show 0%).
 ```jsonc
 {
-  "generator":     "zai-coding-plan/glm-5.1",   // model that produces the work
-  "grader":        "ollama/llama3",              // model that grades it
-  "taskTimeoutMs": 1800000,                       // per-task timeout (on exceed: auto-split)
-  "maxRevisions":  2                              // revise attempts before giving up
+  "generator":     "opencode/deepseek-v4-flash-free",  // model that produces the work
+  "grader":        "opencode/mimo-v2.5-free",           // model that grades it
+  "provider":      "",                                   // codexbar quota provider ("" = default)
+  "lighterModel":  ""                                    // suggested when throttling
 }
 ```
 | Field | Default | Notes |
 |---|---|---|
-| `generator` | `UC_MODEL` | any `provider/model` opencode knows |
-| `grader` | `UC_MODEL` | can differ from generator (multi-model) |
-| `taskTimeoutMs` | `1800000` (30m) | exceed → task split into subtasks |
-| `maxRevisions` | `2` | FAIL → revise → re-grade, up to N times |
+| `generator` | **required** | any `provider/model` opencode knows |
+| `grader` | falls back to `generator` | can differ (multi-model) |
+| `provider` | `""` (codexbar default) | which provider's quota the guardian watches |
+| `lighterModel` | `""` | shown in throttle advice; env `UC_LIGHTER_MODEL` overrides |
 
-Missing roles fall back to `UC_MODEL`. Provider for quota is derived from the model id
-(`zai-coding-plan/...` → `zai`, `ollama/...` → `ollama`).
+`generator` is **required** — the tools return a clear error if missing. Copy
+`harness.config.example.json` to get started (both example models are free → never gated).
 
 ### 4. Env vars (thresholds / tuning)
 | Var | Default | Meaning |
@@ -101,12 +101,9 @@ Missing roles fall back to `UC_MODEL`. Provider for quota is derived from the mo
 | `UC_STOP_WEEKLY` | 95 | weekly STOP % |
 | `UC_THROTTLE_WEEKLY` | 85 | weekly throttle % |
 | `UC_STOP_MONTHLY` | 98 | monthly STOP % |
-| `UC_LIGHTER_MODEL` | glm-4.5-air | suggested model when throttling |
-| `UC_PROVIDER` | zai | codexbar provider for the guardian |
+| `UC_LIGHTER_MODEL` | (config `lighterModel`) | suggested model when throttling |
+| `UC_PROVIDER` | (config `provider`) | codexbar provider for the guardian |
 | `UC_TTL_MS` | 60000 | quota cache TTL (ms) |
-| `UC_MODEL` | zai-coding-plan/glm-5.1 | harness fallback model |
-| `UC_TASK_TIMEOUT_MS` | 1800000 | harness per-task timeout (overridden by config) |
-| `UC_MAX_REVISIONS` | 2 | harness revise attempts (overridden by config) |
 | `UC_DEBUG` | 0 | set to `1` for a diagnostic log at `~/.cache/opencode-usage-coach/coach.log` |
 
 ## Architecture
@@ -114,13 +111,13 @@ Missing roles fall back to `UC_MODEL`. Provider for quota is derived from the mo
 - **TUI module** (`src/tui.tsx`) — SolidJS, reads a state file, renders into `sidebar_footer`/`home_footer`. Loaded via `tui.json`. Bundled with `tsup` + `esbuild-plugin-solid`, solid kept **external** (resolves to opencode's bundle — avoids the duplicate-instance crash). Exports `{ tui }` (a bare function is misread as a server plugin).
 - server↔TUI communicate via a state file (`~/.cache/opencode-usage-coach/*.json`) — they are separate processes.
 
-Key lessons (see `PLAN.md`): never install `solid-js` in the config dir (conflicts with
+**Key lessons (hard-won):** never install `solid-js` in the config dir (conflicts with
 opencode's bundled solid); TUI plugins must be compiled + loaded via `tui.json` file path;
 `codexbar` must be called via `spawn` (the `$` BunShell leaks output to the TUI).
 
 ## Status
-- ✅ M0–M2 quota guardian + TUI panel (per-provider coach view, colors, collapsible Alt+H)
-- ✅ M3 harness: agent mode (triage) with generate/grade model-specific tools (1 terminal, multi-model)
-- ✅ M4 npm packaging (`opencode plugin install opencode-usage-coach`)
+- ✅ Quota guardian + TUI panel (per-provider coach view, colors, collapsible Alt+H)
+- ✅ Harness: agent mode (triage) with generate/grade model-specific tools (1 terminal, multi-model)
+- ✅ npm packaging (`opencode plugin install opencode-usage-coach`)
 
 License: MIT.
