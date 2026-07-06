@@ -72,27 +72,37 @@ function readHarnessCfg(dir: string): HarnessCfg {
 
 // Run a specific model in a NEW session on the SAME server (no deadlock), return its text response.
 // Polls session.status until the agent loop (including tool use / file writes) completes.
+// Observability: logs start/status-change/done/error when UC_DEBUG=1 — essential for runtime diagnosis.
 async function runModel(client: any, model: string, prompt: string, directory: string): Promise<string | null> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const t0 = Date.now();
   try {
     const slash = model.indexOf("/");
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
     const modelID = slash >= 0 ? model.slice(slash + 1) : "";
     const s: any = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
     const id = s?.data?.info?.id;
-    if (!id) return null;
+    if (!id) { log(`runModel(${model}): no session id returned`); return null; }
+    log(`runModel(${model}): session ${id} created, prompt ${prompt.length} chars`);
     // send the prompt (starts the agent loop)
     await client.session.prompt({
       path: { id },
       body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] },
     });
     // poll until the session is idle (agent loop done — including file writes)
+    let lastStatus = "";
+    let timedOut = false;
     for (let i = 0; i < 600; i++) { // 600 * 1s = 10min max
       await sleep(1000);
       const st: any = await client.session.status({ path: { id } });
       const status = st?.data?.[id]?.status ?? st?.data?.status;
-      if (status === "idle" || status === "completed" || !status) break;
+      if (status !== lastStatus) { log(`runModel(${model}): poll ${i}s status="${status}"`); lastStatus = String(status); }
+      // Only break on explicit terminal states — never on undefined (sub-session may not have a status yet).
+      if (status === "idle" || status === "completed") break;
+      if (status === "error" || status === "failed") { log(`runModel(${model}): sub-session ended with "${status}"`); break; }
+      if (i === 599) timedOut = true;
     }
+    const elapsed = Math.round((Date.now() - t0) / 1000);
     // read the final assistant message text
     const msgs: any = await client.session.messages({ path: { id } });
     const all = msgs?.data ?? [];
@@ -100,8 +110,10 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     const parts: any[] = lastAssistant?.parts ?? [];
     const text = parts.filter((p: any) => p?.type === "text").map((p: any) => p?.text ?? "").join("");
     try { await client.session.remove?.({ path: { id } }); } catch { /* */ }
+    log(`runModel(${model}): done ${elapsed}s, ${text.length} chars${timedOut ? " [TIMEOUT]" : ""}`);
+    if (timedOut) return `[runModel TIMEOUT after ${elapsed}s — result may be incomplete]\n${text.trim()}`;
     return text.trim() || null;
-  } catch (e) { log(`runModel err (${model}): ${String(e)}`); return null; }
+  } catch (e) { log(`runModel err (${model}, ${Math.round((Date.now() - t0) / 1000)}s): ${String(e)}`); return null; }
 }
 
 // Quota thresholds (override via env). Provider + lighter model come from config/env (see init).
@@ -361,9 +373,19 @@ export default async function UsageCoachPlugin(input: {
           async execute(args: { prompt: string }, ctx: any) {
             const cfg = readHarnessCfg(ctx.directory);
             const model = cfg.grader ?? cfg.generator;
-            if (!model) return "ERROR: no grader/generator model configured. Set \"grader\" (and \"generator\") in harness.config.json (see harness.config.example.json).";
+            if (!model) return "FAIL\n(ERROR: no grader/generator model configured. Set \"grader\" and \"generator\" in harness.config.json.)";
             const out = await runModel(input.client, model, args.prompt, ctx.directory);
-            return out ?? `(grader ${model} produced no text)`;
+            if (!out) return "FAIL\n(grader produced no output — treating as FAIL to trigger a revise)";
+            // Normalize the verdict: ensure PASS/FAIL is extractable from the first non-empty line.
+            const firstLine = out.split("\n").find((l) => l.trim()) ?? "";
+            const f = firstLine.trim();
+            const isPass = /^pass\b/i.test(f);
+            const isFail = /^fail\b/i.test(f);
+            if (!isPass && !isFail) {
+              // grader didn't follow the format — prepend FAIL so the harness can parse a verdict
+              return `FAIL\n(grader did not output PASS/FAIL on the first line; defaulting to FAIL to trigger a revise)\n${out}`;
+            }
+            return out;
           },
         }),
       },

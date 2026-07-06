@@ -5,7 +5,7 @@ import { effect as _$effect } from "@opentui/solid";
 import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from "fs";
 import { createHash } from "crypto";
 import { homedir } from "os";
 import { join, resolve } from "path";
@@ -29,8 +29,44 @@ function readState() {
 }
 function readHarness() {
   try {
-    if (!existsSync(HARNESS_FILE)) return null;
-    return JSON.parse(readFileSync(HARNESS_FILE, "utf8"));
+    let best = null;
+    let entries = [];
+    try {
+      entries = readdirSync(STATE_DIR);
+    } catch {
+    }
+    for (const d of entries) {
+      const sub = join(STATE_DIR, d);
+      let isDir = false;
+      try {
+        isDir = statSync(sub).isDirectory();
+      } catch {
+      }
+      if (!isDir) continue;
+      const f = join(sub, "harness.json");
+      if (!existsSync(f)) continue;
+      let st;
+      try {
+        st = statSync(f);
+      } catch {
+        continue;
+      }
+      let active = false;
+      try {
+        active = !!JSON.parse(readFileSync(f, "utf8")).active;
+      } catch {
+      }
+      if (!best || active && !best.active || active === best.active && st.mtimeMs > best.mtime) {
+        best = {
+          file: f,
+          mtime: st.mtimeMs,
+          active
+        };
+      }
+    }
+    if (best) return JSON.parse(readFileSync(best.file, "utf8"));
+    if (existsSync(HARNESS_FILE)) return JSON.parse(readFileSync(HARNESS_FILE, "utf8"));
+    return null;
   } catch {
     return null;
   }

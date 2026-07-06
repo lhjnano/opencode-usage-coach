@@ -1,9 +1,9 @@
 # opencode-usage-coach
 
 A closed-loop usage coach and harness for [OpenCode](https://opencode.ai). Built for
-flat-rate coding plans (e.g. z.ai / GLM, or any quota-metered provider) where USD cost
-is meaningless, so it tracks **quota windows (5h / weekly / monthly)** and turns them
-into coaching + loop control. Provider-agnostic — configure via `harness.config.json`.
+flat-rate / quota-metered coding plans where USD cost is meaningless, so it tracks
+**quota windows (5h / weekly / monthly)** and turns them into coaching + loop control.
+Provider-agnostic — configure via `harness.config.json`.
 
 Existing plugins only *display* usage. This one **senses quota → coaches → stops/advances
 the loop** — and ships a harness agent mode.
@@ -23,6 +23,10 @@ the loop** — and ships a harness agent mode.
 - Multi-model via plugin tools `generate`/`grade`: run the configured generator/grader model
   (from `harness.config.json`) in a new session on the same server — no second terminal.
 - Reports progress via `task_update` → the sidebar panel shows live task states.
+- **Triggering the harness:** the agent auto-triages — trivial work is done directly,
+  substantive multi-step work enters the generate→grade loop. For reliable triggering,
+  explicitly ask "run this through the harness" or "use the harness for this". The harness
+  tools are only available when the harness agent mode is active (see Install).
 
 ## Requirements
 - opencode (tested on 1.17.13) with a quota-metered provider configured.
@@ -114,6 +118,51 @@ Place in the **work directory**. Each role runs on its model, so per-model quota
 **Key lessons (hard-won):** never install `solid-js` in the config dir (conflicts with
 opencode's bundled solid); TUI plugins must be compiled + loaded via `tui.json` file path;
 `codexbar` must be called via `spawn` (the `$` BunShell leaks output to the TUI).
+
+## Troubleshooting
+
+Recurring issues and fixes — mostly learned the hard way during development.
+
+### TUI panel missing or harness not shown
+- **Check `tui.json` points at the `dist/tui.js` file path** — not the `plugins/` directory.
+  ```jsonc
+  // ~/.config/opencode/tui.json
+  { "$schema": "https://opencode.ai/tui.json", "plugin": ["/abs/path/dist/tui.js"] }
+  ```
+- **Do NOT install `solid-js` in the config dir** — conflicts with opencode's bundled solid, causes a crash. Keep it peer + external only.
+- **Export must be `{ tui }`** (an object) — a bare function is misread as a server plugin.
+- **Color prop is `fg`** (not `foreground`): `style={{ fg: theme.current.success }}`.
+- **Call `codexbar` via `spawn`** — the `$` BunShell leaks command output into the TUI.
+- **Harness not visible?** The TUI scans session subdirectories for the most recent `active:true` harness. A finished harness (`active:false`) is hidden.
+
+### LLM model selection (generate/grade)
+- **`generator` is required in `harness.config.json`** — the tools return a clear error if missing (the old z.ai fallback was removed in v0.2.4).
+- Format: `"provider/model"` (e.g. `"opencode/deepseek-v4-flash-free"`, `"opencode/mimo-v2.5-free"` — see `harness.config.example.json`).
+- **Config precedence**: workdir `harness.config.json` > global `~/.config/opencode-usage-coach/harness.config.json`.
+- Omitting `grader` falls back to `generator`. If neither is set, the grade tool returns FAIL + guidance.
+- `provider` (quota source) and `lighterModel` (suggested on throttle) are also configurable in the same file.
+
+### Parallel harness execution (generate_batch)
+- **Only INDEPENDENT tasks should be batched** — dependent tasks (B needs A) require sequential `generate` calls.
+- `generate_batch` runs each task in a separate sub-session on the same server (shared model config).
+- runModel polls the sub-session until `idle`/`completed` (max 10 min). Trace with `UC_DEBUG=1`:
+  ```
+  runModel(<generator>): session xxx created, prompt 142 chars
+  runModel(<generator>): poll 3s status="running"
+  runModel(<generator>): done 48s, 1203 chars
+  ```
+- `(no output)` means the sub-session returned no text. Check `~/.cache/opencode-usage-coach/coach.log` for the runModel trace (requires `UC_DEBUG=1`).
+- **Note**: runModel only terminates on explicit `idle`/`completed` status. An earlier bug broke on `!status` (undefined) immediately — fixed.
+
+### Multi-session (per-session state isolation)
+- Each opencode session has a unique sessionID; harness state is isolated per-session:
+  ```
+  ~/.cache/opencode-usage-coach/projects/<dir-hash>/<sessionID>/harness.json
+  ```
+- Different working directories get separate project state (keyed by path hash).
+- The TUI auto-discovers the most recent `active:true` harness — switching sessions shows that session's harness.
+- Harness completion sets `active:false` → hidden from the TUI.
+- Override the state path with `UC_STATE_DIR` (forces global state).
 
 ## Status
 - ✅ Quota guardian + TUI panel (per-provider coach view, colors, collapsible Alt+H)

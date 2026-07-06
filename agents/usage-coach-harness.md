@@ -34,20 +34,22 @@ Default to the loop only when it genuinely adds value. Do not over-engineer smal
 ## Harness loop (only for substantive work)
 The user's message is the task source. If it has multiple distinct parts, decompose into discrete tasks (N); if it is one unit, N = 1.
 
-**Multi-model, 1 terminal:** the work runs via the plugin tools `generate` and `grade`, which use the configured models (generator/grader from harness.config.json) on the same server — so you get e.g. GLM generation + free mimo grading without a second terminal. Do NOT use the `task` tool for harness work; use `generate`/`grade`.
+**Multi-model, 1 terminal:** the work runs via the plugin tools `generate` and `grade`, which use the configured models (generator/grader from harness.config.json) on the same server — so you get e.g. a paid generator + a free grader without a second terminal. Do NOT use the `task` tool for harness work; use `generate`/`grade`.
 
-**Independent tasks → parallel:** if the decomposed tasks are INDEPENDENT, call multiple `generate` tools in the same turn (parallel sub-sessions). Cap by quota coaching (big-OK → 3-4; throttle → 1-2; STOP → none). DEPENDENT tasks (B needs A) → sequential.
+**Parallel independent tasks:** if the decomposed tasks are INDEPENDENT, prefer `generate_batch` (one call, all results at once) over multiple sequential `generate` calls. Cap by quota coaching (big-OK → 3-4; throttle → 1-2; STOP → none). DEPENDENT tasks (B needs A) → sequential `generate` calls.
 
 1. Call `harness_start(name, N)` to register the run on the panel.
 2. For each task i (1..N):
    a. `task_update(i, title, "generating")`.
-   b. **Generate** — call `generate({ prompt: "Task: {title}. Perform it for real in the current directory (write/edit files)." })`. The generator model does the work and returns a summary.
-   c. `task_update(i, title, "grading")`.
-   d. **Grade** — call `grade({ prompt: "Evaluate the result against the request's intent and general quality. Output PASS or FAIL on the first line, then the reason.\\nRequest: {user request}\\nTask: {title}" })`.
-   e. Parse the verdict:
+   b. **Generate** — call `generate({ prompt: "Task: {title}. Perform it for real in the current directory (write/edit files)." })`. The generator model runs in a sub-session and writes files directly — its return value is a summary, NOT the work itself.
+   c. **Verify the work** — after generate returns, read the files it should have produced (use `read`/`glob`) to confirm the work actually exists and is non-trivial. Do not trust the summary alone.
+   d. `task_update(i, title, "grading")`.
+   e. **Grade** — call `grade({ prompt: "Evaluate the result against the request's intent and general quality. Output PASS or FAIL on the first line, then the reason.\\nRequest: {user request}\\nTask: {title}" })`. The grade tool normalizes the verdict: PASS/FAIL is always on the first line.
+   f. Parse the verdict (first non-empty line):
       - `PASS` → `task_update(i, title, "completed", score:"PASS")` → next.
-      - `FAIL` and revisions < 2 → `task_update(i, title, "revising", revisions:k)` → `generate({ prompt: "Apply the grading feedback and improve:\\n{grade result}\\nTask: {title}" })` → back to (c) re-grade.
+      - `FAIL` and revisions < 2 → `task_update(i, title, "revising", revisions:k)` → `generate({ prompt: "Apply the grading feedback and improve:\\n{grade result}\\nTask: {title}" })` → back to (d) re-grade.
       - `FAIL` and revisions exhausted → `task_update(i, title, "failed", score:"FAIL")` → next.
+   g. **Error handling:** if `generate` returns text starting with `ERROR:` or `[runModel TIMEOUT`, the sub-session failed. Log it via `task_update(i, title, "failed")` and continue to the next task — do not loop forever on a broken task.
 3. When all tasks are done → `harness_done()`.
 
 ## Rules

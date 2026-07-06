@@ -74,23 +74,40 @@ function readHarnessCfg(dir) {
 }
 async function runModel(client, model, prompt, directory) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const t0 = Date.now();
   try {
     const slash = model.indexOf("/");
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
     const modelID = slash >= 0 ? model.slice(slash + 1) : "";
     const s = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
     const id = s?.data?.info?.id;
-    if (!id) return null;
+    if (!id) {
+      log(`runModel(${model}): no session id returned`);
+      return null;
+    }
+    log(`runModel(${model}): session ${id} created, prompt ${prompt.length} chars`);
     await client.session.prompt({
       path: { id },
       body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] }
     });
+    let lastStatus = "";
+    let timedOut = false;
     for (let i = 0; i < 600; i++) {
       await sleep(1e3);
       const st = await client.session.status({ path: { id } });
       const status = st?.data?.[id]?.status ?? st?.data?.status;
-      if (status === "idle" || status === "completed" || !status) break;
+      if (status !== lastStatus) {
+        log(`runModel(${model}): poll ${i}s status="${status}"`);
+        lastStatus = String(status);
+      }
+      if (status === "idle" || status === "completed") break;
+      if (status === "error" || status === "failed") {
+        log(`runModel(${model}): sub-session ended with "${status}"`);
+        break;
+      }
+      if (i === 599) timedOut = true;
     }
+    const elapsed = Math.round((Date.now() - t0) / 1e3);
     const msgs = await client.session.messages({ path: { id } });
     const all = msgs?.data ?? [];
     const lastAssistant = all.filter((m) => m?.info?.role === "assistant").pop();
@@ -100,9 +117,12 @@ async function runModel(client, model, prompt, directory) {
       await client.session.remove?.({ path: { id } });
     } catch {
     }
+    log(`runModel(${model}): done ${elapsed}s, ${text.length} chars${timedOut ? " [TIMEOUT]" : ""}`);
+    if (timedOut) return `[runModel TIMEOUT after ${elapsed}s \u2014 result may be incomplete]
+${text.trim()}`;
     return text.trim() || null;
   } catch (e) {
-    log(`runModel err (${model}): ${String(e)}`);
+    log(`runModel err (${model}, ${Math.round((Date.now() - t0) / 1e3)}s): ${String(e)}`);
     return null;
   }
 }
@@ -382,9 +402,19 @@ async function UsageCoachPlugin(input) {
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
             const model = cfg.grader ?? cfg.generator;
-            if (!model) return 'ERROR: no grader/generator model configured. Set "grader" (and "generator") in harness.config.json (see harness.config.example.json).';
+            if (!model) return 'FAIL\n(ERROR: no grader/generator model configured. Set "grader" and "generator" in harness.config.json.)';
             const out = await runModel(input.client, model, args.prompt, ctx.directory);
-            return out ?? `(grader ${model} produced no text)`;
+            if (!out) return "FAIL\n(grader produced no output \u2014 treating as FAIL to trigger a revise)";
+            const firstLine = out.split("\n").find((l) => l.trim()) ?? "";
+            const f = firstLine.trim();
+            const isPass = /^pass\b/i.test(f);
+            const isFail = /^fail\b/i.test(f);
+            if (!isPass && !isFail) {
+              return `FAIL
+(grader did not output PASS/FAIL on the first line; defaulting to FAIL to trigger a revise)
+${out}`;
+            }
+            return out;
           }
         })
       }

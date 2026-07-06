@@ -4,7 +4,7 @@
 // Diagnostic: on load, writes a marker file ~/.cache/opencode-usage-coach/tui-loaded.txt.
 
 import type { TuiPlugin, TuiPluginApi, TuiSlotContext } from "@opencode-ai/plugin/tui";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -33,7 +33,29 @@ function readState(): State | null {
   catch { return null; }
 }
 function readHarness(): HarnessState | null {
-  try { if (!existsSync(HARNESS_FILE)) return null; return JSON.parse(readFileSync(HARNESS_FILE, "utf8")) as HarnessState; }
+  try {
+    // Session-scoped harness files live in STATE_DIR/<sessionID>/harness.json (per-session isolation).
+    // Find the most recently updated active harness; fall back to the most recent; then legacy path.
+    let best: { file: string; mtime: number; active: boolean } | null = null;
+    let entries: string[] = [];
+    try { entries = readdirSync(STATE_DIR); } catch { /* */ }
+    for (const d of entries) {
+      const sub = join(STATE_DIR, d);
+      let isDir = false; try { isDir = statSync(sub).isDirectory(); } catch { /* */ }
+      if (!isDir) continue;
+      const f = join(sub, "harness.json");
+      if (!existsSync(f)) continue;
+      let st; try { st = statSync(f); } catch { continue; }
+      let active = false; try { active = !!JSON.parse(readFileSync(f, "utf8")).active; } catch { /* */ }
+      if (!best || (active && !best.active) || (active === best.active && st.mtimeMs > best.mtime)) {
+        best = { file: f, mtime: st.mtimeMs, active };
+      }
+    }
+    if (best) return JSON.parse(readFileSync(best.file, "utf8")) as HarnessState;
+    // Legacy fallback: STATE_DIR/harness.json (pre-session-isolation)
+    if (existsSync(HARNESS_FILE)) return JSON.parse(readFileSync(HARNESS_FILE, "utf8")) as HarnessState;
+    return null;
+  }
   catch { return null; }
 }
 
