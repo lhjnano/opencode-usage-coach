@@ -375,28 +375,53 @@ async function UsageCoachPlugin(input) {
             return "Harness complete.";
           }
         }),
-        // Per-role model execution (config-driven, same server, no deadlock).
+        // Per-role model execution (config-driven, quota-aware, same server, no deadlock).
+        // P1: quota decision drives model selection + concurrency.
         generate: tool({
-          description: "Run the GENERATOR model on a prompt. The generator can use tools (write/edit files). Returns the model's text response.",
+          description: "Run the GENERATOR model on a prompt. Quota-aware: on THROTTLE, auto-switches to lighterModel if configured. Returns the model's text response.",
           args: { prompt: tool.schema.string() },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
-            const out = await runModel(input.client, cfg.generator, args.prompt, ctx.directory);
-            return out;
+            let decision = "GO";
+            try {
+              decision = current().decision;
+            } catch {
+            }
+            const throttle = decision === "THROTTLE" && cfg.lighterModel;
+            const model = throttle ? cfg.lighterModel : cfg.generator;
+            const out = await runModel(input.client, model, args.prompt, ctx.directory);
+            return out + (throttle ? `
+[usage-coach] quota THROTTLE \u2014 used lighter model ${cfg.lighterModel}` : "");
           }
         }),
         generate_batch: tool({
-          description: "Run the GENERATOR model on MULTIPLE tasks in PARALLEL. Pass an array of {id, prompt}. Returns all results at once. Use for INDEPENDENT tasks (much faster than sequential generate calls).",
+          description: "Run the GENERATOR model on MULTIPLE tasks. Quota-aware: GO = full parallel; THROTTLE = lighter model + concurrency capped at 2; STOP = refused. Use for INDEPENDENT tasks.",
           args: { tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), prompt: tool.schema.string() })) },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
-            const results = await Promise.all(args.tasks.map(async (t) => {
-              const out = await runModel(input.client, cfg.generator, t.prompt, ctx.directory);
-              return `[task ${t.id}] ${out}`;
-            }));
-            return results.join("\n\n");
+            let decision = "GO";
+            try {
+              decision = current().decision;
+            } catch {
+            }
+            if (decision === "STOP") return 'ERROR: quota STOP \u2014 halt the harness loop now. Call task_update(current, "halted_quota") and stop.';
+            const throttle = decision === "THROTTLE" && cfg.lighterModel;
+            const model = throttle ? cfg.lighterModel : cfg.generator;
+            const limit = decision === "THROTTLE" ? 2 : args.tasks.length;
+            const results = [];
+            for (let i = 0; i < args.tasks.length; i += limit) {
+              const batch = args.tasks.slice(i, i + limit);
+              const out = await Promise.all(batch.map(async (t) => {
+                const r = await runModel(input.client, model, t.prompt, ctx.directory);
+                return `[task ${t.id}] ${r}`;
+              }));
+              results.push(...out);
+            }
+            const note = throttle ? `
+[usage-coach] quota THROTTLE \u2014 lighter model ${cfg.lighterModel}, concurrency capped at ${limit}` : "";
+            return results.join("\n\n") + note;
           }
         }),
         grade: tool({

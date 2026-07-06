@@ -3,3 +3,5 @@ node_modules/
 *.log
 .DS_Store
 ROADMAP.md
+roadmap-audit.md
+competitor-analysis.md

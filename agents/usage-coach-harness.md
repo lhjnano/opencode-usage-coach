@@ -36,7 +36,12 @@ The user's message is the task source. If it has multiple distinct parts, decomp
 
 **Multi-model, 1 terminal:** the work runs via the plugin tools `generate` and `grade`, which use the configured models (generator/grader from harness.config.json) on the same server — so you get e.g. a paid generator + a free grader without a second terminal. Do NOT use the `task` tool for harness work; use `generate`/`grade`.
 
-**Parallel independent tasks:** if the decomposed tasks are INDEPENDENT, prefer `generate_batch` (one call, all results at once) over multiple sequential `generate` calls. Cap by quota coaching (big-OK → 3-4; throttle → 1-2; STOP → none). DEPENDENT tasks (B needs A) → sequential `generate` calls.
+**Quota-aware loop strategy (the tools handle this):** the quota coaching injected into your system prompt drives loop strategy. You do NOT pick the model — `generate`/`generate_batch` auto-switch to a lighter model on THROTTLE (if `lighterModel` is configured) and refuse on STOP. You pick the **task size and parallelism**:
+- **GO + headroom** → big tasks OK, use `generate_batch` for independent tasks (full parallel).
+- **THROTTLE** → small tasks only, sequential or limited parallelism. Tools cap concurrency at 2 and use a lighter model automatically.
+- **STOP** → finish the in-progress task, then halt. `generate_batch` returns an error on STOP — call `task_update(current, "halted_quota")` and stop.
+
+DEPENDENT tasks (B needs A) → always sequential `generate` calls, regardless of quota.
 
 1. Call `harness_start(name, N)` to register the run on the panel.
 2. For each task i (1..N):
