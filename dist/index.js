@@ -25,7 +25,7 @@ function setStateDir(dir) {
 }
 var NOOP_HOOKS = {};
 function log(msg) {
-  if (DEBUG) try {
+  try {
     appendFileSync(LOG_FILE, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
 `);
   } catch {
@@ -80,50 +80,53 @@ async function runModel(client, model, prompt, directory) {
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
     const modelID = slash >= 0 ? model.slice(slash + 1) : "";
     const s = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
-    const id = s?.data?.info?.id;
-    if (!id) {
-      log(`runModel(${model}): no session id returned`);
-      return null;
-    }
+    log(`runModel(${model}): create resp = ${JSON.stringify(s?.data ?? s).slice(0, 500)}`);
+    const id = s?.data?.info?.id ?? s?.data?.id ?? s?.id;
+    if (!id) return `ERROR: session.create returned no id (response: ${JSON.stringify(s?.data ?? s).slice(0, 200)})`;
     log(`runModel(${model}): session ${id} created, prompt ${prompt.length} chars`);
     await client.session.prompt({
       path: { id },
       body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] }
     });
-    let lastStatus = "";
+    log(`runModel(${model}): prompt sent to ${id}`);
+    let lastMsgCount = -1;
     let timedOut = false;
+    let text = "";
     for (let i = 0; i < 600; i++) {
       await sleep(1e3);
-      const st = await client.session.status({ path: { id } });
-      const status = st?.data?.[id]?.status ?? st?.data?.status;
-      if (status !== lastStatus) {
-        log(`runModel(${model}): poll ${i}s status="${status}"`);
-        lastStatus = String(status);
-      }
-      if (status === "idle" || status === "completed") break;
-      if (status === "error" || status === "failed") {
-        log(`runModel(${model}): sub-session ended with "${status}"`);
-        break;
+      try {
+        const msgs = await client.session.messages({ path: { id } });
+        const all = msgs?.data ?? msgs ?? [];
+        if (all.length !== lastMsgCount) {
+          log(`runModel(${model}): poll[${i}] msgs=${all.length}`);
+          lastMsgCount = all.length;
+        }
+        const lastAssistant = all.filter((m) => (m?.info?.role ?? m?.role) === "assistant").pop();
+        const parts = lastAssistant?.parts ?? lastAssistant?.info?.parts ?? [];
+        const t = parts.filter((p) => p?.type === "text").map((p) => p?.text ?? "").join("").trim();
+        if (t) {
+          text = t;
+          log(`runModel(${model}): got assistant text at poll[${i}] (${t.length} chars)`);
+          break;
+        }
+      } catch (e) {
+        log(`runModel(${model}): poll[${i}] messages err: ${String(e).slice(0, 120)}`);
       }
       if (i === 599) timedOut = true;
     }
     const elapsed = Math.round((Date.now() - t0) / 1e3);
-    const msgs = await client.session.messages({ path: { id } });
-    const all = msgs?.data ?? [];
-    const lastAssistant = all.filter((m) => m?.info?.role === "assistant").pop();
-    const parts = lastAssistant?.parts ?? [];
-    const text = parts.filter((p) => p?.type === "text").map((p) => p?.text ?? "").join("");
     try {
       await client.session.remove?.({ path: { id } });
     } catch {
     }
     log(`runModel(${model}): done ${elapsed}s, ${text.length} chars${timedOut ? " [TIMEOUT]" : ""}`);
-    if (timedOut) return `[runModel TIMEOUT after ${elapsed}s \u2014 result may be incomplete]
-${text.trim()}`;
-    return text.trim() || null;
+    if (timedOut) return `[runModel TIMEOUT after ${elapsed}s \u2014 no assistant text appeared]
+${text}`;
+    return text || `ERROR: no assistant text after ${elapsed}s (${lastMsgCount} messages seen)`;
   } catch (e) {
-    log(`runModel err (${model}, ${Math.round((Date.now() - t0) / 1e3)}s): ${String(e)}`);
-    return null;
+    const elapsed = Math.round((Date.now() - t0) / 1e3);
+    log(`runModel err (${model}, ${elapsed}s): ${String(e)}`);
+    return `ERROR: runModel exception after ${elapsed}s: ${String(e)}`;
   }
 }
 var num = (e, d) => {
@@ -380,7 +383,7 @@ async function UsageCoachPlugin(input) {
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
             const out = await runModel(input.client, cfg.generator, args.prompt, ctx.directory);
-            return out ?? `(generator ${cfg.generator} produced no text)`;
+            return out;
           }
         }),
         generate_batch: tool({
@@ -391,7 +394,7 @@ async function UsageCoachPlugin(input) {
             if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
             const results = await Promise.all(args.tasks.map(async (t) => {
               const out = await runModel(input.client, cfg.generator, t.prompt, ctx.directory);
-              return `[task ${t.id}] ${out ?? "(no output)"}`;
+              return `[task ${t.id}] ${out}`;
             }));
             return results.join("\n\n");
           }
@@ -404,7 +407,8 @@ async function UsageCoachPlugin(input) {
             const model = cfg.grader ?? cfg.generator;
             if (!model) return 'FAIL\n(ERROR: no grader/generator model configured. Set "grader" and "generator" in harness.config.json.)';
             const out = await runModel(input.client, model, args.prompt, ctx.directory);
-            if (!out) return "FAIL\n(grader produced no output \u2014 treating as FAIL to trigger a revise)";
+            if (out.startsWith("ERROR:")) return `FAIL
+(${out})`;
             const firstLine = out.split("\n").find((l) => l.trim()) ?? "";
             const f = firstLine.trim();
             const isPass = /^pass\b/i.test(f);

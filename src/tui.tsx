@@ -127,7 +127,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     }
     let s: State | null = null;
     try { s = getState(); } catch { s = null; }
-    // read harness from this SESSION's path (per-session isolation)
+    // read harness from this SESSION's path (per-session isolation),
+    // then fall back to the most recent active harness across all sessions
+    // (so the panel shows a running harness even if ctx.session_id is empty/mismatched).
     let h: HarnessState | null = null;
     try {
       const sid = ctx.session_id ?? "";
@@ -135,6 +137,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         const hf = join(STATE_DIR, sid, "harness.json");
         if (existsSync(hf)) h = JSON.parse(readFileSync(hf, "utf8")) as HarnessState;
       }
+      if (!h || h.active === false) h = readHarness(); // module-level: scans session dirs for recent active
     } catch { h = null; }
 
     const nodes: any[] = [];

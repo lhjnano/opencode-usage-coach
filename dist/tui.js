@@ -173,6 +173,7 @@ function initializeTui(api, disposeRoot) {
         const hf = join(STATE_DIR, sid, "harness.json");
         if (existsSync(hf)) h = JSON.parse(readFileSync(hf, "utf8"));
       }
+      if (!h || h.active === false) h = readHarness();
     } catch {
       h = null;
     }
