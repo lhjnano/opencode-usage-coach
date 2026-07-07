@@ -203,6 +203,17 @@ Recurring issues and fixes — mostly learned the hard way during development.
 - Harness completion sets `active:false` → hidden from the TUI.
 - Override the state path with `UC_STATE_DIR` (forces global state).
 
+**Key gotcha — opencode TUI `ctx` does NOT carry `session_id`.**
+The slot context passed to `panel(ctx)` contains only `{ theme }`. There is no `session_id`/`sessionID` field. The current session ID lives in **`api.route.current.params.sessionID`** instead — the panel reads it from there. If you ever see harnesses from other sessions leaking in, the cause is almost certainly that `sid` resolved to empty (→ fallback broad scan).
+
+**Debugging session isolation** (if it breaks again):
+1. Check `~/.cache/opencode-usage-coach/projects/<hash>/tui-debug.log` — is `panel` being called? What `routeSid` value?
+2. `api.route.current.params.sessionID` — populated? (Empty → panel falls back to scanning all sessions.)
+3. New TUI code loaded? `tui-loaded.txt` (MARKER) should show `loaded-v2 ...`. If it still says `loaded`, the new dist isn't being picked up.
+4. `appendFileSync` imported in `src/tui.tsx`? If missing, **all TUI debug logging silently fails** (ReferenceError swallowed by try/catch) — this wasted a lot of debugging time once.
+
+**Past issue (fixed v0.3.4):** panel read `ctx.session_id` which was always `undefined` → fallback scanned every session → another session's active harness leaked in. Fixed by reading `api.route.current.params.sessionID`.
+
 ## Status
 - ✅ Quota guardian + TUI panel (per-provider coach view, colors, collapsible Alt+H)
 - ✅ Harness: agent mode (triage) with generate/grade model-specific tools (1 terminal, multi-model)
