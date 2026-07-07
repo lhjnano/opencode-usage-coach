@@ -28,6 +28,16 @@ the loop** — and ships a harness agent mode.
   explicitly ask "run this through the harness" or "use the harness for this". The harness
   tools are only available when the harness agent mode is active (see Install).
 
+**Learning from failures (learning loop):**
+- When `grade` returns FAIL, the harness enters a learning cycle: `record_failure` → `investigate` (root-cause analysis) → `verify_diagnosis` → `generalize` (extract a reusable rule).
+- Rules accumulate in `rules.md` → the next `generate` call automatically includes them → the harness avoids repeating the same mistake.
+- Tools: `record_failure`, `investigate`, `verify_diagnosis`, `generalize`.
+
+**Domain knowledge base:**
+- `investigate` and `generate` query a local domain DB before running — known facts are injected into the prompt ("Known facts from domain DB: ...").
+- Unknown domains are investigated (webfetch/docs) and stored as graph nodes/edges → accumulates over time → evidence-based judgments instead of speculation.
+- Storage: `nodes.ndjson` + `edges.ndjson` under the project state dir.
+
 ## Requirements
 - opencode (tested on 1.17.13) with a quota-metered provider configured.
 - `codexbar` CLI with your provider key wired (e.g. `codexbar config set-api-key --provider zai --stdin`).
@@ -215,8 +225,13 @@ The slot context passed to `panel(ctx)` contains only `{ theme }`. There is no `
 **Past issue (fixed v0.3.4):** panel read `ctx.session_id` which was always `undefined` → fallback scanned every session → another session's active harness leaked in. Fixed by reading `api.route.current.params.sessionID`.
 
 ## Status
-- ✅ Quota guardian + TUI panel (per-provider coach view, colors, collapsible Alt+H)
-- ✅ Harness: agent mode (triage) with generate/grade model-specific tools (1 terminal, multi-model)
+- ✅ Quota guardian + TUI panel (per-provider coach view, 5h/1w gauges, collapsible Alt+H)
+- ✅ Harness: agent mode with generate/grade tools (multi-model, 1 terminal)
+- ✅ Deterministic loop via NEXT directives (parallel PATH A / sequential PATH B)
+- ✅ Quota-aware tools (GO/THROTTLE/STOP drive model selection + concurrency)
+- ✅ Learning loop (record_failure → investigate → verify_diagnosis → generalize → rules.md)
+- ✅ Domain knowledge base (graph store, investigate/generate injection)
+- ✅ Session isolation (api.route, per-session harness state)
 - ✅ npm packaging (`opencode plugin install opencode-usage-coach`)
 
 License: MIT.

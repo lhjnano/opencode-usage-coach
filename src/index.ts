@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
+import { initDomain, queryDomain } from "./domain.js";
 
 const PLUGIN_NAME = "opencode-usage-coach";
 const DEBUG = process.env.UC_DEBUG === "1";
@@ -58,6 +59,24 @@ function failuresFile(): string { return join(STATE_DIR, "failures.ndjson"); }
 function readRules(): string {
   try { const f = rulesFile(); if (!existsSync(f)) return ""; return readFileSync(f, "utf8").trim(); }
   catch { return ""; }
+}
+
+// Lightweight keyword extraction for domain DB queries: lowercase, split on
+// non-alphanumeric, drop short/common tokens. Defensive — never throws.
+function extractKeywords(text: string): string[] {
+  try {
+    const STOP = new Set(["the", "and", "for", "with", "that", "this", "from", "into", "your", "you", "are", "was", "but", "not", "all", "any", "use", "task", "prompt"]);
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of (text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+      const t = raw.trim();
+      if (t.length < 3 || STOP.has(t) || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+      if (out.length >= 16) break;
+    }
+    return out;
+  } catch { return []; }
 }
 
 // Harness state — per-SESSION (each opencode session sees only its own harness)
@@ -241,6 +260,7 @@ export default async function UsageCoachPlugin(input: {
   // Top-level guard: even if init fails, opencode keeps working.
   try {
     setStateDir(input.directory); // per-directory state isolation
+    initDomain(STATE_DIR); // domain DB shares the same per-project state dir
     // Provider + lighter model: env > config > empty (codexbar picks its default).
     // No hardcoded provider — this plugin is provider-agnostic.
     const cfg0 = readHarnessCfg(input.directory);
@@ -387,8 +407,19 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           async execute(args: { task: string; prompt: string; gradeResult: string; model?: string }, ctx: any) {
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json).";
+            // Query domain DB for known facts before analyzing root cause.
+            let domainPrefix = "";
+            try {
+              const kws = extractKeywords(`${args.task} ${args.gradeResult}`);
+              if (kws.length) {
+                const { nodes, edges } = queryDomain(kws);
+                if ((nodes && nodes.length) || (edges && edges.length)) {
+                  domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n`;
+                }
+              }
+            } catch (e) { log(`investigate domain query err: ${String(e)}`); }
             const rcaPrompt = `A task failed. Analyze the ROOT CAUSE (not just the symptom).\nTask: ${args.task}\nWhat was expected (from grade): ${args.gradeResult}\nRead relevant files in the directory if needed.\nOutput a structured root cause:\ncategory: (one of: constraint-violation, missing-context, tool-misuse, model-limitation, other)\nexplanation: <why it failed>\nevidence: <file/line or specific quote>`;
-            const out = await runModel(input.client, cfg.generator, rcaPrompt, ctx.directory);
+            const out = await runModel(input.client, cfg.generator, domainPrefix + rcaPrompt, ctx.directory);
             return out + "\n[usage-coach NEXT] call verify_diagnosis with this diagnosis.";
           },
         }),
@@ -450,7 +481,17 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const model = throttle ? cfg.lighterModel! : cfg.generator;
             // Stage 5 (reference): inject accumulated rules from past failures into the prompt.
             const rules = readRules();
-            const prefix = rules ? `Lessons learned from previous failures (apply where relevant):\n${rules}\n\n---\n\n` : "";
+            let prefix = rules ? `Lessons learned from previous failures (apply where relevant):\n${rules}\n\n---\n\n` : "";
+            // Also inject known facts from the domain DB (same project scope).
+            try {
+              const kws = extractKeywords(args.prompt);
+              if (kws.length) {
+                const { nodes, edges } = queryDomain(kws);
+                if ((nodes && nodes.length) || (edges && edges.length)) {
+                  prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n` + prefix;
+                }
+              }
+            } catch (e) { log(`generate domain query err: ${String(e)}`); }
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory);
             return out + (throttle ? `\n[usage-coach] quota THROTTLE — used lighter model ${cfg.lighterModel}` : "") + `\n[usage-coach NEXT] call task_update(i, title, "grading"), then grade to evaluate this work.`;
           },
