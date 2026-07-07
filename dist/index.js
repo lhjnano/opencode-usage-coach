@@ -41,6 +41,9 @@ function writeState(c) {
 function rulesFile() {
   return join(STATE_DIR, "rules.md");
 }
+function failuresFile() {
+  return join(STATE_DIR, "failures.ndjson");
+}
 function readRules() {
   try {
     const f = rulesFile();
@@ -379,6 +382,110 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             return "Harness complete.";
           }
         }),
+        record_failure: tool({
+          description: "Stage 1 (RECORD) of the learning loop. Append a failure record to failures.ndjson for later root-cause analysis.",
+          args: {
+            task: tool.schema.string(),
+            prompt: tool.schema.string(),
+            gradeResult: tool.schema.string(),
+            model: tool.schema.string().optional(),
+            revisions: tool.schema.number().optional()
+          },
+          async execute(args, _ctx) {
+            const rec = { ts: (/* @__PURE__ */ new Date()).toISOString(), task: args.task, prompt: args.prompt, gradeResult: args.gradeResult, model: args.model, revisions: args.revisions };
+            try {
+              mkdirSync(STATE_DIR, { recursive: true });
+              appendFileSync(failuresFile(), JSON.stringify(rec) + "\n");
+            } catch (e) {
+              log(`record_failure err: ${String(e)}`);
+            }
+            return `Failure recorded. [usage-coach NEXT] call investigate({failure: ${JSON.stringify(rec)}}) to find the root cause.`;
+          }
+        }),
+        investigate: tool({
+          description: "Stage 2 (INVESTIGATE) of the learning loop. Run the generator to analyze the ROOT CAUSE of a failure (not just the symptom).",
+          args: {
+            task: tool.schema.string(),
+            prompt: tool.schema.string(),
+            gradeResult: tool.schema.string(),
+            model: tool.schema.string().optional()
+          },
+          async execute(args, ctx) {
+            const cfg = readHarnessCfg(ctx.directory);
+            if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
+            const rcaPrompt = `A task failed. Analyze the ROOT CAUSE (not just the symptom).
+Task: ${args.task}
+What was expected (from grade): ${args.gradeResult}
+Read relevant files in the directory if needed.
+Output a structured root cause:
+category: (one of: constraint-violation, missing-context, tool-misuse, model-limitation, other)
+explanation: <why it failed>
+evidence: <file/line or specific quote>`;
+            const out = await runModel(input.client, cfg.generator, rcaPrompt, ctx.directory);
+            return out + "\n[usage-coach NEXT] call verify_diagnosis with this diagnosis.";
+          }
+        }),
+        verify_diagnosis: tool({
+          description: "Stage 3 (VERIFY) of the learning loop. Run the grader to check whether a diagnosis is CORRECT and ACTIONABLE (leads to a useful rule). Returns PASS/FAIL + a [usage-coach NEXT] directive.",
+          args: {
+            diagnosis: tool.schema.string(),
+            task: tool.schema.string(),
+            gradeResult: tool.schema.string()
+          },
+          async execute(args, ctx) {
+            const cfg = readHarnessCfg(ctx.directory);
+            const model = cfg.grader ?? cfg.generator;
+            if (!model) return "FAIL\n(ERROR: no grader/generator model configured.)\n[usage-coach NEXT] configure grader in harness.config.json, then retry verify_diagnosis.";
+            const verifyPrompt = `Verify this root-cause analysis for a failure.
+Task: ${args.task}
+Grade feedback: ${args.gradeResult}
+Diagnosis: ${args.diagnosis}
+Is the diagnosis CORRECT and ACTIONABLE (leads to a useful rule)?
+Output PASS (the diagnosis is right) or FAIL (re-investigate needed), then reason.`;
+            const out = await runModel(input.client, model, verifyPrompt, ctx.directory);
+            let verdict = "FAIL";
+            if (!out.startsWith("ERROR:")) {
+              const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
+              if (/^pass\b/i.test(f)) verdict = "PASS";
+              else verdict = "FAIL";
+            }
+            const next = verdict === "PASS" ? `
+[usage-coach NEXT] call generalize with this verified diagnosis.` : `
+[usage-coach NEXT] FAIL \u2014 re-investigate the root cause.`;
+            return out + "\n" + next;
+          }
+        }),
+        generalize: tool({
+          description: "Stage 4 (GENERALIZE) of the learning loop. Run the generator to turn a verified root cause into a reusable rule and append it to rules.md, so the next generate call includes it. Returns the rule text and a [usage-coach NEXT] directive.",
+          args: {
+            diagnosis: tool.schema.string(),
+            task: tool.schema.string()
+          },
+          async execute(args, ctx) {
+            const cfg = readHarnessCfg(ctx.directory);
+            if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
+            const genPrompt = `Turn this verified root cause into a GENERAL, REUSABLE rule for future tasks of this kind.
+Diagnosis: ${args.diagnosis}
+Failed task: ${args.task}
+Output a single rule in the form: 'For <task-type> tasks, always <check/do X> because <reason>.'
+Keep it concrete and actionable.`;
+            const out = await runModel(input.client, cfg.generator, genPrompt, ctx.directory);
+            const rule = out;
+            try {
+              const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+              mkdirSync(STATE_DIR, { recursive: true });
+              appendFileSync(rulesFile(), `## Rule (${date})
+${rule}
+Origin: ${args.task}
+
+`);
+            } catch (e) {
+              log(`generalize err: ${String(e)}`);
+            }
+            return `${rule}
+[usage-coach NEXT] rule saved to rules.md. The next generate call will include it. Call task_update for the original failed task -> failed, then proceed.`;
+          }
+        }),
         // Per-role model execution (config-driven, quota-aware, same server, no deadlock).
         // P1: quota decision drives model selection + concurrency.
         generate: tool({
@@ -453,7 +560,12 @@ ${rules}
             }
             const next = verdict === "PASS" ? `
 [usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).` : `
-[usage-coach NEXT] FAIL -> if revisions < 2: task_update(i, title, "revising", revisions+1) + generate({prompt: "Apply feedback:\\n{grade result}\\nTask: {title}"}); else: task_update(i, title, "failed", "FAIL") -> next task.`;
+[usage-coach NEXT] FAIL -> if revisions < 2: task_update(i, title, "revising", revisions+1) + generate({prompt: "Apply feedback:\\n{grade result}\\nTask: {title}"}); else: run the learning loop before failing \u2014
+  1. record_failure({task, prompt, gradeResult, model, revisions})
+  2. investigate({task, prompt, gradeResult}) -> diagnosis
+  3. verify_diagnosis({diagnosis, task, gradeResult}) -> if PASS: generalize({diagnosis, task}) (saves rule to rules.md)
+  4. task_update(i, title, "failed", "FAIL") -> next task.
+The next generate call will automatically include the new rule.`;
             return out + "\n" + next;
           }
         })

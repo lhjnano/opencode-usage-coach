@@ -5,7 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.3] - 2026-07-06
+## [0.3.4] - 2026-07-07
+
+### Added
+- **Learning loop tools (Stages 1-4)**: `record_failure` (→ failures.ndjson), `investigate` (root-cause via generator), `verify_diagnosis` (verify via grader), `generalize` (→ rules.md). Stage 5 (reference: generate reads rules.md) landed in 0.3.3.
+- **grade FAIL NEXT** now points to the learning loop when revisions are exhausted (record_failure → investigate → verify_diagnosis → generalize → failed).
+
+### Fixed
+- **TUI session isolation**: opencode TUI `ctx` does NOT carry `session_id` (only `theme`). The panel now reads the current session from `api.route.current.params.sessionID` and shows only that session's harness. Previously fell back to a broad scan → other sessions' harnesses leaked in.
+- **TUI task title**: full title shown (was truncated to 12 chars with `…`).
+- **TUI quota display**: shows `n/a` when quota data is unavailable (was showing -1%).
+- **TUI task elapsed time**: shows seconds in current status (e.g. `gen 30s`).
+- TUI: `appendFileSync` was missing from imports → all debug logging silently failed. Fixed.
+
+## [0.3.3] - 2026-07-07
 
 ### Changed
 - **runModel rewritten — polling removed.** Per SDK docs, `session.prompt()` blocks until the sub-session completes and returns the `AssistantMessage` directly. Previous versions polled `session.messages()` (because we wrongly assumed prompt returned immediately), which caused duplicate waiting and frequent `Tool execution aborted`. Now runModel just reads the response parts — simpler, faster, abort-resistant.

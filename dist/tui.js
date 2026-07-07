@@ -5,7 +5,7 @@ import { effect as _$effect } from "@opentui/solid";
 import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from "fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync } from "fs";
 import { createHash } from "crypto";
 import { homedir } from "os";
 import { join, resolve } from "path";
@@ -91,20 +91,42 @@ function barFill(p) {
 function barEmpty(p) {
   return "\u2591".repeat(10 - Math.max(0, Math.min(10, Math.round(p / 10))));
 }
-function short(s, n) {
-  return s.length <= n ? s : s.slice(0, n - 1) + "\u2026";
-}
 function initializeTui(api, disposeRoot) {
   STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(api.state.path.directory);
   STATE_FILE = join(STATE_DIR, "state.json");
   HARNESS_FILE = join(STATE_DIR, "harness.json");
   MARKER = join(STATE_DIR, "tui-loaded.txt");
+  const TUI_LOG = join(STATE_DIR, "tui-debug.log");
+  const tlog = (msg) => {
+    try {
+      appendFileSync(MARKER, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+`);
+      appendFileSync(TUI_LOG, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+`);
+    } catch (e) {
+      try {
+        appendFileSync(MARKER, `TLOG ERR: ${String(e)}
+`);
+      } catch {
+      }
+    }
+  };
   try {
     mkdirSync(STATE_DIR, {
       recursive: true
     });
-    writeFileSync(MARKER, `loaded ${(/* @__PURE__ */ new Date()).toISOString()} @ ${api.state.path.directory}`);
+    writeFileSync(MARKER, `loaded-v2 ${(/* @__PURE__ */ new Date()).toISOString()} @ ${api.state.path.directory}`);
   } catch {
+  }
+  tlog(`init start | dir=${api.state.path.directory} | STATE_DIR=${STATE_DIR}`);
+  try {
+    tlog(`api keys=${Object.keys(api).join(",")}`);
+    tlog(`api.state=${JSON.stringify(api.state).slice(0, 400)}`);
+    tlog(`api.state.path=${JSON.stringify(api.state?.path).slice(0, 300)}`);
+    const r = api.route;
+    tlog(`api.route type=${typeof r} keys=${r && typeof r === "object" ? Object.keys(r).join(",") : "?"} val=${JSON.stringify(r).slice(0, 400)}`);
+  } catch (e) {
+    tlog(`api probe err: ${String(e)}`);
   }
   const [getState, setState] = createSignal(readState());
   const [getHarness, setHarness] = createSignal(readHarness());
@@ -168,7 +190,8 @@ function initializeTui(api, disposeRoot) {
     }
     let h = null;
     try {
-      const sid = ctx.session_id ?? "";
+      const routeSid = api.route?.current?.params?.sessionID ?? "";
+      const sid = routeSid || (ctx.session_id ?? "");
       if (sid) {
         const hf = join(STATE_DIR, sid, "harness.json");
         if (existsSync(hf)) h = JSON.parse(readFileSync(hf, "utf8"));
@@ -371,15 +394,17 @@ function initializeTui(api, disposeRoot) {
           _$insert(_el$59, lbl, _el$62);
           _$insert(_el$59, rev, _el$62);
           _$insert(_el$59, elapsedStr, _el$62);
-          _$insert(_el$59, () => short(t.title, 12), null);
+          _$insert(_el$59, () => t.title, null);
           _$effect((_$p) => _$setProp(_el$59, "style", st(sKey), _$p));
           return _el$59;
         })());
         const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
         const provCoach = s?.providers?.find((p) => p.id === pv || pv && p.id.startsWith(pv) || pv && pv.startsWith(p.id));
-        const pct = provCoach ? provCoach.fiveHour : s?.fiveHour ?? 0;
+        const rawPct = provCoach ? provCoach.fiveHour : s?.fiveHour ?? 0;
+        const pct = rawPct < 0 ? 0 : rawPct;
+        const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
         nodes.push((() => {
-          var _el$63 = _$createElement("box"), _el$64 = _$createElement("text"), _el$66 = _$createElement("text"), _el$67 = _$createElement("text"), _el$68 = _$createElement("text"), _el$69 = _$createTextNode(` `), _el$70 = _$createTextNode(`%`);
+          var _el$63 = _$createElement("box"), _el$64 = _$createElement("text"), _el$66 = _$createElement("text"), _el$67 = _$createElement("text"), _el$68 = _$createElement("text"), _el$69 = _$createTextNode(` `);
           _$insertNode(_el$63, _el$64);
           _$insertNode(_el$63, _el$66);
           _$insertNode(_el$63, _el$67);
@@ -389,8 +414,7 @@ function initializeTui(api, disposeRoot) {
           _$insert(_el$66, () => barFill(pct));
           _$insert(_el$67, () => barEmpty(pct));
           _$insertNode(_el$68, _el$69);
-          _$insertNode(_el$68, _el$70);
-          _$insert(_el$68, pct, _el$70);
+          _$insert(_el$68, pctLabel, null);
           _$effect((_p$) => {
             var _v$1 = st("text"), _v$10 = st("textMuted");
             _v$1 !== _p$.e && (_p$.e = _$setProp(_el$66, "style", _v$1, _p$.e));
@@ -405,28 +429,32 @@ function initializeTui(api, disposeRoot) {
       }
     }
     return (() => {
-      var _el$71 = _$createElement("box");
-      _$setProp(_el$71, "flexDirection", "column");
-      _$insert(_el$71, nodes);
-      return _el$71;
+      var _el$70 = _$createElement("box");
+      _$setProp(_el$70, "flexDirection", "column");
+      _$insert(_el$70, nodes);
+      return _el$70;
     })();
   };
+  tlog("registering slots");
   api.slots.register({
     order: 80,
     slots: {
       sidebar_footer(ctx) {
+        tlog("sidebar_footer slot called");
         try {
           return panel(ctx);
-        } catch {
+        } catch (e) {
+          tlog(`sidebar_footer err: ${String(e)}`);
           return (() => {
-            var _el$72 = _$createElement("text");
-            _$insertNode(_el$72, _$createTextNode(`usage-coach`));
-            return _el$72;
+            var _el$71 = _$createElement("text");
+            _$insertNode(_el$71, _$createTextNode(`usage-coach`));
+            return _el$71;
           })();
         }
       }
     }
   });
+  tlog("slots registered, init complete");
 }
 var tui = async (api) => {
   createRoot((disposeRoot) => initializeTui(api, disposeRoot));

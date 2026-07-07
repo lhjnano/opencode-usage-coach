@@ -4,7 +4,7 @@
 // Diagnostic: on load, writes a marker file ~/.cache/opencode-usage-coach/tui-loaded.txt.
 
 import type { TuiPlugin, TuiPluginApi, TuiSlotContext } from "@opencode-ai/plugin/tui";
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -88,8 +88,20 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
   STATE_FILE = join(STATE_DIR, "state.json");
   HARNESS_FILE = join(STATE_DIR, "harness.json");
   MARKER = join(STATE_DIR, "tui-loaded.txt");
+  const TUI_LOG = join(STATE_DIR, "tui-debug.log");
+  const tlog = (msg: string) => { try { appendFileSync(MARKER, `${new Date().toISOString()} ${msg}\n`); appendFileSync(TUI_LOG, `${new Date().toISOString()} ${msg}\n`); } catch (e) { try { appendFileSync(MARKER, `TLOG ERR: ${String(e)}\n`); } catch { /* */ } } };
   // Load marker (diagnostic)
-  try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(MARKER, `loaded ${new Date().toISOString()} @ ${api.state.path.directory}`); } catch { /* */ }
+  try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(MARKER, `loaded-v2 ${new Date().toISOString()} @ ${api.state.path.directory}`); } catch { /* */ }
+  tlog(`init start | dir=${api.state.path.directory} | STATE_DIR=${STATE_DIR}`);
+  // Probe where sessionID might live (ctx doesn't have it — check api.state).
+  try {
+    tlog(`api keys=${Object.keys(api).join(",")}`);
+    tlog(`api.state=${JSON.stringify(api.state).slice(0, 400)}`);
+    tlog(`api.state.path=${JSON.stringify(api.state?.path).slice(0, 300)}`);
+    // route is the most likely place for the current session ID
+    const r: any = (api as any).route;
+    tlog(`api.route type=${typeof r} keys=${r && typeof r === "object" ? Object.keys(r).join(",") : "?"} val=${JSON.stringify(r).slice(0, 400)}`);
+  } catch (e) { tlog(`api probe err: ${String(e)}`); }
 
   const [getState, setState] = createSignal<State | null>(readState());
   const [getHarness, setHarness] = createSignal<HarnessState | null>(readHarness());
@@ -132,7 +144,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     // (so the panel shows a running harness even if ctx.session_id is empty/mismatched).
     let h: HarnessState | null = null;
     try {
-      const sid = ctx.session_id ?? "";
+      // opencode TUI ctx doesn't carry session_id — read it from api.route.current.params.sessionID
+      const routeSid = (api.route as any)?.current?.params?.sessionID ?? "";
+      const sid = routeSid || (ctx.session_id ?? "");
       if (sid) {
         // Current session ONLY — never fall back to other sessions' harnesses (session isolation).
         // This prevents a harness running in session B from showing in session A's panel.
@@ -177,24 +191,32 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         // elapsed time in current status (hide on terminal states)
         const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1000)) : 0;
         const elapsedStr = (t.status === "completed" || t.status === "failed") ? "" : (elapsed > 0 ? ` ${elapsed}s` : "");
-        nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev}{elapsedStr} {short(t.title, 12)}</text>);
+        nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev}{elapsedStr} {t.title}</text>);
         // quota: read from coaching state (h.quotas is not populated — use the live state)
         const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
         const provCoach = s?.providers?.find((p: any) => p.id === pv || (pv && p.id.startsWith(pv)) || (pv && pv.startsWith(p.id)));
-        const pct = provCoach ? provCoach.fiveHour : (s?.fiveHour ?? 0);
-        nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("textMuted")}>{barEmpty(pct)}</text><text> {pct}%</text></box>);
+        const rawPct = provCoach ? provCoach.fiveHour : (s?.fiveHour ?? 0);
+        const pct = rawPct < 0 ? 0 : rawPct;  // -1 means no quota data — show empty bar
+        const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
+        nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("textMuted")}>{barEmpty(pct)}</text><text> {pctLabel}</text></box>);
       }
     }
 
     return (<box flexDirection="column">{nodes}</box>);
   };
 
+  tlog("registering slots");
   api.slots.register({
     order: 80,
     slots: {
-      sidebar_footer(ctx: TuiSlotContext & { session_id?: string }) { try { return panel(ctx); } catch { return <text>usage-coach</text>; } },
+      sidebar_footer(ctx: TuiSlotContext & { session_id?: string }) {
+        tlog("sidebar_footer slot called");
+        try { return panel(ctx); }
+        catch (e) { tlog(`sidebar_footer err: ${String(e)}`); return <text>usage-coach</text>; }
+      },
     },
   });
+  tlog("slots registered, init complete");
 }
 
 const tui: TuiPlugin = async (api: TuiPluginApi) => {
