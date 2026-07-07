@@ -94,8 +94,11 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     });
     log(`runModel(${model}): prompt sent to ${id}`);
     // Poll: read messages until an assistant text part appears (sub-session completed).
-    // We CANNOT use session.status — it returns the MAIN session's state, not the sub-session's,
-    // so the sub-session's completion is invisible there. Instead, watch for the assistant reply.
+    // We CANNOT use session.status — confirmed via official docs that status() is NOT a
+    // documented SDK method. Status flows through *events* (session.idle), and empirically
+    // the status() call returns the MAIN session's state, not the sub-session's. The official
+    // sub-session tracking path is session.children() + session.messages(). We use the simpler
+    // messages-polling approach: watch for the assistant reply text directly.
     let lastMsgCount = -1;
     let timedOut = false;
     let text = "";
