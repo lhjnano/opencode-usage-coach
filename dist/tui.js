@@ -86,10 +86,12 @@ var TLABEL = {
   halted_quota: "quota-halt"
 };
 function barFill(p) {
-  return "\u2588".repeat(Math.max(0, Math.min(10, Math.round(p / 10))));
+  const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
+  return "\u2588".repeat(n);
 }
 function barEmpty(p) {
-  return "\u2591".repeat(10 - Math.max(0, Math.min(10, Math.round(p / 10))));
+  const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
+  return "\u2591".repeat(10 - n);
 }
 function initializeTui(api, disposeRoot) {
   STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(api.state.path.directory);
@@ -236,7 +238,7 @@ function initializeTui(api, disposeRoot) {
             _$insert(_el$12, () => p.fiveHour, _el$14);
             _$insert(_el$12, () => p.fiveHourReset, null);
             _$effect((_p$) => {
-              var _v$ = st("text"), _v$2 = st("textMuted");
+              var _v$ = st("text"), _v$2 = st("text");
               _v$ !== _p$.e && (_p$.e = _$setProp(_el$10, "style", _v$, _p$.e));
               _v$2 !== _p$.t && (_p$.t = _$setProp(_el$11, "style", _v$2, _p$.t));
               return _p$;
@@ -253,7 +255,7 @@ function initializeTui(api, disposeRoot) {
             _$insertNode(_el$15, _el$19);
             _$insertNode(_el$15, _el$20);
             _$setProp(_el$15, "flexDirection", "row");
-            _$insertNode(_el$16, _$createTextNode(` wk `));
+            _$insertNode(_el$16, _$createTextNode(` 1w `));
             _$insert(_el$18, () => barFill(p.weekly));
             _$insert(_el$19, () => barEmpty(p.weekly));
             _$insertNode(_el$20, _el$21);
@@ -261,7 +263,7 @@ function initializeTui(api, disposeRoot) {
             _$insert(_el$20, () => p.weekly, _el$22);
             _$insert(_el$20, () => p.weeklyReset, null);
             _$effect((_p$) => {
-              var _v$3 = st("text"), _v$4 = st("textMuted");
+              var _v$3 = st("text"), _v$4 = st("text");
               _v$3 !== _p$.e && (_p$.e = _$setProp(_el$18, "style", _v$3, _p$.e));
               _v$4 !== _p$.t && (_p$.t = _$setProp(_el$19, "style", _v$4, _p$.t));
               return _p$;
@@ -294,7 +296,7 @@ function initializeTui(api, disposeRoot) {
           _$insertNode(_el$32, _el$34);
           _$insert(_el$32, () => s.fiveHour, _el$34);
           _$effect((_p$) => {
-            var _v$5 = st("text"), _v$6 = st("textMuted");
+            var _v$5 = st("text"), _v$6 = st("text");
             _v$5 !== _p$.e && (_p$.e = _$setProp(_el$30, "style", _v$5, _p$.e));
             _v$6 !== _p$.t && (_p$.t = _$setProp(_el$31, "style", _v$6, _p$.t));
             return _p$;
@@ -311,14 +313,14 @@ function initializeTui(api, disposeRoot) {
           _$insertNode(_el$35, _el$39);
           _$insertNode(_el$35, _el$40);
           _$setProp(_el$35, "flexDirection", "row");
-          _$insertNode(_el$36, _$createTextNode(` wk `));
+          _$insertNode(_el$36, _$createTextNode(` 1w `));
           _$insert(_el$38, () => barFill(s.weekly));
           _$insert(_el$39, () => barEmpty(s.weekly));
           _$insertNode(_el$40, _el$41);
           _$insertNode(_el$40, _el$42);
           _$insert(_el$40, () => s.weekly, _el$42);
           _$effect((_p$) => {
-            var _v$7 = st("text"), _v$8 = st("textMuted");
+            var _v$7 = st("text"), _v$8 = st("text");
             _v$7 !== _p$.e && (_p$.e = _$setProp(_el$38, "style", _v$7, _p$.e));
             _v$8 !== _p$.t && (_p$.t = _$setProp(_el$39, "style", _v$8, _p$.t));
             return _p$;
@@ -342,7 +344,7 @@ function initializeTui(api, disposeRoot) {
           _$insertNode(_el$48, _el$50);
           _$insert(_el$48, () => s.monthly, _el$50);
           _$effect((_p$) => {
-            var _v$9 = st("text"), _v$0 = st("textMuted");
+            var _v$9 = st("text"), _v$0 = st("text");
             _v$9 !== _p$.e && (_p$.e = _$setProp(_el$46, "style", _v$9, _p$.e));
             _v$0 !== _p$.t && (_p$.t = _$setProp(_el$47, "style", _v$0, _p$.t));
             return _p$;
@@ -416,7 +418,7 @@ function initializeTui(api, disposeRoot) {
           _$insertNode(_el$68, _el$69);
           _$insert(_el$68, pctLabel, null);
           _$effect((_p$) => {
-            var _v$1 = st("text"), _v$10 = st("textMuted");
+            var _v$1 = st("text"), _v$10 = st("text");
             _v$1 !== _p$.e && (_p$.e = _$setProp(_el$66, "style", _v$1, _p$.e));
             _v$10 !== _p$.t && (_p$.t = _$setProp(_el$67, "style", _v$10, _p$.t));
             return _p$;

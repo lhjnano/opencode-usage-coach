@@ -72,10 +72,13 @@ const TLABEL: Record<string, string> = {
 };
 
 function barFill(p: number): string {
-  return "█".repeat(Math.max(0, Math.min(10, Math.round(p / 10))));
+  // 0% = empty; anything > 0% shows at least 1 block (otherwise low % looks like 0 / invisible row)
+  const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
+  return "█".repeat(n);
 }
 function barEmpty(p: number): string {
-  return "░".repeat(10 - Math.max(0, Math.min(10, Math.round(p / 10))));
+  const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
+  return "░".repeat(10 - n);
 }
 // Truncate title to fit sidebar width
 function short(s: string, n: number): string {
@@ -166,14 +169,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
       if (s.providers && s.providers.length > 0) {
         for (const p of s.providers) {
           nodes.push(<text style={st("textMuted")}> {p.name}</text>);
-          nodes.push(<box flexDirection="row"><text>  5h </text><text style={st("text")}>{barFill(p.fiveHour)}</text><text style={st("textMuted")}>{barEmpty(p.fiveHour)}</text><text> {p.fiveHour}%  {p.fiveHourReset}</text></box>);
-          nodes.push(<box flexDirection="row"><text>  wk </text><text style={st("text")}>{barFill(p.weekly)}</text><text style={st("textMuted")}>{barEmpty(p.weekly)}</text><text> {p.weekly}%  {p.weeklyReset}</text></box>);
+          nodes.push(<box flexDirection="row"><text>  5h </text><text style={st("text")}>{barFill(p.fiveHour)}</text><text style={st("text")}>{barEmpty(p.fiveHour)}</text><text> {p.fiveHour}%  {p.fiveHourReset}</text></box>);
+          nodes.push(<box flexDirection="row"><text>  1w </text><text style={st("text")}>{barFill(p.weekly)}</text><text style={st("text")}>{barEmpty(p.weekly)}</text><text> {p.weekly}%  {p.weeklyReset}</text></box>);
           nodes.push(<text style={st(dKey)}>  {"->"} {p.advice}</text>);
         }
       } else {
-        nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("textMuted")}>{barEmpty(s.fiveHour)}</text><text> {s.fiveHour}%</text></box>);
-        nodes.push(<box flexDirection="row"><text> wk </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("textMuted")}>{barEmpty(s.weekly)}</text><text> {s.weekly}%</text></box>);
-        nodes.push(<box flexDirection="row"><text> mo </text><text style={st("text")}>{barFill(s.monthly)}</text><text style={st("textMuted")}>{barEmpty(s.monthly)}</text><text> {s.monthly}%</text></box>);
+      nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> {s.fiveHour}%</text></box>);
+      nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> {s.weekly}%</text></box>);
+        nodes.push(<box flexDirection="row"><text> mo </text><text style={st("text")}>{barFill(s.monthly)}</text><text style={st("text")}>{barEmpty(s.monthly)}</text><text> {s.monthly}%</text></box>);
       }
     } else {
       nodes.push(<text>usage-coach: ...</text>);
@@ -198,7 +201,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         const rawPct = provCoach ? provCoach.fiveHour : (s?.fiveHour ?? 0);
         const pct = rawPct < 0 ? 0 : rawPct;  // -1 means no quota data — show empty bar
         const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
-        nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("textMuted")}>{barEmpty(pct)}</text><text> {pctLabel}</text></box>);
+        nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("text")}>{barEmpty(pct)}</text><text> {pctLabel}</text></box>);
       }
     }
 
