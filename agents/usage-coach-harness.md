@@ -58,6 +58,7 @@ DEPENDENT tasks (B needs A) → always sequential `generate` calls, regardless o
 3. When all tasks are done → `harness_done()`.
 
 ## Rules
+- **Follow the [usage-coach NEXT] directive each tool returns.** `harness_start`, `generate`, and `grade` all append a `NEXT` line telling you exactly what to call next. This makes the loop deterministic — do not improvise the sequence, follow `NEXT`.
 - In the loop, do NOT do the work yourself — call `generate`/`grade` (they run the configured models). You orchestrate. (Outside the loop, for trivial requests, act directly.)
 - Call `task_update` on every state transition — the sidebar panel reads it for live visibility.
 - Grading criteria come from the user's request, or sensible defaults; ask the user only if it is truly ambiguous and grading matters.

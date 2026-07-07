@@ -340,7 +340,21 @@ async function UsageCoachPlugin(input) {
           args: { name: tool.schema.string(), total: tool.schema.number() },
           async execute(args, ctx) {
             writeHarness(ctx.sessionID, { name: args.name, total: args.total, current: 0, tasks: [], usage: {}, active: true, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
-            return `Harness '${args.name}' started (${args.total} tasks). Now report each task's status via task_update and run the loop.`;
+            return `Harness '${args.name}' started (${args.total} tasks).
+
+DETERMINISTIC LOOP (follow exactly \u2014 each tool returns a [usage-coach NEXT] directive):
+  for i in 1..${args.total}:
+    1. task_update(i, title, "generating")
+    2. generate({prompt: "Task: <title>. Perform it in the current directory."})  -> work + NEXT
+    3. task_update(i, title, "grading")
+    4. grade({prompt: "Evaluate the result... PASS/FAIL first line. Request: <req>, Task: <title>"})  -> verdict + NEXT
+    5. PASS  -> task_update(i, title, "completed", "PASS")
+       FAIL  -> if revisions < 2: task_update(i, title, "revising", k) + generate(feedback) -> back to 3
+                if revisions = 2: task_update(i, title, "failed", "FAIL")
+  end
+  harness_done()
+
+Follow the [usage-coach NEXT] directive each tool returns. Do NOT improvise the sequence.`;
           }
         }),
         task_update: tool({
@@ -392,7 +406,8 @@ async function UsageCoachPlugin(input) {
             const model = throttle ? cfg.lighterModel : cfg.generator;
             const out = await runModel(input.client, model, args.prompt, ctx.directory);
             return out + (throttle ? `
-[usage-coach] quota THROTTLE \u2014 used lighter model ${cfg.lighterModel}` : "");
+[usage-coach] quota THROTTLE \u2014 used lighter model ${cfg.lighterModel}` : "") + `
+[usage-coach NEXT] call task_update(i, title, "grading"), then grade to evaluate this work.`;
           }
         }),
         generate_batch: tool({
@@ -425,25 +440,24 @@ async function UsageCoachPlugin(input) {
           }
         }),
         grade: tool({
-          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line. Falls back to generator if grader quota is out.",
+          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line + a [usage-coach NEXT] directive. Falls back to generator if grader quota is out.",
           args: { prompt: tool.schema.string() },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
             const model = cfg.grader ?? cfg.generator;
-            if (!model) return 'FAIL\n(ERROR: no grader/generator model configured. Set "grader" and "generator" in harness.config.json.)';
+            if (!model) return "FAIL\n(ERROR: no grader/generator model configured.)\n[usage-coach NEXT] configure grader in harness.config.json, then retry grade.";
             const out = await runModel(input.client, model, args.prompt, ctx.directory);
-            if (out.startsWith("ERROR:")) return `FAIL
-(${out})`;
-            const firstLine = out.split("\n").find((l) => l.trim()) ?? "";
-            const f = firstLine.trim();
-            const isPass = /^pass\b/i.test(f);
-            const isFail = /^fail\b/i.test(f);
-            if (!isPass && !isFail) {
-              return `FAIL
-(grader did not output PASS/FAIL on the first line; defaulting to FAIL to trigger a revise)
-${out}`;
+            let verdict = "FAIL";
+            if (!out.startsWith("ERROR:")) {
+              const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
+              if (/^pass\b/i.test(f)) verdict = "PASS";
+              else if (/^fail\b/i.test(f)) verdict = "FAIL";
+              else verdict = "FAIL";
             }
-            return out;
+            const next = verdict === "PASS" ? `
+[usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).` : `
+[usage-coach NEXT] FAIL -> if revisions < 2: task_update(i, title, "revising", revisions+1) + generate({prompt: "Apply feedback:\\n{grade result}\\nTask: {title}"}); else: task_update(i, title, "failed", "FAIL") -> next task.`;
+            return out + "\n" + next;
           }
         })
       }
