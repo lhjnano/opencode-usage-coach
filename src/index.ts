@@ -325,19 +325,25 @@ export default async function UsageCoachPlugin(input: {
             writeHarness(ctx.sessionID, { name: args.name, total: args.total, current: 0, tasks: [], usage: {}, active: true, startedAt: new Date().toISOString() });
             return `Harness '${args.name}' started (${args.total} tasks).
 
-DETERMINISTIC LOOP (follow exactly — each tool returns a [usage-coach NEXT] directive):
+DETERMINISTIC LOOP — first classify the tasks:
+  INDEPENDENT = task B does NOT need task A's output  ->  use PATH A (parallel, faster)
+  DEPENDENT   = task B needs task A's output          ->  use PATH B (sequential)
+
+PATH A — INDEPENDENT (parallel via generate_batch):
+  1. task_update(1..${args.total}, title, "generating")
+  2. generate_batch({tasks: [{id:1, prompt:"Task: <title1>. Perform it."}, ...]})  -> all results + NEXT
+  3. for each i: task_update(i, title, "grading") + grade({prompt:"Evaluate... PASS/FAIL first line. Task: <title>"})  -> verdict + NEXT
+  4. for each i: PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or task_update(i, title, "failed", "FAIL")
+
+PATH B — DEPENDENT (sequential):
   for i in 1..${args.total}:
     1. task_update(i, title, "generating")
-    2. generate({prompt: "Task: <title>. Perform it in the current directory."})  -> work + NEXT
+    2. generate({prompt:"Task: <title>. Perform it."})  -> work + NEXT
     3. task_update(i, title, "grading")
-    4. grade({prompt: "Evaluate the result... PASS/FAIL first line. Request: <req>, Task: <title>"})  -> verdict + NEXT
-    5. PASS  -> task_update(i, title, "completed", "PASS")
-       FAIL  -> if revisions < 2: task_update(i, title, "revising", k) + generate(feedback) -> back to 3
-                if revisions = 2: task_update(i, title, "failed", "FAIL")
-  end
-  harness_done()
+    4. grade(...)  -> verdict + NEXT
+    5. PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or failed
 
-Follow the [usage-coach NEXT] directive each tool returns. Do NOT improvise the sequence.`;
+Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns. Do NOT improvise the sequence.`;
           },
         }),
         task_update: tool({

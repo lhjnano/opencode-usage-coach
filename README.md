@@ -52,6 +52,39 @@ cp dist/index.js ~/.config/opencode/plugins/opencode-usage-coach.js
 #   ~/.config/opencode/tui.json: { "plugin": ["/abs/path/dist/tui.js"] }
 ```
 
+## Prompting the harness
+
+How to trigger and use the harness loop for substantive work.
+
+### Triggering
+With the harness agent mode active (`agents/usage-coach-harness.md` installed), ask for substantive work — explicitly or just describe a multi-step task:
+- `"run this through the harness: write CONTRIBUTING.md from git log"`
+- `"harness: add TypeScript strict mode across the repo"`
+- Or just describe the work; the agent triages and enters the loop.
+
+Trivial requests (a one-line fix, a direct answer) are done directly — the loop only runs when generate→grade adds value.
+
+### Independent vs dependent tasks
+The harness picks the loop path based on task dependency:
+- **Independent** (task B doesn't need A's output) → `generate_batch` runs all tasks in **parallel** (faster). Example: `"CONTRIBUTING.md, PR template, issue template"` — three separate docs.
+- **Dependent** (B needs A) → **sequential** `generate` calls. Example: `"1) schema, 2) migration, 3) API"` — each needs the prior.
+
+### Deterministic NEXT directives
+Each tool appends a `[usage-coach NEXT]` line to its return value, telling the agent exactly what to call next:
+- `generate` → NEXT: grade the work
+- `grade` PASS → NEXT: mark completed, proceed
+- `grade` FAIL → NEXT: revise (up to 2x) or mark failed
+
+The agent follows NEXT — you just describe the work, the loop runs itself.
+
+### Quota-aware (automatic)
+You don't manage quota — the tools adapt:
+- **GO** + headroom → strong generator, full parallel
+- **THROTTLE** → auto-switch to `lighterModel`, concurrency capped at 2
+- **STOP** → loop halts
+
+Set `lighterModel` in `harness.config.json` to enable THROTTLE switching.
+
 ## Config
 
 This plugin has **four config surfaces**. Only the first two are required to run.
