@@ -197,8 +197,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev}{elapsedStr} {t.title}</text>);
         // quota: read from coaching state (h.quotas is not populated — use the live state)
         const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
-        const provCoach = s?.providers?.find((p: any) => p.id === pv || (pv && p.id.startsWith(pv)) || (pv && pv.startsWith(p.id)));
-        const rawPct = provCoach ? provCoach.fiveHour : (s?.fiveHour ?? 0);
+        // match by provider id; fall back to first provider if task has no model
+        const provCoach = pv
+          ? s?.providers?.find((p: any) => p.id === pv || (pv && p.id.startsWith(pv)) || (pv && pv.startsWith(p.id)))
+          : s?.providers?.[0];
+        const rawPct = provCoach?.fiveHour ?? s?.fiveHour ?? -1;
         const pct = rawPct < 0 ? 0 : rawPct;  // -1 means no quota data — show empty bar
         const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
         nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("text")}>{barEmpty(pct)}</text><text> {pctLabel}</text></box>);

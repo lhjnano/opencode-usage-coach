@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
-import { initDomain, queryDomain } from "./domain.js";
+import { initDomain, queryDomain, saveInvestigationResult } from "./domain.js";
 
 const PLUGIN_NAME = "opencode-usage-coach";
 const DEBUG = process.env.UC_DEBUG === "1";
@@ -282,6 +282,12 @@ export default async function UsageCoachPlugin(input: {
             // also fetch per-provider coach view (best-effort, non-blocking on failure)
             let providers: ProviderCoach[] = [];
             try { providers = await fetchProvidersCoach(); } catch { /* */ }
+            // If fetchQuota failed (top-level weekly < 0) but providers have real data,
+            // restore the top-level from providers[0] so the TUI/advice show real numbers.
+            if (providers.length > 0 && last.weekly < 0) {
+              const p0 = providers[0];
+              last = { ...last, weekly: p0.weekly, fiveHour: p0.fiveHour, monthly: p0.weekly >= 0 ? 0 : -1, advice: p0.advice, decision: p0.weekly >= STOP_WK ? "STOP" : p0.weekly >= THR_WK ? "THROTTLE" : "GO" };
+            }
             writeState({ ...last, providers, updatedAt: new Date().toISOString() } as any);
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
           }
@@ -364,9 +370,13 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             model: tool.schema.string().optional(),
           },
           async execute(args: { id: number; title: string; status: string; revisions?: number; score?: string; model?: string }, ctx: any) {
+            const cfg = readHarnessCfg(ctx.directory);
             const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
             h.tasks = h.tasks.filter((x: any) => x.id !== args.id);
-            h.tasks.push({ id: args.id, title: args.title, status: args.status, model: args.model ?? "", revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: new Date().toISOString() });
+            // Model is required for quota tracking. Auto-fill from config.generator if not provided.
+            const model = args.model || cfg.generator || "";
+            if (!model) return `ERROR: task ${args.id} has no model and no generator configured. Set "generator" in harness.config.json.`;
+            h.tasks.push({ id: args.id, title: args.title, status: args.status, model, revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: new Date().toISOString() });
             if (args.id > h.current) h.current = args.id;
             writeHarness(ctx.sessionID, h);
             return `task ${args.id} -> ${args.status}${args.score ? ` (${args.score})` : ""}`;
@@ -409,17 +419,24 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             if (!cfg.generator) return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json).";
             // Query domain DB for known facts before analyzing root cause.
             let domainPrefix = "";
+            let keywords: string[] = [];
+            let domainEmpty = true;
             try {
-              const kws = extractKeywords(`${args.task} ${args.gradeResult}`);
-              if (kws.length) {
-                const { nodes, edges } = queryDomain(kws);
+              keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
+              if (keywords.length) {
+                const { nodes, edges } = queryDomain(keywords);
                 if ((nodes && nodes.length) || (edges && edges.length)) {
+                  domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n`;
                 }
               }
             } catch (e) { log(`investigate domain query err: ${String(e)}`); }
             const rcaPrompt = `A task failed. Analyze the ROOT CAUSE (not just the symptom).\nTask: ${args.task}\nWhat was expected (from grade): ${args.gradeResult}\nRead relevant files in the directory if needed.\nOutput a structured root cause:\ncategory: (one of: constraint-violation, missing-context, tool-misuse, model-limitation, other)\nexplanation: <why it failed>\nevidence: <file/line or specific quote>`;
             const out = await runModel(input.client, cfg.generator, domainPrefix + rcaPrompt, ctx.directory);
+            // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty.
+            if (domainEmpty && keywords.length) {
+              try { saveInvestigationResult(keywords, out, "investigate"); } catch (e) { log(`investigate save err: ${String(e)}`); }
+            }
             return out + "\n[usage-coach NEXT] call verify_diagnosis with this diagnosis.";
           },
         }),
@@ -483,16 +500,23 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const rules = readRules();
             let prefix = rules ? `Lessons learned from previous failures (apply where relevant):\n${rules}\n\n---\n\n` : "";
             // Also inject known facts from the domain DB (same project scope).
+            let keywords: string[] = [];
+            let domainEmpty = true;
             try {
-              const kws = extractKeywords(args.prompt);
-              if (kws.length) {
-                const { nodes, edges } = queryDomain(kws);
+              keywords = extractKeywords(args.prompt);
+              if (keywords.length) {
+                const { nodes, edges } = queryDomain(keywords);
                 if ((nodes && nodes.length) || (edges && edges.length)) {
+                  domainEmpty = false;
                   prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n` + prefix;
                 }
               }
             } catch (e) { log(`generate domain query err: ${String(e)}`); }
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory);
+            // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty.
+            if (domainEmpty && keywords.length) {
+              try { saveInvestigationResult(keywords, out, "generate"); } catch (e) { log(`generate save err: ${String(e)}`); }
+            }
             return out + (throttle ? `\n[usage-coach] quota THROTTLE — used lighter model ${cfg.lighterModel}` : "") + `\n[usage-coach NEXT] call task_update(i, title, "grading"), then grade to evaluate this work.`;
           },
         }),

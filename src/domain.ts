@@ -84,3 +84,17 @@ export function traverse(nodeId: string, rel?: Relation): DomainNode[] {
     .map((e) => byId.get(e.to))
     .filter((n): n is DomainNode => Boolean(n));
 }
+
+export function saveInvestigationResult(keywords: string[], result: string, source?: string): string {
+  try {
+    return addDomainNode({
+      type: "fact",
+      name: keywords.join(" "),
+      props: { result },
+      source: source || "investigation",
+      confidence: 0.7,
+    });
+  } catch {
+    return "";
+  }
+}

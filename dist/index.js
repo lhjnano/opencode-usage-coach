@@ -1,66 +1,120 @@
 // src/index.ts
-import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "fs";
+import { mkdirSync as mkdirSync2, writeFileSync, appendFileSync as appendFileSync2, readFileSync as readFileSync2, existsSync as existsSync2 } from "fs";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { homedir } from "os";
-import { join, resolve, dirname } from "path";
+import { join as join2, resolve, dirname } from "path";
 import { tool } from "@opencode-ai/plugin";
+
+// src/domain.ts
+import { mkdirSync, appendFileSync, readFileSync, existsSync } from "fs";
+import { join } from "path";
+var BASE_DIR = "";
+function initDomain(stateDir) {
+  BASE_DIR = stateDir;
+}
+var nodesFile = () => join(BASE_DIR, "nodes.ndjson");
+var edgesFile = () => join(BASE_DIR, "edges.ndjson");
+function readNdjson(path) {
+  try {
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+}
+function readNodes() {
+  return readNdjson(nodesFile());
+}
+function readEdges() {
+  return readNdjson(edgesFile());
+}
+function queryDomain(keywords) {
+  const lc = keywords.map((k) => k.toLowerCase());
+  const nodes = readNodes();
+  const matched = nodes.filter((n) => {
+    const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
+    return lc.some((k) => k && hay.includes(k));
+  });
+  const ids = new Set(matched.map((n) => n.id));
+  const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to));
+  return { nodes: matched, edges };
+}
+
+// src/index.ts
 var PLUGIN_NAME = "opencode-usage-coach";
 var DEBUG = process.env.UC_DEBUG === "1";
 var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
-var STATE_DIR = join(homedir(), ".cache", "opencode-usage-coach");
-var STATE_FILE = join(STATE_DIR, "state.json");
-var HARNESS_FILE = join(STATE_DIR, "harness.json");
-var LOG_FILE = join(STATE_DIR, "coach.log");
+var STATE_DIR = join2(homedir(), ".cache", "opencode-usage-coach");
+var STATE_FILE = join2(STATE_DIR, "state.json");
+var HARNESS_FILE = join2(STATE_DIR, "harness.json");
+var LOG_FILE = join2(STATE_DIR, "coach.log");
 function projectStateDir(dir) {
   const abs = resolve(dir || ".");
   const h = createHash("sha1").update(abs).digest("hex").slice(0, 12);
-  return join(homedir(), ".cache", "opencode-usage-coach", "projects", h);
+  return join2(homedir(), ".cache", "opencode-usage-coach", "projects", h);
 }
 function setStateDir(dir) {
   STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(dir);
-  STATE_FILE = join(STATE_DIR, "state.json");
-  HARNESS_FILE = join(STATE_DIR, "harness.json");
-  LOG_FILE = join(STATE_DIR, "coach.log");
+  STATE_FILE = join2(STATE_DIR, "state.json");
+  HARNESS_FILE = join2(STATE_DIR, "harness.json");
+  LOG_FILE = join2(STATE_DIR, "coach.log");
 }
 var NOOP_HOOKS = {};
 function log(msg) {
   try {
-    appendFileSync(LOG_FILE, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+    appendFileSync2(LOG_FILE, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
 `);
   } catch {
   }
 }
 function writeState(c) {
   try {
-    mkdirSync(STATE_DIR, { recursive: true });
+    mkdirSync2(STATE_DIR, { recursive: true });
     writeFileSync(STATE_FILE, JSON.stringify({ ...c, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }));
   } catch {
   }
 }
 function rulesFile() {
-  return join(STATE_DIR, "rules.md");
+  return join2(STATE_DIR, "rules.md");
 }
 function failuresFile() {
-  return join(STATE_DIR, "failures.ndjson");
+  return join2(STATE_DIR, "failures.ndjson");
 }
 function readRules() {
   try {
     const f = rulesFile();
-    if (!existsSync(f)) return "";
-    return readFileSync(f, "utf8").trim();
+    if (!existsSync2(f)) return "";
+    return readFileSync2(f, "utf8").trim();
   } catch {
     return "";
   }
 }
+function extractKeywords(text) {
+  try {
+    const STOP = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "into", "your", "you", "are", "was", "but", "not", "all", "any", "use", "task", "prompt"]);
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const raw of (text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+      const t = raw.trim();
+      if (t.length < 3 || STOP.has(t) || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+      if (out.length >= 16) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 function harnessFile(sessionID) {
-  return join(STATE_DIR, sessionID || "_default", "harness.json");
+  return join2(STATE_DIR, sessionID || "_default", "harness.json");
 }
 function readHarness(sessionID) {
   try {
     const f = harnessFile(sessionID);
-    if (!existsSync(f)) return null;
-    return JSON.parse(readFileSync(f, "utf8"));
+    if (!existsSync2(f)) return null;
+    return JSON.parse(readFileSync2(f, "utf8"));
   } catch {
     return null;
   }
@@ -68,7 +122,7 @@ function readHarness(sessionID) {
 function writeHarness(sessionID, h) {
   try {
     const f = harnessFile(sessionID);
-    mkdirSync(dirname(f), { recursive: true });
+    mkdirSync2(dirname(f), { recursive: true });
     h.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     writeFileSync(f, JSON.stringify(h, null, 2));
   } catch {
@@ -77,14 +131,14 @@ function writeHarness(sessionID, h) {
 function readHarnessCfg(dir) {
   const tryRead = (p) => {
     try {
-      if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8"));
+      if (existsSync2(p)) return JSON.parse(readFileSync2(p, "utf8"));
     } catch {
     }
     return {};
   };
   return {
-    ...tryRead(join(homedir(), ".config", "opencode-usage-coach", "harness.config.json")),
-    ...tryRead(join(dir, "harness.config.json"))
+    ...tryRead(join2(homedir(), ".config", "opencode-usage-coach", "harness.config.json")),
+    ...tryRead(join2(dir, "harness.config.json"))
   };
 }
 async function runModel(client, model, prompt, directory) {
@@ -245,6 +299,7 @@ var LOADING = { decision: "GO", advice: "quota loading\u2026", weekly: -1, month
 async function UsageCoachPlugin(input) {
   try {
     setStateDir(input.directory);
+    initDomain(STATE_DIR);
     const cfg0 = readHarnessCfg(input.directory);
     const PROVIDER = process.env.UC_PROVIDER ?? cfg0.provider ?? "";
     const LIGHTER = process.env.UC_LIGHTER_MODEL ?? cfg0.lighterModel ?? "a lighter model";
@@ -264,6 +319,10 @@ async function UsageCoachPlugin(input) {
             try {
               providers = await fetchProvidersCoach();
             } catch {
+            }
+            if (providers.length > 0 && last.weekly < 0) {
+              const p0 = providers[0];
+              last = { ...last, weekly: p0.weekly, fiveHour: p0.fiveHour, monthly: p0.weekly >= 0 ? 0 : -1, advice: p0.advice, decision: p0.weekly >= STOP_WK ? "STOP" : p0.weekly >= THR_WK ? "THROTTLE" : "GO" };
             }
             writeState({ ...last, providers, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
@@ -361,9 +420,12 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             model: tool.schema.string().optional()
           },
           async execute(args, ctx) {
+            const cfg = readHarnessCfg(ctx.directory);
             const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
             h.tasks = h.tasks.filter((x) => x.id !== args.id);
-            h.tasks.push({ id: args.id, title: args.title, status: args.status, model: args.model ?? "", revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
+            const model = args.model || cfg.generator || "";
+            if (!model) return `ERROR: task ${args.id} has no model and no generator configured. Set "generator" in harness.config.json.`;
+            h.tasks.push({ id: args.id, title: args.title, status: args.status, model, revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
             if (args.id > h.current) h.current = args.id;
             writeHarness(ctx.sessionID, h);
             return `task ${args.id} -> ${args.status}${args.score ? ` (${args.score})` : ""}`;
@@ -394,8 +456,8 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           async execute(args, _ctx) {
             const rec = { ts: (/* @__PURE__ */ new Date()).toISOString(), task: args.task, prompt: args.prompt, gradeResult: args.gradeResult, model: args.model, revisions: args.revisions };
             try {
-              mkdirSync(STATE_DIR, { recursive: true });
-              appendFileSync(failuresFile(), JSON.stringify(rec) + "\n");
+              mkdirSync2(STATE_DIR, { recursive: true });
+              appendFileSync2(failuresFile(), JSON.stringify(rec) + "\n");
             } catch (e) {
               log(`record_failure err: ${String(e)}`);
             }
@@ -413,6 +475,22 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
+            let domainPrefix = "";
+            try {
+              const kws = extractKeywords(`${args.task} ${args.gradeResult}`);
+              if (kws.length) {
+                const { nodes, edges } = queryDomain(kws);
+                if (nodes && nodes.length || edges && edges.length) {
+                  domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
+
+---
+
+`;
+                }
+              }
+            } catch (e) {
+              log(`investigate domain query err: ${String(e)}`);
+            }
             const rcaPrompt = `A task failed. Analyze the ROOT CAUSE (not just the symptom).
 Task: ${args.task}
 What was expected (from grade): ${args.gradeResult}
@@ -421,7 +499,7 @@ Output a structured root cause:
 category: (one of: constraint-violation, missing-context, tool-misuse, model-limitation, other)
 explanation: <why it failed>
 evidence: <file/line or specific quote>`;
-            const out = await runModel(input.client, cfg.generator, rcaPrompt, ctx.directory);
+            const out = await runModel(input.client, cfg.generator, domainPrefix + rcaPrompt, ctx.directory);
             return out + "\n[usage-coach NEXT] call verify_diagnosis with this diagnosis.";
           }
         }),
@@ -473,8 +551,8 @@ Keep it concrete and actionable.`;
             const rule = out;
             try {
               const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-              mkdirSync(STATE_DIR, { recursive: true });
-              appendFileSync(rulesFile(), `## Rule (${date})
+              mkdirSync2(STATE_DIR, { recursive: true });
+              appendFileSync2(rulesFile(), `## Rule (${date})
 ${rule}
 Origin: ${args.task}
 
@@ -502,12 +580,27 @@ Origin: ${args.task}
             const throttle = decision === "THROTTLE" && cfg.lighterModel;
             const model = throttle ? cfg.lighterModel : cfg.generator;
             const rules = readRules();
-            const prefix = rules ? `Lessons learned from previous failures (apply where relevant):
+            let prefix = rules ? `Lessons learned from previous failures (apply where relevant):
 ${rules}
 
 ---
 
 ` : "";
+            try {
+              const kws = extractKeywords(args.prompt);
+              if (kws.length) {
+                const { nodes, edges } = queryDomain(kws);
+                if (nodes && nodes.length || edges && edges.length) {
+                  prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
+
+---
+
+` + prefix;
+                }
+              }
+            } catch (e) {
+              log(`generate domain query err: ${String(e)}`);
+            }
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory);
             return out + (throttle ? `
 [usage-coach] quota THROTTLE \u2014 used lighter model ${cfg.lighterModel}` : "") + `

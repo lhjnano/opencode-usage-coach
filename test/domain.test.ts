@@ -13,6 +13,7 @@ import {
   addDomainEdge,
   queryDomain,
   traverse,
+  saveInvestigationResult,
 } from "../src/domain.js";
 
 let stateDir: string;
@@ -87,4 +88,35 @@ test("append-only: adding more nodes preserves existing ones", () => {
   // Earlier nodes (added by other tests in this same state dir) must survive.
   const names = after.map((n: any) => n.name);
   assert.ok(names.includes("session.prompt"), "earlier nodes must survive subsequent appends");
+});
+
+test("saveInvestigationResult stores a fact node and makes it queryable", () => {
+  // Isolate in a fresh state dir so the "was empty before" assertion holds.
+  const dir = mkdtempSync(join(tmpdir(), "uc-domain-save-"));
+  initDomain(dir);
+  try {
+    const before = queryDomain(["session.prompt"]);
+    assert.equal(before.nodes.length, 0, "fresh domain should have no matching nodes");
+
+    saveInvestigationResult(["session.prompt", "blocking"], "session.prompt blocks until done");
+
+    const nodes = readNodes();
+    const fact = nodes.find(
+      (n: any) =>
+        n.type === "fact" &&
+        n.name.includes("session.prompt") &&
+        n.name.includes("blocking"),
+    );
+    assert.ok(fact, "readNodes should include a fact node whose name contains the keywords");
+    assert.equal(fact.props.result, "session.prompt blocks until done", "node props.result should be set");
+
+    const { nodes: found } = queryDomain(["session.prompt"]);
+    assert.ok(
+      found.some((n: any) => n.id === fact.id),
+      "queryDomain should now return the saved fact node",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    initDomain(stateDir);
+  }
 });

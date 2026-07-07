@@ -401,8 +401,8 @@ function initializeTui(api, disposeRoot) {
           return _el$59;
         })());
         const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
-        const provCoach = s?.providers?.find((p) => p.id === pv || pv && p.id.startsWith(pv) || pv && pv.startsWith(p.id));
-        const rawPct = provCoach ? provCoach.fiveHour : s?.fiveHour ?? 0;
+        const provCoach = pv ? s?.providers?.find((p) => p.id === pv || pv && p.id.startsWith(pv) || pv && pv.startsWith(p.id)) : s?.providers?.[0];
+        const rawPct = provCoach?.fiveHour ?? s?.fiveHour ?? -1;
         const pct = rawPct < 0 ? 0 : rawPct;
         const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
         nodes.push((() => {
