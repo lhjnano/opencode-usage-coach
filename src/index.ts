@@ -50,6 +50,16 @@ const NOOP_HOOKS = {}; // returned on init failure so opencode keeps working
 function log(msg: string) { try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`); } catch { /* */ } }
 function writeState(c: Coaching) { try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(STATE_FILE, JSON.stringify({ ...c, updatedAt: new Date().toISOString() })); } catch { /* */ } }
 
+// Learning loop — accumulated rules from past failures (Stage 5: reference / Stage 1: record).
+// rules.md is per-project (under STATE_DIR). generate prepends rules to its prompt so the
+// next run avoids known pitfalls. The file grows over time = irreducible craft.
+function rulesFile(): string { return join(STATE_DIR, "rules.md"); }
+function failuresFile(): string { return join(STATE_DIR, "failures.ndjson"); }
+function readRules(): string {
+  try { const f = rulesFile(); if (!existsSync(f)) return ""; return readFileSync(f, "utf8").trim(); }
+  catch { return ""; }
+}
+
 // Harness state — per-SESSION (each opencode session sees only its own harness)
 type HarnessJson = { name: string; total: number; current: number; tasks: any[]; usage?: Record<string, any>; startedAt?: string; updatedAt?: string; active?: boolean };
 function harnessFile(sessionID: string): string { return join(STATE_DIR, sessionID || "_default", "harness.json"); }
@@ -71,55 +81,32 @@ function readHarnessCfg(dir: string): HarnessCfg {
            ...tryRead(join(dir, "harness.config.json")) };
 }
 
-// Run a specific model in a NEW session on the SAME server (no deadlock), return its text response.
-// Polls session.status until the agent loop (including tool use / file writes) completes.
-// Observability: logs start/status-change/done/error when UC_DEBUG=1. On failure, returns a
-// diagnostic string starting with "ERROR:" so the caller can see WHY it failed without logs.
+// Run a specific model in a NEW session. Per SDK docs, session.prompt() blocks until the
+// sub-session's agent loop (including tool use / file writes) completes and returns the
+// AssistantMessage directly. So NO polling is needed — just read the response parts.
+// (Previous versions polled messages because we wrongly assumed prompt returned immediately.)
 async function runModel(client: any, model: string, prompt: string, directory: string): Promise<string> {
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const t0 = Date.now();
   try {
     const slash = model.indexOf("/");
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
     const modelID = slash >= 0 ? model.slice(slash + 1) : "";
     const s: any = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
-    log(`runModel(${model}): create resp = ${JSON.stringify(s?.data ?? s).slice(0, 500)}`);
     const id = s?.data?.info?.id ?? s?.data?.id ?? s?.id;
     if (!id) return `ERROR: session.create returned no id (response: ${JSON.stringify(s?.data ?? s).slice(0, 200)})`;
-    log(`runModel(${model}): session ${id} created, prompt ${prompt.length} chars`);
-    // send the prompt (starts the agent loop)
-    await client.session.prompt({
+    log(`runModel(${model}): session ${id} created, sending prompt (${prompt.length} chars)`);
+    // session.prompt blocks until the sub-session completes and returns the AssistantMessage.
+    const resp: any = await client.session.prompt({
       path: { id },
       body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] },
     });
-    log(`runModel(${model}): prompt sent to ${id}`);
-    // Poll: read messages until an assistant text part appears (sub-session completed).
-    // We CANNOT use session.status — confirmed via official docs that status() is NOT a
-    // documented SDK method. Status flows through *events* (session.idle), and empirically
-    // the status() call returns the MAIN session's state, not the sub-session's. The official
-    // sub-session tracking path is session.children() + session.messages(). We use the simpler
-    // messages-polling approach: watch for the assistant reply text directly.
-    let lastMsgCount = -1;
-    let timedOut = false;
-    let text = "";
-    for (let i = 0; i < 600; i++) { // 600 * 1s = 10min max
-      await sleep(1000);
-      try {
-        const msgs: any = await client.session.messages({ path: { id } });
-        const all: any[] = msgs?.data ?? msgs ?? [];
-        if (all.length !== lastMsgCount) { log(`runModel(${model}): poll[${i}] msgs=${all.length}`); lastMsgCount = all.length; }
-        const lastAssistant = all.filter((m: any) => (m?.info?.role ?? m?.role) === "assistant").pop();
-        const parts: any[] = lastAssistant?.parts ?? lastAssistant?.info?.parts ?? [];
-        const t = parts.filter((p: any) => p?.type === "text").map((p: any) => p?.text ?? "").join("").trim();
-        if (t) { text = t; log(`runModel(${model}): got assistant text at poll[${i}] (${t.length} chars)`); break; }
-      } catch (e) { log(`runModel(${model}): poll[${i}] messages err: ${String(e).slice(0, 120)}`); }
-      if (i === 599) timedOut = true;
-    }
     const elapsed = Math.round((Date.now() - t0) / 1000);
+    // The response carries the assistant parts directly (no separate messages call needed).
+    const parts: any[] = resp?.data?.parts ?? resp?.parts ?? [];
+    const text = parts.filter((p: any) => p?.type === "text").map((p: any) => p?.text ?? "").join("");
     try { await client.session.remove?.({ path: { id } }); } catch { /* */ }
-    log(`runModel(${model}): done ${elapsed}s, ${text.length} chars${timedOut ? " [TIMEOUT]" : ""}`);
-    if (timedOut) return `[runModel TIMEOUT after ${elapsed}s — no assistant text appeared]\n${text}`;
-    return text || `ERROR: no assistant text after ${elapsed}s (${lastMsgCount} messages seen)`;
+    log(`runModel(${model}): done ${elapsed}s, ${text.length} chars`);
+    return text.trim() || `ERROR: no assistant text in prompt response after ${elapsed}s (parts: ${parts.length}, types: ${parts.map((p: any) => p?.type).join(",")})`;
   } catch (e) {
     const elapsed = Math.round((Date.now() - t0) / 1000);
     log(`runModel err (${model}, ${elapsed}s): ${String(e)}`);
@@ -359,7 +346,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           async execute(args: { id: number; title: string; status: string; revisions?: number; score?: string; model?: string }, ctx: any) {
             const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
             h.tasks = h.tasks.filter((x: any) => x.id !== args.id);
-            h.tasks.push({ id: args.id, title: args.title, status: args.status, model: args.model ?? "", revisions: args.revisions ?? 0, score: args.score ?? null });
+            h.tasks.push({ id: args.id, title: args.title, status: args.status, model: args.model ?? "", revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: new Date().toISOString() });
             if (args.id > h.current) h.current = args.id;
             writeHarness(ctx.sessionID, h);
             return `task ${args.id} -> ${args.status}${args.score ? ` (${args.score})` : ""}`;
@@ -385,7 +372,10 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             let decision = "GO"; try { decision = current().decision; } catch { /* */ }
             const throttle = decision === "THROTTLE" && cfg.lighterModel;
             const model = throttle ? cfg.lighterModel! : cfg.generator;
-            const out = await runModel(input.client, model, args.prompt, ctx.directory);
+            // Stage 5 (reference): inject accumulated rules from past failures into the prompt.
+            const rules = readRules();
+            const prefix = rules ? `Lessons learned from previous failures (apply where relevant):\n${rules}\n\n---\n\n` : "";
+            const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory);
             return out + (throttle ? `\n[usage-coach] quota THROTTLE — used lighter model ${cfg.lighterModel}` : "") + `\n[usage-coach NEXT] call task_update(i, title, "grading"), then grade to evaluate this work.`;
           },
         }),

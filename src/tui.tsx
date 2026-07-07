@@ -24,7 +24,7 @@ let MARKER = join(STATE_DIR, "tui-loaded.txt");
 
 type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number; providers?: ProviderCoach[] };
 type ProviderCoach = { id: string; name: string; fiveHour: number; weekly: number; fiveHourReset: string; weeklyReset: string; advice: string };
-type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null };
+type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null; startedAt?: string };
 type ProviderQuota = { weekly: number; monthly: number; fiveHour: number };
 type HarnessState = { name: string; total: number; current: number; tasks: TaskState[]; quotas?: Record<string, ProviderQuota>; active?: boolean };
 
@@ -134,10 +134,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     try {
       const sid = ctx.session_id ?? "";
       if (sid) {
+        // Current session ONLY — never fall back to other sessions' harnesses (session isolation).
+        // This prevents a harness running in session B from showing in session A's panel.
         const hf = join(STATE_DIR, sid, "harness.json");
         if (existsSync(hf)) h = JSON.parse(readFileSync(hf, "utf8")) as HarnessState;
+      } else {
+        // No session_id available (legacy) — fall back to most recent active across sessions.
+        h = readHarness();
       }
-      if (!h || h.active === false) h = readHarness(); // module-level: scans session dirs for recent active
     } catch { h = null; }
 
     const nodes: any[] = [];
@@ -170,10 +174,14 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         const lbl = TLABEL[t.status] ?? t.status;
         const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
         const mdl = t.model ? ` ${(t.model.split("/").pop() ?? t.model)}` : "";
-        nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev} {short(t.title, 12)}</text>);
+        // elapsed time in current status (hide on terminal states)
+        const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1000)) : 0;
+        const elapsedStr = (t.status === "completed" || t.status === "failed") ? "" : (elapsed > 0 ? ` ${elapsed}s` : "");
+        nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev}{elapsedStr} {short(t.title, 12)}</text>);
+        // quota: read from coaching state (h.quotas is not populated — use the live state)
         const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
-        const q = pv && h.quotas?.[pv] ? h.quotas[pv] : null;
-        const pct = q ? q.fiveHour : 0;
+        const provCoach = s?.providers?.find((p: any) => p.id === pv || (pv && p.id.startsWith(pv)) || (pv && pv.startsWith(p.id)));
+        const pct = provCoach ? provCoach.fiveHour : (s?.fiveHour ?? 0);
         nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("textMuted")}>{barEmpty(pct)}</text><text> {pct}%</text></box>);
       }
     }

@@ -166,7 +166,7 @@ Recurring issues and fixes — mostly learned the hard way during development.
 - **Export must be `{ tui }`** (an object) — a bare function is misread as a server plugin.
 - **Color prop is `fg`** (not `foreground`): `style={{ fg: theme.current.success }}`.
 - **Call `codexbar` via `spawn`** — the `$` BunShell leaks command output into the TUI.
-- **Harness not visible?** The TUI scans session subdirectories for the most recent `active:true` harness. A finished harness (`active:false`) is hidden.
+- **Harness not visible?** The TUI shows the **current session's** harness only. A finished harness (`active:false`) is hidden. A harness started in another session won't appear here — switch to that session to see it.
 
 ### LLM model selection (generate/grade)
 - **`generator` is required in `harness.config.json`** — the tools return a clear error if missing (the old z.ai fallback was removed in v0.2.4).
@@ -187,13 +187,19 @@ Recurring issues and fixes — mostly learned the hard way during development.
 - `(no output)` means the sub-session returned no text. Check `~/.cache/opencode-usage-coach/coach.log` for the runModel trace (requires `UC_DEBUG=1`).
 - **Note**: runModel only terminates on explicit `idle`/`completed` status. An earlier bug broke on `!status` (undefined) immediately — fixed.
 
+### generate / generate_batch returns "Tool execution aborted"
+- **Cause:** opencode imposes a tool execution timeout (~60–120s, not configurable). `runModel` polls the sub-session for up to 10 min; if the generator model takes longer than the tool timeout, opencode aborts the call.
+- **This is a platform limit, not a plugin bug** — there is no config key to extend it.
+- **Mitigation:** split large tasks into smaller ones that finish within the timeout. The NEXT directives + revise loop help — a FAIL triggers a focused revise rather than a monolithic retry.
+- The sub-session keeps running in the background after abort; its file writes are preserved. Only the tool's return value is lost.
+
 ### Multi-session (per-session state isolation)
 - Each opencode session has a unique sessionID; harness state is isolated per-session:
   ```
   ~/.cache/opencode-usage-coach/projects/<dir-hash>/<sessionID>/harness.json
   ```
 - Different working directories get separate project state (keyed by path hash).
-- The TUI auto-discovers the most recent `active:true` harness — switching sessions shows that session's harness.
+- The TUI shows the **current session's** harness only (per-session isolation) — no cross-session leakage. A harness running in session B does not appear in session A's panel.
 - Harness completion sets `active:false` → hidden from the TUI.
 - Override the state path with `UC_STATE_DIR` (forces global state).
 

@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-07-06
+
+### Changed
+- **runModel rewritten — polling removed.** Per SDK docs, `session.prompt()` blocks until the sub-session completes and returns the `AssistantMessage` directly. Previous versions polled `session.messages()` (because we wrongly assumed prompt returned immediately), which caused duplicate waiting and frequent `Tool execution aborted`. Now runModel just reads the response parts — simpler, faster, abort-resistant.
+- `generate` now prepends accumulated rules (`rules.md`) to the prompt — Stage 5 of the learning loop. Empty at first; grows as failures are analyzed.
+
+### Added
+- Learning loop design (`learning-loop-design.md`) — 5 stages: Record → Investigate → Verify → Generalize → Reference. Plus a domain knowledge base extension (declarative learning, connected/graph storage, structure TBD).
+- `readRules()` / `rulesFile()` / `failuresFile()` helpers (Stage 5 reference + Stage 1 record plumbing).
+- `task_update` records `startedAt`; TUI shows elapsed time per task (e.g. `gen 30s`).
+- TUI session isolation: panel shows the **current session's** harness only (no cross-session leakage).
+- TUI task quota now reads from coaching `state` (was always 0% — `h.quotas` was never populated).
+- README: "generate aborted" troubleshooting (platform tool timeout), updated multi-session section.
+- ROADMAP P3 expanded to "Accumulated judgment" — procedural (rules.md) + declarative (domain DB).
+
 ## [0.3.2] - 2026-07-06
 
 ### Added
