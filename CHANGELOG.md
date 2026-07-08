@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-07-07
+
+### Fixed
+- **Hard gate scoped to harness tools only.** STOP quota previously blocked ALL tools (read/edit/bash/grep) in ALL agent modes — now only blocks harness tools (generate/grade/investigate/etc.) that consume model quota. General tools work freely even at STOP.
+- **Sub-session cleanup**: `session.remove` → `session.delete` (correct SDK method). Sub-sessions (uc-harness-sub) no longer pile up in `/session`.
+
+### Added
+- `session.summarize` called before sub-session delete — logs activity summary to coach.log for visibility.
+
+### Changed
+- TUI: monthly (mo) gauge removed — rarely hits limits, reduces clutter.
+
 ## [0.3.4] - 2026-07-07
 
 ### Added

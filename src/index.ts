@@ -123,7 +123,12 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     // The response carries the assistant parts directly (no separate messages call needed).
     const parts: any[] = resp?.data?.parts ?? resp?.parts ?? [];
     const text = parts.filter((p: any) => p?.type === "text").map((p: any) => p?.text ?? "").join("");
-    try { await client.session.remove?.({ path: { id } }); } catch { /* */ }
+    // Before cleanup, summarize the sub-session for visibility (what did it do?).
+    try {
+      const summary: any = await client.session.summarize?.({ path: { id } });
+      log(`runModel(${model}): sub-session summary: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`);
+    } catch { /* summarize not available — skip */ }
+    try { await client.session.delete?.({ path: { id } }); } catch { /* */ }
     log(`runModel(${model}): done ${elapsed}s, ${text.length} chars`);
     return text.trim() || `ERROR: no assistant text in prompt response after ${elapsed}s (parts: ${parts.length}, types: ${parts.map((p: any) => p?.type).join(",")})`;
   } catch (e) {
@@ -308,12 +313,17 @@ export default async function UsageCoachPlugin(input: {
         catch (e) { log(`event err: ${String(e)}`); }
       },
 
-      // ACT(1) hard gate: only intentional STOP throws. Our own bugs never block.
+      // ACT(1) hard gate — ONLY for harness tools (generate/grade/etc.) that consume quota.
+      // General tools (read/edit/bash/grep/task) are NEVER blocked — they don't consume model quota.
+      // This ensures Agent-Factory-Coordinator and other modes work freely even at STOP.
       "tool.execute.before": async (_input: { tool: string; sessionID: string; callID: string }) => {
         let decision: Decision = "GO";
         try { decision = current().decision; } catch { decision = "GO"; } // safe default
         if (decision === "STOP") {
-          throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
+          const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize"];
+          if (harnessTools.includes(_input.tool)) {
+            throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
+          }
         }
       },
 

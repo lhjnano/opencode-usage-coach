@@ -29,6 +29,18 @@ function readNodes() {
 function readEdges() {
   return readNdjson(edgesFile());
 }
+function uid(prefix) {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+function addDomainNode(node) {
+  const full = { ...node, id: uid("node"), ts: (/* @__PURE__ */ new Date()).toISOString() };
+  try {
+    mkdirSync(BASE_DIR, { recursive: true });
+    appendFileSync(nodesFile(), JSON.stringify(full) + "\n");
+  } catch {
+  }
+  return full.id;
+}
 function queryDomain(keywords) {
   const lc = keywords.map((k) => k.toLowerCase());
   const nodes = readNodes();
@@ -39,6 +51,19 @@ function queryDomain(keywords) {
   const ids = new Set(matched.map((n) => n.id));
   const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to));
   return { nodes: matched, edges };
+}
+function saveInvestigationResult(keywords, result, source) {
+  try {
+    return addDomainNode({
+      type: "fact",
+      name: keywords.join(" "),
+      props: { result },
+      source: source || "investigation",
+      confidence: 0.7
+    });
+  } catch {
+    return "";
+  }
 }
 
 // src/index.ts
@@ -159,7 +184,12 @@ async function runModel(client, model, prompt, directory) {
     const parts = resp?.data?.parts ?? resp?.parts ?? [];
     const text = parts.filter((p) => p?.type === "text").map((p) => p?.text ?? "").join("");
     try {
-      await client.session.remove?.({ path: { id } });
+      const summary = await client.session.summarize?.({ path: { id } });
+      log(`runModel(${model}): sub-session summary: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`);
+    } catch {
+    }
+    try {
+      await client.session.delete?.({ path: { id } });
     } catch {
     }
     log(`runModel(${model}): done ${elapsed}s, ${text.length} chars`);
@@ -354,7 +384,9 @@ async function UsageCoachPlugin(input) {
           log(`event err: ${String(e)}`);
         }
       },
-      // ACT(1) hard gate: only intentional STOP throws. Our own bugs never block.
+      // ACT(1) hard gate — ONLY for harness tools (generate/grade/etc.) that consume quota.
+      // General tools (read/edit/bash/grep/task) are NEVER blocked — they don't consume model quota.
+      // This ensures Agent-Factory-Coordinator and other modes work freely even at STOP.
       "tool.execute.before": async (_input) => {
         let decision = "GO";
         try {
@@ -363,7 +395,10 @@ async function UsageCoachPlugin(input) {
           decision = "GO";
         }
         if (decision === "STOP") {
-          throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
+          const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize"];
+          if (harnessTools.includes(_input.tool)) {
+            throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
+          }
         }
       },
       // ACT(2) inject coaching into system prompt (double defense). Silent on error.
@@ -476,11 +511,14 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
             let domainPrefix = "";
+            let keywords = [];
+            let domainEmpty = true;
             try {
-              const kws = extractKeywords(`${args.task} ${args.gradeResult}`);
-              if (kws.length) {
-                const { nodes, edges } = queryDomain(kws);
+              keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
+              if (keywords.length) {
+                const { nodes, edges } = queryDomain(keywords);
                 if (nodes && nodes.length || edges && edges.length) {
+                  domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
 
 ---
@@ -500,6 +538,13 @@ category: (one of: constraint-violation, missing-context, tool-misuse, model-lim
 explanation: <why it failed>
 evidence: <file/line or specific quote>`;
             const out = await runModel(input.client, cfg.generator, domainPrefix + rcaPrompt, ctx.directory);
+            if (domainEmpty && keywords.length) {
+              try {
+                saveInvestigationResult(keywords, out, "investigate");
+              } catch (e) {
+                log(`investigate save err: ${String(e)}`);
+              }
+            }
             return out + "\n[usage-coach NEXT] call verify_diagnosis with this diagnosis.";
           }
         }),
@@ -586,11 +631,14 @@ ${rules}
 ---
 
 ` : "";
+            let keywords = [];
+            let domainEmpty = true;
             try {
-              const kws = extractKeywords(args.prompt);
-              if (kws.length) {
-                const { nodes, edges } = queryDomain(kws);
+              keywords = extractKeywords(args.prompt);
+              if (keywords.length) {
+                const { nodes, edges } = queryDomain(keywords);
                 if (nodes && nodes.length || edges && edges.length) {
+                  domainEmpty = false;
                   prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
 
 ---
@@ -602,6 +650,13 @@ ${rules}
               log(`generate domain query err: ${String(e)}`);
             }
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory);
+            if (domainEmpty && keywords.length) {
+              try {
+                saveInvestigationResult(keywords, out, "generate");
+              } catch (e) {
+                log(`generate save err: ${String(e)}`);
+              }
+            }
             return out + (throttle ? `
 [usage-coach] quota THROTTLE \u2014 used lighter model ${cfg.lighterModel}` : "") + `
 [usage-coach NEXT] call task_update(i, title, "grading"), then grade to evaluate this work.`;

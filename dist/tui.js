@@ -283,7 +283,7 @@ function initializeTui(api, disposeRoot) {
         }
       } else {
         nodes.push((() => {
-          var _el$27 = _$createElement("box"), _el$28 = _$createElement("text"), _el$30 = _$createElement("text"), _el$31 = _$createElement("text"), _el$32 = _$createElement("text"), _el$33 = _$createTextNode(` `), _el$34 = _$createTextNode(`%`);
+          var _el$27 = _$createElement("box"), _el$28 = _$createElement("text"), _el$30 = _$createElement("text"), _el$31 = _$createElement("text"), _el$32 = _$createElement("text");
           _$insertNode(_el$27, _el$28);
           _$insertNode(_el$27, _el$30);
           _$insertNode(_el$27, _el$31);
@@ -292,9 +292,7 @@ function initializeTui(api, disposeRoot) {
           _$insertNode(_el$28, _$createTextNode(` 5h `));
           _$insert(_el$30, () => barFill(s.fiveHour));
           _$insert(_el$31, () => barEmpty(s.fiveHour));
-          _$insertNode(_el$32, _el$33);
-          _$insertNode(_el$32, _el$34);
-          _$insert(_el$32, () => s.fiveHour, _el$34);
+          _$insertNode(_el$32, _$createTextNode(` 0%`));
           _$effect((_p$) => {
             var _v$5 = st("text"), _v$6 = st("text");
             _v$5 !== _p$.e && (_p$.e = _$setProp(_el$30, "style", _v$5, _p$.e));
@@ -307,77 +305,51 @@ function initializeTui(api, disposeRoot) {
           return _el$27;
         })());
         nodes.push((() => {
-          var _el$35 = _$createElement("box"), _el$36 = _$createElement("text"), _el$38 = _$createElement("text"), _el$39 = _$createElement("text"), _el$40 = _$createElement("text"), _el$41 = _$createTextNode(` `), _el$42 = _$createTextNode(`%`);
-          _$insertNode(_el$35, _el$36);
-          _$insertNode(_el$35, _el$38);
-          _$insertNode(_el$35, _el$39);
-          _$insertNode(_el$35, _el$40);
-          _$setProp(_el$35, "flexDirection", "row");
-          _$insertNode(_el$36, _$createTextNode(` 1w `));
-          _$insert(_el$38, () => barFill(s.weekly));
-          _$insert(_el$39, () => barEmpty(s.weekly));
-          _$insertNode(_el$40, _el$41);
-          _$insertNode(_el$40, _el$42);
-          _$insert(_el$40, () => s.weekly, _el$42);
+          var _el$34 = _$createElement("box"), _el$35 = _$createElement("text"), _el$37 = _$createElement("text"), _el$38 = _$createElement("text"), _el$39 = _$createElement("text");
+          _$insertNode(_el$34, _el$35);
+          _$insertNode(_el$34, _el$37);
+          _$insertNode(_el$34, _el$38);
+          _$insertNode(_el$34, _el$39);
+          _$setProp(_el$34, "flexDirection", "row");
+          _$insertNode(_el$35, _$createTextNode(` 1w `));
+          _$insert(_el$37, () => barFill(s.weekly));
+          _$insert(_el$38, () => barEmpty(s.weekly));
+          _$insertNode(_el$39, _$createTextNode(` 0%`));
           _$effect((_p$) => {
             var _v$7 = st("text"), _v$8 = st("text");
-            _v$7 !== _p$.e && (_p$.e = _$setProp(_el$38, "style", _v$7, _p$.e));
-            _v$8 !== _p$.t && (_p$.t = _$setProp(_el$39, "style", _v$8, _p$.t));
+            _v$7 !== _p$.e && (_p$.e = _$setProp(_el$37, "style", _v$7, _p$.e));
+            _v$8 !== _p$.t && (_p$.t = _$setProp(_el$38, "style", _v$8, _p$.t));
             return _p$;
           }, {
             e: void 0,
             t: void 0
           });
-          return _el$35;
-        })());
-        nodes.push((() => {
-          var _el$43 = _$createElement("box"), _el$44 = _$createElement("text"), _el$46 = _$createElement("text"), _el$47 = _$createElement("text"), _el$48 = _$createElement("text"), _el$49 = _$createTextNode(` `), _el$50 = _$createTextNode(`%`);
-          _$insertNode(_el$43, _el$44);
-          _$insertNode(_el$43, _el$46);
-          _$insertNode(_el$43, _el$47);
-          _$insertNode(_el$43, _el$48);
-          _$setProp(_el$43, "flexDirection", "row");
-          _$insertNode(_el$44, _$createTextNode(` mo `));
-          _$insert(_el$46, () => barFill(s.monthly));
-          _$insert(_el$47, () => barEmpty(s.monthly));
-          _$insertNode(_el$48, _el$49);
-          _$insertNode(_el$48, _el$50);
-          _$insert(_el$48, () => s.monthly, _el$50);
-          _$effect((_p$) => {
-            var _v$9 = st("text"), _v$0 = st("text");
-            _v$9 !== _p$.e && (_p$.e = _$setProp(_el$46, "style", _v$9, _p$.e));
-            _v$0 !== _p$.t && (_p$.t = _$setProp(_el$47, "style", _v$0, _p$.t));
-            return _p$;
-          }, {
-            e: void 0,
-            t: void 0
-          });
-          return _el$43;
+          return _el$34;
         })());
       }
     } else {
       nodes.push((() => {
-        var _el$51 = _$createElement("text");
-        _$insertNode(_el$51, _$createTextNode(`usage-coach: ...`));
-        return _el$51;
+        var _el$41 = _$createElement("text");
+        _$insertNode(_el$41, _$createTextNode(`usage-coach: ...`));
+        return _el$41;
       })());
     }
     if (h && h.active !== false && h.tasks.length > 0) {
       nodes.push((() => {
-        var _el$53 = _$createElement("text");
-        _$insertNode(_el$53, _$createTextNode(` `));
-        return _el$53;
+        var _el$43 = _$createElement("text");
+        _$insertNode(_el$43, _$createTextNode(` `));
+        return _el$43;
       })());
       nodes.push((() => {
-        var _el$55 = _$createElement("text"), _el$56 = _$createTextNode(`harness: `), _el$57 = _$createTextNode(` `), _el$58 = _$createTextNode(`/`);
-        _$insertNode(_el$55, _el$56);
-        _$insertNode(_el$55, _el$57);
-        _$insertNode(_el$55, _el$58);
-        _$insert(_el$55, () => h.name, _el$57);
-        _$insert(_el$55, () => h.current, _el$58);
-        _$insert(_el$55, () => h.total, null);
-        _$effect((_$p) => _$setProp(_el$55, "style", st("textMuted"), _$p));
-        return _el$55;
+        var _el$45 = _$createElement("text"), _el$46 = _$createTextNode(`harness: `), _el$47 = _$createTextNode(` `), _el$48 = _$createTextNode(`/`);
+        _$insertNode(_el$45, _el$46);
+        _$insertNode(_el$45, _el$47);
+        _$insertNode(_el$45, _el$48);
+        _$insert(_el$45, () => h.name, _el$47);
+        _$insert(_el$45, () => h.current, _el$48);
+        _$insert(_el$45, () => h.total, null);
+        _$effect((_$p) => _$setProp(_el$45, "style", st("textMuted"), _$p));
+        return _el$45;
       })());
       for (const t of h.tasks) {
         const sKey = statusKey[t.status] ?? "text";
@@ -387,18 +359,18 @@ function initializeTui(api, disposeRoot) {
         const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1e3)) : 0;
         const elapsedStr = t.status === "completed" || t.status === "failed" ? "" : elapsed > 0 ? ` ${elapsed}s` : "";
         nodes.push((() => {
-          var _el$59 = _$createElement("text"), _el$60 = _$createTextNode(` \u25CF `), _el$61 = _$createTextNode(` `), _el$62 = _$createTextNode(` `);
-          _$insertNode(_el$59, _el$60);
-          _$insertNode(_el$59, _el$61);
-          _$insertNode(_el$59, _el$62);
-          _$insert(_el$59, () => t.id, _el$61);
-          _$insert(_el$59, mdl, _el$61);
-          _$insert(_el$59, lbl, _el$62);
-          _$insert(_el$59, rev, _el$62);
-          _$insert(_el$59, elapsedStr, _el$62);
-          _$insert(_el$59, () => t.title, null);
-          _$effect((_$p) => _$setProp(_el$59, "style", st(sKey), _$p));
-          return _el$59;
+          var _el$49 = _$createElement("text"), _el$50 = _$createTextNode(` \u25CF `), _el$51 = _$createTextNode(` `), _el$52 = _$createTextNode(` `);
+          _$insertNode(_el$49, _el$50);
+          _$insertNode(_el$49, _el$51);
+          _$insertNode(_el$49, _el$52);
+          _$insert(_el$49, () => t.id, _el$51);
+          _$insert(_el$49, mdl, _el$51);
+          _$insert(_el$49, lbl, _el$52);
+          _$insert(_el$49, rev, _el$52);
+          _$insert(_el$49, elapsedStr, _el$52);
+          _$insert(_el$49, () => t.title, null);
+          _$effect((_$p) => _$setProp(_el$49, "style", st(sKey), _$p));
+          return _el$49;
         })());
         const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
         const provCoach = pv ? s?.providers?.find((p) => p.id === pv || pv && p.id.startsWith(pv) || pv && pv.startsWith(p.id)) : s?.providers?.[0];
@@ -406,35 +378,35 @@ function initializeTui(api, disposeRoot) {
         const pct = rawPct < 0 ? 0 : rawPct;
         const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
         nodes.push((() => {
-          var _el$63 = _$createElement("box"), _el$64 = _$createElement("text"), _el$66 = _$createElement("text"), _el$67 = _$createElement("text"), _el$68 = _$createElement("text"), _el$69 = _$createTextNode(` `);
-          _$insertNode(_el$63, _el$64);
-          _$insertNode(_el$63, _el$66);
-          _$insertNode(_el$63, _el$67);
-          _$insertNode(_el$63, _el$68);
-          _$setProp(_el$63, "flexDirection", "row");
-          _$insertNode(_el$64, _$createTextNode(` 5h `));
-          _$insert(_el$66, () => barFill(pct));
-          _$insert(_el$67, () => barEmpty(pct));
-          _$insertNode(_el$68, _el$69);
-          _$insert(_el$68, pctLabel, null);
+          var _el$53 = _$createElement("box"), _el$54 = _$createElement("text"), _el$56 = _$createElement("text"), _el$57 = _$createElement("text"), _el$58 = _$createElement("text"), _el$59 = _$createTextNode(` `);
+          _$insertNode(_el$53, _el$54);
+          _$insertNode(_el$53, _el$56);
+          _$insertNode(_el$53, _el$57);
+          _$insertNode(_el$53, _el$58);
+          _$setProp(_el$53, "flexDirection", "row");
+          _$insertNode(_el$54, _$createTextNode(` 5h `));
+          _$insert(_el$56, () => barFill(pct));
+          _$insert(_el$57, () => barEmpty(pct));
+          _$insertNode(_el$58, _el$59);
+          _$insert(_el$58, pctLabel, null);
           _$effect((_p$) => {
-            var _v$1 = st("text"), _v$10 = st("text");
-            _v$1 !== _p$.e && (_p$.e = _$setProp(_el$66, "style", _v$1, _p$.e));
-            _v$10 !== _p$.t && (_p$.t = _$setProp(_el$67, "style", _v$10, _p$.t));
+            var _v$9 = st("text"), _v$0 = st("text");
+            _v$9 !== _p$.e && (_p$.e = _$setProp(_el$56, "style", _v$9, _p$.e));
+            _v$0 !== _p$.t && (_p$.t = _$setProp(_el$57, "style", _v$0, _p$.t));
             return _p$;
           }, {
             e: void 0,
             t: void 0
           });
-          return _el$63;
+          return _el$53;
         })());
       }
     }
     return (() => {
-      var _el$70 = _$createElement("box");
-      _$setProp(_el$70, "flexDirection", "column");
-      _$insert(_el$70, nodes);
-      return _el$70;
+      var _el$60 = _$createElement("box");
+      _$setProp(_el$60, "flexDirection", "column");
+      _$insert(_el$60, nodes);
+      return _el$60;
     })();
   };
   tlog("registering slots");
@@ -448,9 +420,9 @@ function initializeTui(api, disposeRoot) {
         } catch (e) {
           tlog(`sidebar_footer err: ${String(e)}`);
           return (() => {
-            var _el$71 = _$createElement("text");
-            _$insertNode(_el$71, _$createTextNode(`usage-coach`));
-            return _el$71;
+            var _el$61 = _$createElement("text");
+            _$insertNode(_el$61, _$createTextNode(`usage-coach`));
+            return _el$61;
           })();
         }
       }

@@ -174,9 +174,9 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
           nodes.push(<text style={st(dKey)}>  {"->"} {p.advice}</text>);
         }
       } else {
-      nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> {s.fiveHour}%</text></box>);
-      nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> {s.weekly}%</text></box>);
-        nodes.push(<box flexDirection="row"><text> mo </text><text style={st("text")}>{barFill(s.monthly)}</text><text style={st("text")}>{barEmpty(s.monthly)}</text><text> {s.monthly}%</text></box>);
+      nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> 0%</text></box>);
+      nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> 0%</text></box>);
+        // mo (monthly) not shown — rarely hits limits, reduces clutter
       }
     } else {
       nodes.push(<text>usage-coach: ...</text>);
