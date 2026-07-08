@@ -40,7 +40,7 @@ function setStateDir(dir: string) {
 type QuotaWindow = { resetDescription?: string; usedPercent: number; resetsAt?: string };
 type Quota = { weekly: QuotaWindow; monthly: QuotaWindow; fiveHour: QuotaWindow };
 type Decision = "GO" | "THROTTLE" | "STOP";
-type Coaching = { decision: Decision; advice: string; weekly: number; monthly: number; fiveHour: number };
+type Coaching = { decision: Decision; advice: string; weekly: number; monthly: number; fiveHour: number; agent?: string };
 
 const NOOP_HOOKS = {}; // returned on init failure so opencode keeps working
 
@@ -264,6 +264,7 @@ function coach(q: Quota | null, lighter: string): Coaching {
 // Resolve the current session's agent name via the SDK client. Cached per sessionID
 // (60s TTL) so we don't hit the API on every tool call. "" when unknown (not-harness).
 const agentCache = new Map<string, { agent: string; ts: number }>();
+let lastResolvedAgent = ""; // latest agent mode, written to state.json for TUI to read
 async function resolveAgent(client: any, sessionID: string): Promise<string> {
   if (!sessionID) return "";
   const hit = agentCache.get(sessionID);
@@ -272,6 +273,7 @@ async function resolveAgent(client: any, sessionID: string): Promise<string> {
     const s: any = await client.session.get({ path: { id: sessionID } });
     const agent = String(s?.data?.info?.agent ?? s?.data?.agent ?? s?.info?.agent ?? "");
     agentCache.set(sessionID, { agent, ts: Date.now() });
+    lastResolvedAgent = agent;
     return agent;
   } catch (e) { log(`resolveAgent err: ${String(e)}`); return ""; }
 }
@@ -318,7 +320,7 @@ export default async function UsageCoachPlugin(input: {
               const p0 = providers[0];
               last = { ...last, weekly: p0.weekly, fiveHour: p0.fiveHour, monthly: p0.weekly >= 0 ? 0 : -1, advice: p0.advice, decision: p0.weekly >= STOP_WK ? "STOP" : p0.weekly >= THR_WK ? "THROTTLE" : "GO" };
             }
-            writeState({ ...last, providers, updatedAt: new Date().toISOString() } as any);
+            writeState({ ...last, agent: lastResolvedAgent, providers, updatedAt: new Date().toISOString() } as any);
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
           }
           catch (e) { log(`refresh-in-then err: ${String(e)}`); }

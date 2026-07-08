@@ -22,7 +22,11 @@ let STATE_FILE = join(STATE_DIR, "state.json");
 let HARNESS_FILE = join(STATE_DIR, "harness.json");
 let MARKER = join(STATE_DIR, "tui-loaded.txt");
 
-type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number; providers?: ProviderCoach[] };
+type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number; agent?: string; providers?: ProviderCoach[] };
+
+// Harness agent mode (matches HARNESS_AGENTS in index.ts; default "usage-coach-harness")
+const HARNESS_AGENT_IDS = (process.env.UC_HARNESS_AGENT ?? "Usage-Coach-Harness")
+  .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 type ProviderCoach = { id: string; name: string; fiveHour: number; weekly: number; fiveHourReset: string; weeklyReset: string; advice: string };
 type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null; startedAt?: string };
 type ProviderQuota = { weekly: number; monthly: number; fiveHour: number };
@@ -133,6 +137,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     }
     let s: State | null;
     try { s = getState(); } catch { s = null; }
+    // Agent-mode gate: if the current agent is known and NOT a harness mode,
+    // the TUI has nothing to show (no quota coaching, no harness). Skip entirely.
+    const isHarness = s?.agent ? HARNESS_AGENT_IDS.includes(s.agent.toLowerCase()) : false;
+    if (s?.agent && !isHarness) {
+      return (<box><text style={st("textMuted")}>usage-coach</text></box>);
+    }
     // read harness from this SESSION's path (per-session isolation),
     // then fall back to the most recent active harness across all sessions
     // (so the panel shows a running harness even if ctx.session_id is empty/mismatched).
@@ -186,16 +196,24 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1000)) : 0;
         const elapsedStr = (t.status === "completed" || t.status === "failed") ? "" : (elapsed > 0 ? ` ${elapsed}s` : "");
         nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev}{elapsedStr} {t.title}</text>);
-        // quota: read from coaching state (h.quotas is not populated — use the live state)
-        const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
-        // match by provider id; fall back to first provider if task has no model
-        const provCoach = pv
-          ? s?.providers?.find((p: any) => p.id === pv || (pv && p.id.startsWith(pv)) || (pv && pv.startsWith(p.id)))
-          : s?.providers?.[0];
-        const rawPct = provCoach?.fiveHour ?? s?.fiveHour ?? -1;
-        const pct = rawPct < 0 ? 0 : rawPct;  // -1 means no quota data — show empty bar
-        const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
-        nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("text")}>{barEmpty(pct)}</text><text> {pctLabel}</text></box>);
+        // quota line: only when a model is assigned and has meaningful quota data.
+        // Models under "opencode/" are free (no quota) — show "free" badge.
+        // Unmatched providers or missing model → skip quota line entirely (no misleading fallback).
+        if (t.model) {
+          const prefix = t.model.split("/")[0] ?? "";
+          if (prefix === "opencode") {
+            nodes.push(<box flexDirection="row"><text>   </text><text style={st("success")}>free</text></box>);
+          } else {
+            const provCoach = s?.providers?.find((p: any) =>
+              p.id === prefix || p.id.startsWith(prefix) || prefix.startsWith(p.id),
+            );
+            const rawPct = provCoach?.fiveHour ?? -1;
+            if (rawPct >= 0) {
+              nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(rawPct)}</text><text style={st("text")}>{barEmpty(rawPct)}</text><text> {rawPct}%</text></box>);
+            }
+            // no match → show nothing rather than misleading data
+          }
+        }
       }
     }
 

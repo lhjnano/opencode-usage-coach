@@ -451,6 +451,7 @@ function coach(q, lighter) {
   return { decision: "GO", advice: `Comfortable \u2014 weekly ${wk}% \xB7 5h ${h5}% \xB7 monthly ${mo}%. proceed. 5h window ${h5R}.`, weekly: wk, monthly: mo, fiveHour: h5 };
 }
 var agentCache = /* @__PURE__ */ new Map();
+var lastResolvedAgent = "";
 async function resolveAgent(client, sessionID) {
   if (!sessionID) return "";
   const hit = agentCache.get(sessionID);
@@ -459,6 +460,7 @@ async function resolveAgent(client, sessionID) {
     const s = await client.session.get({ path: { id: sessionID } });
     const agent = String(s?.data?.info?.agent ?? s?.data?.agent ?? s?.info?.agent ?? "");
     agentCache.set(sessionID, { agent, ts: Date.now() });
+    lastResolvedAgent = agent;
     return agent;
   } catch (e) {
     log(`resolveAgent err: ${String(e)}`);
@@ -498,7 +500,7 @@ async function UsageCoachPlugin(input) {
               const p0 = providers[0];
               last = { ...last, weekly: p0.weekly, fiveHour: p0.fiveHour, monthly: p0.weekly >= 0 ? 0 : -1, advice: p0.advice, decision: p0.weekly >= STOP_WK ? "STOP" : p0.weekly >= THR_WK ? "THROTTLE" : "GO" };
             }
-            writeState({ ...last, providers, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+            writeState({ ...last, agent: lastResolvedAgent, providers, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
           } catch (e) {
             log(`refresh-in-then err: ${String(e)}`);
