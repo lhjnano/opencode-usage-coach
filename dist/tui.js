@@ -131,11 +131,9 @@ function initializeTui(api, disposeRoot) {
     tlog(`api probe err: ${String(e)}`);
   }
   const [getState, setState] = createSignal(readState());
-  const [getHarness, setHarness] = createSignal(readHarness());
   const timer = setInterval(() => {
     try {
       setState(readState());
-      setHarness(readHarness());
     } catch {
     }
   }, 3e3);
@@ -184,7 +182,7 @@ function initializeTui(api, disposeRoot) {
         return _el$;
       })();
     }
-    let s = null;
+    let s;
     try {
       s = getState();
     } catch {
@@ -415,16 +413,18 @@ function initializeTui(api, disposeRoot) {
     slots: {
       sidebar_footer(ctx) {
         tlog("sidebar_footer slot called");
+        let result;
         try {
-          return panel(ctx);
+          result = panel(ctx);
         } catch (e) {
           tlog(`sidebar_footer err: ${String(e)}`);
-          return (() => {
+          result = (() => {
             var _el$61 = _$createElement("text");
             _$insertNode(_el$61, _$createTextNode(`usage-coach`));
             return _el$61;
           })();
         }
+        return result;
       }
     }
   });

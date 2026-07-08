@@ -12,7 +12,12 @@ permission:
   grep: allow
   task: allow
   generate: allow
+  generate_batch: allow
   grade: allow
+  investigate: allow
+  verify_diagnosis: allow
+  generalize: allow
+  record_failure: allow
   harness_start: allow
   task_update: allow
   harness_done: allow

@@ -19,14 +19,12 @@ import { tool } from "@opencode-ai/plugin";
 import { initDomain, queryDomain, saveInvestigationResult } from "./domain.js";
 
 const PLUGIN_NAME = "opencode-usage-coach";
-const DEBUG = process.env.UC_DEBUG === "1";
 const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
 
 // Per-directory state isolation: each project dir gets its own state/harness files,
 // so multiple sessions/dirs don't share harness state. UC_STATE_DIR overrides (global).
 let STATE_DIR = join(homedir(), ".cache", "opencode-usage-coach");
 let STATE_FILE = join(STATE_DIR, "state.json");
-let HARNESS_FILE = join(STATE_DIR, "harness.json");
 let LOG_FILE = join(STATE_DIR, "coach.log");
 function projectStateDir(dir: string): string {
   const abs = resolve(dir || ".");
@@ -36,7 +34,6 @@ function projectStateDir(dir: string): string {
 function setStateDir(dir: string) {
   STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(dir);
   STATE_FILE = join(STATE_DIR, "state.json");
-  HARNESS_FILE = join(STATE_DIR, "harness.json");
   LOG_FILE = join(STATE_DIR, "coach.log");
 }
 
@@ -137,6 +134,12 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     return `ERROR: runModel exception after ${elapsed}s: ${String(e)}`;
   }
 }
+
+// Agent-mode gating — harness tools + quota coaching are restricted to these agent
+// modes (UC_HARNESS_AGENT, comma-separated). Other modes (e.g. Agent-Factory-
+// Coordinator) stay fully clean: no tool gating, no system-prompt injection.
+const HARNESS_AGENTS = (process.env.UC_HARNESS_AGENT ?? "Usage-Coach-Harness")
+  .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 
 // Quota thresholds (override via env). Provider + lighter model come from config/env (see init).
 const num = (e: string, d: number) => { try { const v = Number(process.env[e]); return Number.isFinite(v) && v >= 0 ? v : d; } catch { return d; } };
@@ -255,6 +258,25 @@ function coach(q: Quota | null, lighter: string): Coaching {
   return { decision: "GO", advice: `Comfortable — weekly ${wk}% · 5h ${h5}% · monthly ${mo}%. proceed. 5h window ${h5R}.`, weekly: wk, monthly: mo, fiveHour: h5 };
 }
 
+// Resolve the current session's agent name via the SDK client. Cached per sessionID
+// (60s TTL) so we don't hit the API on every tool call. "" when unknown (not-harness).
+const agentCache = new Map<string, { agent: string; ts: number }>();
+async function resolveAgent(client: any, sessionID: string): Promise<string> {
+  if (!sessionID) return "";
+  const hit = agentCache.get(sessionID);
+  if (hit && Date.now() - hit.ts < 60000) return hit.agent;
+  try {
+    const s: any = await client.session.get({ path: { id: sessionID } });
+    const agent = String(s?.data?.info?.agent ?? s?.data?.agent ?? s?.info?.agent ?? "");
+    agentCache.set(sessionID, { agent, ts: Date.now() });
+    return agent;
+  } catch (e) { log(`resolveAgent err: ${String(e)}`); return ""; }
+}
+function isHarnessAgent(agent: string): boolean {
+  if (!agent) return false;
+  return HARNESS_AGENTS.includes(agent.toLowerCase());
+}
+
 const LOADING: Coaching = { decision: "GO", advice: "quota loading…", weekly: -1, monthly: -1, fiveHour: -1 };
 
 export default async function UsageCoachPlugin(input: {
@@ -313,23 +335,33 @@ export default async function UsageCoachPlugin(input: {
         catch (e) { log(`event err: ${String(e)}`); }
       },
 
-      // ACT(1) hard gate — ONLY for harness tools (generate/grade/etc.) that consume quota.
-      // General tools (read/edit/bash/grep/task) are NEVER blocked — they don't consume model quota.
-      // This ensures Agent-Factory-Coordinator and other modes work freely even at STOP.
+      // ACT(1) hard gate — harness tools are restricted to the configured harness
+      // agent mode AND gated by quota STOP. General tools (read/edit/bash/grep/task)
+      // are NEVER gated, in ANY mode — they don't consume model quota.
       "tool.execute.before": async (_input: { tool: string; sessionID: string; callID: string }) => {
-        let decision: Decision = "GO";
+        const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure"];
+        if (!harnessTools.includes(_input.tool)) return; // only harness tools are gated
+        // (1) agent-mode gate: harness tools only run inside the harness agent mode.
+        const agent = await resolveAgent(input.client, _input.sessionID);
+        if (!isHarnessAgent(agent)) {
+          throw new Error(`[${PLUGIN_NAME}] '${_input.tool}' is restricted to agent mode ${JSON.stringify(HARNESS_AGENTS)} (current: ${JSON.stringify(agent || "unknown")}). Switch to that agent mode to use it.`);
+        }
+        // (2) quota gate: STOP blocks quota-consuming harness tools.
+        let decision: Decision;
         try { decision = current().decision; } catch { decision = "GO"; } // safe default
         if (decision === "STOP") {
-          const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize"];
-          if (harnessTools.includes(_input.tool)) {
-            throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
-          }
+          throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
         }
       },
 
-      // ACT(2) inject coaching into system prompt (double defense). Silent on error.
+      // ACT(2) inject coaching into system prompt — ONLY in the harness agent mode,
+      // so other modes' system prompts stay completely clean. Silent on error.
       "experimental.chat.system.transform": async (_input: { sessionID?: string }, output: { system: string[] }) => {
         try {
+          if (_input.sessionID) {
+            const agent = await resolveAgent(input.client, _input.sessionID);
+            if (!isHarnessAgent(agent)) return; // not harness mode — don't inject
+          }
           const c = current();
           let instruction = "";
           if (c.decision === "STOP") instruction = `[${PLUGIN_NAME}] QUOTA limit exceeded. ${c.advice} Stop making further tool calls, finish the in-progress work, then report the quota status to the user.`;

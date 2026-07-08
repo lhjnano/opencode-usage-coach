@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-08
+
+### Added
+- **Agent-mode scoping.** Harness tools (`generate`, `generate_batch`, `grade`, `investigate`,
+  `verify_diagnosis`, `generalize`, `record_failure`, `harness_start`, `task_update`,
+  `harness_done`) and quota system-prompt coaching are now restricted to the
+  `usage-coach-harness` agent mode. Other modes (build, general, custom agents) get **no** harness
+  tools and **no** quota injection — they stay completely clean. Controlled by `UC_HARNESS_AGENT`
+  (default `Usage-Coach-Harness`, case-insensitive, comma-separated for multiple modes).
+- **ESLint** (flat config) + `lint` / `lint:fix` scripts. TypeScript + Solid.js rules.
+
+### Fixed
+- **`agents/usage-coach-harness.md` missing 5 tool permissions.** `generate_batch`,
+  `investigate`, `verify_diagnosis`, `generalize`, `record_failure` were absent from the agent's
+  `permission` allowlist — so even the harness mode couldn't use them. All 10 harness tools are
+  now explicitly allowed in that mode (and only that mode).
+- Lint cleanup: removed unused `DEBUG`/`HARNESS_FILE`/`TICON`/`short`, fixed
+  `no-useless-assignment` initializers, simplified a Solid slot callback to a single return.
+
+### Changed
+- **`tool.execute.before`** now (1) resolves the session's agent via `client.session.get` and
+  rejects non-harness modes, then (2) applies the STOP quota gate. General tools (read/edit/bash/
+  grep/task) are never gated in any mode. Result: the `[opencode-usage-coach] QUOTA…` system-prompt
+  line and harness tool availability no longer leak into other agent modes.
+
 ## [0.3.5] - 2026-07-07
 
 ### Fixed

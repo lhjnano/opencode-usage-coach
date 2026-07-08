@@ -152,6 +152,36 @@ Place in the **work directory**. Each role runs on its model, so per-model quota
 | `UC_PROVIDER` | (config `provider`) | codexbar provider for the guardian |
 | `UC_TTL_MS` | 60000 | quota cache TTL (ms) |
 | `UC_DEBUG` | 0 | set to `1` for a diagnostic log at `~/.cache/opencode-usage-coach/coach.log` |
+| `UC_HARNESS_AGENT` | `Usage-Coach-Harness` | comma-separated agent modes allowed to use harness tools + receive quota coaching (case-insensitive; must match the agent id, e.g. `usage-coach-harness` from `agents/usage-coach-harness.md`) |
+
+## Agent-mode scoping
+
+Harness tools (`generate`, `grade`, `harness_start`, …) and quota coaching are **scoped to
+the `usage-coach-harness` agent mode**. Other modes (build, general, your custom agents) stay
+completely clean — no harness tools in their tool list, no quota coaching injected into their
+system prompt.
+
+This is enforced on two independent layers (defense in depth):
+
+1. **Agent definition** (`agents/usage-coach-harness.md`) — its `permission` allowlist names the
+   harness tools, so they only appear in this mode. Other agents' permission lists don't name
+   them, so they're hidden from those modes automatically (this is the standard opencode
+   mechanism — tool visibility is the agent definition's responsibility).
+2. **Plugin runtime gate** (`tool.execute.before`) — even if a harness tool were somehow
+   invoked, the plugin resolves the current session's agent (`client.session.get` → `info.agent`,
+   60s-cached) and throws unless it matches `UC_HARNESS_AGENT` (default `Usage-Coach-Harness`,
+   case-insensitive). The quota system-prompt injection is gated the same way.
+
+**To use the harness tools**, switch to the `usage-coach-harness` agent mode.
+
+**To allow additional modes**, set `UC_HARNESS_AGENT` to a comma-separated list:
+```bash
+export UC_HARNESS_AGENT="usage-coach-harness,my-other-harness"
+```
+
+> Why not the v2 plugin API? v2 has no `tool` registration domain, so a plugin that provides
+> custom tools (like this one) cannot be fully rewritten in v2. Agent `permission` allowlists +
+> the v1 runtime gate is the structurally correct way to scope tool visibility.
 
 ## Architecture
 - **Server module** (`src/index.ts`) — SENSE/DECIDE/ACT + custom harness tools. Loaded via `opencode.json`.

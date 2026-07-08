@@ -61,11 +61,6 @@ function readHarness(): HarnessState | null {
 
 // Plain ASCII indicators (no emoji — avoids static decorations that don't change live)
 const TAG: Record<State["decision"], string> = { GO: "ok", THROTTLE: "slow", STOP: "STOP" };
-// Task status ASCII icons
-const TICON: Record<string, string> = {
-  generating: ">", grading: "?", revising: "~", completed: "+",
-  failed: "x", timed_out: "!", halted_quota: "#",
-};
 const TLABEL: Record<string, string> = {
   generating: "gen", grading: "grade", revising: "revise", completed: "done",
   failed: "fail", timed_out: "timeout", halted_quota: "quota-halt",
@@ -79,10 +74,6 @@ function barFill(p: number): string {
 function barEmpty(p: number): string {
   const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
   return "░".repeat(10 - n);
-}
-// Truncate title to fit sidebar width
-function short(s: string, n: number): string {
-  return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
 function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
@@ -107,8 +98,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
   } catch (e) { tlog(`api probe err: ${String(e)}`); }
 
   const [getState, setState] = createSignal<State | null>(readState());
-  const [getHarness, setHarness] = createSignal<HarnessState | null>(readHarness());
-  const timer = setInterval(() => { try { setState(readState()); setHarness(readHarness()); } catch { /* */ } }, 3000);
+  // harness is read per-render (per-session path) — no reactive signal needed; setState re-render re-reads it.
+  const timer = setInterval(() => { try { setState(readState()); } catch { /* */ } }, 3000);
   onCleanup(() => clearInterval(timer));
   onCleanup(() => disposeRoot());
 
@@ -140,7 +131,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     if (collapsed()) {
       return (<box><text style={st("textMuted")}>usage-coach (hidden — Alt+H)</text></box>);
     }
-    let s: State | null = null;
+    let s: State | null;
     try { s = getState(); } catch { s = null; }
     // read harness from this SESSION's path (per-session isolation),
     // then fall back to the most recent active harness across all sessions
@@ -217,8 +208,11 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     slots: {
       sidebar_footer(ctx: TuiSlotContext & { session_id?: string }) {
         tlog("sidebar_footer slot called");
-        try { return panel(ctx); }
-        catch (e) { tlog(`sidebar_footer err: ${String(e)}`); return <text>usage-coach</text>; }
+        // slot callback (not a Solid component) — single return avoids reactivity false-positive
+        let result: any;
+        try { result = panel(ctx); }
+        catch (e) { tlog(`sidebar_footer err: ${String(e)}`); result = <text>usage-coach</text>; }
+        return result;
       },
     },
   });

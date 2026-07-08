@@ -68,11 +68,9 @@ function saveInvestigationResult(keywords, result, source) {
 
 // src/index.ts
 var PLUGIN_NAME = "opencode-usage-coach";
-var DEBUG = process.env.UC_DEBUG === "1";
 var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
 var STATE_DIR = join2(homedir(), ".cache", "opencode-usage-coach");
 var STATE_FILE = join2(STATE_DIR, "state.json");
-var HARNESS_FILE = join2(STATE_DIR, "harness.json");
 var LOG_FILE = join2(STATE_DIR, "coach.log");
 function projectStateDir(dir) {
   const abs = resolve(dir || ".");
@@ -82,7 +80,6 @@ function projectStateDir(dir) {
 function setStateDir(dir) {
   STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(dir);
   STATE_FILE = join2(STATE_DIR, "state.json");
-  HARNESS_FILE = join2(STATE_DIR, "harness.json");
   LOG_FILE = join2(STATE_DIR, "coach.log");
 }
 var NOOP_HOOKS = {};
@@ -200,6 +197,7 @@ async function runModel(client, model, prompt, directory) {
     return `ERROR: runModel exception after ${elapsed}s: ${String(e)}`;
   }
 }
+var HARNESS_AGENTS = (process.env.UC_HARNESS_AGENT ?? "Usage-Coach-Harness").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 var num = (e, d) => {
   try {
     const v = Number(process.env[e]);
@@ -325,6 +323,25 @@ function coach(q, lighter) {
   if (wk >= THR_WK) return thr(`weekly ${wk}% (${wkR})`);
   return { decision: "GO", advice: `Comfortable \u2014 weekly ${wk}% \xB7 5h ${h5}% \xB7 monthly ${mo}%. proceed. 5h window ${h5R}.`, weekly: wk, monthly: mo, fiveHour: h5 };
 }
+var agentCache = /* @__PURE__ */ new Map();
+async function resolveAgent(client, sessionID) {
+  if (!sessionID) return "";
+  const hit = agentCache.get(sessionID);
+  if (hit && Date.now() - hit.ts < 6e4) return hit.agent;
+  try {
+    const s = await client.session.get({ path: { id: sessionID } });
+    const agent = String(s?.data?.info?.agent ?? s?.data?.agent ?? s?.info?.agent ?? "");
+    agentCache.set(sessionID, { agent, ts: Date.now() });
+    return agent;
+  } catch (e) {
+    log(`resolveAgent err: ${String(e)}`);
+    return "";
+  }
+}
+function isHarnessAgent(agent) {
+  if (!agent) return false;
+  return HARNESS_AGENTS.includes(agent.toLowerCase());
+}
 var LOADING = { decision: "GO", advice: "quota loading\u2026", weekly: -1, monthly: -1, fiveHour: -1 };
 async function UsageCoachPlugin(input) {
   try {
@@ -384,26 +401,34 @@ async function UsageCoachPlugin(input) {
           log(`event err: ${String(e)}`);
         }
       },
-      // ACT(1) hard gate — ONLY for harness tools (generate/grade/etc.) that consume quota.
-      // General tools (read/edit/bash/grep/task) are NEVER blocked — they don't consume model quota.
-      // This ensures Agent-Factory-Coordinator and other modes work freely even at STOP.
+      // ACT(1) hard gate — harness tools are restricted to the configured harness
+      // agent mode AND gated by quota STOP. General tools (read/edit/bash/grep/task)
+      // are NEVER gated, in ANY mode — they don't consume model quota.
       "tool.execute.before": async (_input) => {
-        let decision = "GO";
+        const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure"];
+        if (!harnessTools.includes(_input.tool)) return;
+        const agent = await resolveAgent(input.client, _input.sessionID);
+        if (!isHarnessAgent(agent)) {
+          throw new Error(`[${PLUGIN_NAME}] '${_input.tool}' is restricted to agent mode ${JSON.stringify(HARNESS_AGENTS)} (current: ${JSON.stringify(agent || "unknown")}). Switch to that agent mode to use it.`);
+        }
+        let decision;
         try {
           decision = current().decision;
         } catch {
           decision = "GO";
         }
         if (decision === "STOP") {
-          const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize"];
-          if (harnessTools.includes(_input.tool)) {
-            throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
-          }
+          throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
         }
       },
-      // ACT(2) inject coaching into system prompt (double defense). Silent on error.
+      // ACT(2) inject coaching into system prompt — ONLY in the harness agent mode,
+      // so other modes' system prompts stay completely clean. Silent on error.
       "experimental.chat.system.transform": async (_input, output) => {
         try {
+          if (_input.sessionID) {
+            const agent = await resolveAgent(input.client, _input.sessionID);
+            if (!isHarnessAgent(agent)) return;
+          }
           const c = current();
           let instruction = "";
           if (c.decision === "STOP") instruction = `[${PLUGIN_NAME}] QUOTA limit exceeded. ${c.advice} Stop making further tool calls, finish the in-progress work, then report the quota status to the user.`;
