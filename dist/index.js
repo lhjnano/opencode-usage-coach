@@ -1,5 +1,5 @@
 // src/index.ts
-import { mkdirSync as mkdirSync2, writeFileSync, appendFileSync as appendFileSync2, readFileSync as readFileSync2, existsSync as existsSync2 } from "fs";
+import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, appendFileSync as appendFileSync2, readFileSync as readFileSync2, existsSync as existsSync2 } from "fs";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { homedir } from "os";
@@ -7,7 +7,7 @@ import { join as join2, resolve, dirname } from "path";
 import { tool } from "@opencode-ai/plugin";
 
 // src/domain.ts
-import { mkdirSync, appendFileSync, readFileSync, existsSync } from "fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "fs";
 import { join } from "path";
 var BASE_DIR = "";
 function initDomain(stateDir) {
@@ -41,6 +41,14 @@ function addDomainNode(node) {
   }
   return full.id;
 }
+function writeNodes(nodes) {
+  try {
+    mkdirSync(BASE_DIR, { recursive: true });
+    const lines = nodes.map((n) => JSON.stringify(n));
+    writeFileSync(nodesFile(), lines.length ? lines.join("\n") + "\n" : "");
+  } catch {
+  }
+}
 function queryDomain(keywords) {
   const lc = keywords.map((k) => k.toLowerCase());
   const nodes = readNodes();
@@ -48,9 +56,46 @@ function queryDomain(keywords) {
     const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
     return lc.some((k) => k && hay.includes(k));
   });
+  if (matched.length) touchNodes(new Set(matched.map((n) => n.id)));
   const ids = new Set(matched.map((n) => n.id));
   const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to));
   return { nodes: matched, edges };
+}
+function touchNodes(ids) {
+  if (ids.size === 0) return;
+  try {
+    const nodes = readNodes();
+    let changed = false;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    for (const n of nodes) {
+      if (ids.has(n.id)) {
+        n.lastAccessed = now;
+        n.accessCount = (n.accessCount ?? 0) + 1;
+        changed = true;
+      }
+    }
+    if (changed) writeNodes(nodes);
+  } catch {
+  }
+}
+function evictStale(maxAgeDays = 30, maxNodes = 1e3) {
+  try {
+    const nodes = readNodes();
+    if (nodes.length === 0) return { removed: 0, kept: 0 };
+    const now = Date.now();
+    const ageMs = maxAgeDays * 864e5;
+    const lastTs = (n) => new Date(n.lastAccessed ?? n.ts).getTime();
+    let kept = nodes.filter((n) => now - lastTs(n) < ageMs);
+    if (kept.length > maxNodes) {
+      kept.sort((a, b) => lastTs(b) - lastTs(a));
+      kept = kept.slice(0, maxNodes);
+    }
+    const removed = nodes.length - kept.length;
+    if (removed > 0) writeNodes(kept);
+    return { removed, kept: kept.length };
+  } catch {
+    return { removed: 0, kept: 0 };
+  }
 }
 function saveInvestigationResult(keywords, result, source) {
   try {
@@ -93,7 +138,7 @@ function log(msg) {
 function writeState(c) {
   try {
     mkdirSync2(STATE_DIR, { recursive: true });
-    writeFileSync(STATE_FILE, JSON.stringify({ ...c, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }));
+    writeFileSync2(STATE_FILE, JSON.stringify({ ...c, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }));
   } catch {
   }
 }
@@ -146,7 +191,7 @@ function writeHarness(sessionID, h) {
     const f = harnessFile(sessionID);
     mkdirSync2(dirname(f), { recursive: true });
     h.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    writeFileSync(f, JSON.stringify(h, null, 2));
+    writeFileSync2(f, JSON.stringify(h, null, 2));
   } catch {
   }
 }
@@ -211,6 +256,8 @@ var THR_5H = num("UC_THROTTLE_5H", 70);
 var STOP_WK = num("UC_STOP_WEEKLY", 95);
 var THR_WK = num("UC_THROTTLE_WEEKLY", 85);
 var STOP_MO = num("UC_STOP_MONTHLY", 98);
+var WORM_MAX_AGE_DAYS = num("UC_WORM_MAX_AGE_DAYS", 180);
+var WORM_MAX_NODES = num("UC_WORM_MAX_NODES", 1e5);
 function humanRemaining(iso) {
   try {
     if (!iso) return "";
@@ -397,6 +444,14 @@ async function UsageCoachPlugin(input) {
       event: async ({ event }) => {
         try {
           if (event.type === "session.created" || event.type === "session.idle") refreshBackground();
+          if (event.type === "session.idle") {
+            try {
+              const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES);
+              if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`);
+            } catch (e) {
+              log(`evictStale err: ${String(e)}`);
+            }
+          }
         } catch (e) {
           log(`event err: ${String(e)}`);
         }

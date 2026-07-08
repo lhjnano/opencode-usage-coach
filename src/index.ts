@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
-import { initDomain, queryDomain, saveInvestigationResult } from "./domain.js";
+import { initDomain, queryDomain, saveInvestigationResult, evictStale } from "./domain.js";
 
 const PLUGIN_NAME = "opencode-usage-coach";
 const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
@@ -146,6 +146,9 @@ const num = (e: string, d: number) => { try { const v = Number(process.env[e]); 
 const STOP_5H = num("UC_STOP_5H", 92), THR_5H = num("UC_THROTTLE_5H", 70);
 const STOP_WK = num("UC_STOP_WEEKLY", 95), THR_WK = num("UC_THROTTLE_WEEKLY", 85);
 const STOP_MO = num("UC_STOP_MONTHLY", 98);
+// Domain-DB worm (GC) thresholds — override via env. Time-based + size-based eviction.
+const WORM_MAX_AGE_DAYS = num("UC_WORM_MAX_AGE_DAYS", 180);
+const WORM_MAX_NODES = num("UC_WORM_MAX_NODES", 100000);
 
 function humanRemaining(iso?: string): string {
   try {
@@ -331,7 +334,11 @@ export default async function UsageCoachPlugin(input: {
 
     return {
       event: async ({ event }: { event: { type: string } }) => {
-        try { if (event.type === "session.created" || event.type === "session.idle") refreshBackground(); }
+        try {
+          if (event.type === "session.created" || event.type === "session.idle") refreshBackground();
+          // Worm (GC): run the domain-DB eviction on idle. Cheap no-op when nothing is stale.
+          if (event.type === "session.idle") { try { const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } }
+        }
         catch (e) { log(`event err: ${String(e)}`); }
       },
 

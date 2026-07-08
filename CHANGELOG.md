@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-08
+
+### Added
+- **Domain-DB worm (GC).** Domain nodes now track `lastAccessed`/`accessCount` (touched on
+  every `queryDomain`); `evictStale` drops stale + caps size, run on each `session.idle`.
+  Keeps the domain knowledge base from growing unbounded with stale/forgotten facts.
+  Configurable via env:
+  - `UC_WORM_MAX_AGE_DAYS` (default **180** ≈ 6 months) — drop nodes not accessed in N days
+  - `UC_WORM_MAX_NODES` (default **100000**) — cap node count, evict oldest-accessed beyond it
+- New domain helpers: `touchNodes`, `evictStale`, `writeNodes`. Tests for access tracking
+  and time/size eviction.
+
 ## [0.4.0] - 2026-07-08
 
 ### Added

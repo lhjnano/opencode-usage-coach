@@ -153,6 +153,8 @@ Place in the **work directory**. Each role runs on its model, so per-model quota
 | `UC_TTL_MS` | 60000 | quota cache TTL (ms) |
 | `UC_DEBUG` | 0 | set to `1` for a diagnostic log at `~/.cache/opencode-usage-coach/coach.log` |
 | `UC_HARNESS_AGENT` | `Usage-Coach-Harness` | comma-separated agent modes allowed to use harness tools + receive quota coaching (case-insensitive; must match the agent id, e.g. `usage-coach-harness` from `agents/usage-coach-harness.md`) |
+| `UC_WORM_MAX_AGE_DAYS` | 180 | domain DB worm (GC): drop nodes not accessed in N days (~6 months) |
+| `UC_WORM_MAX_NODES` | 100000 | domain DB worm (GC): cap node count, evict oldest-accessed beyond this |
 
 ## Agent-mode scoping
 

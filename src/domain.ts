@@ -4,7 +4,7 @@
 //   - read/add/query/traverse helpers; queryDomain + traverse compose the 1-hop lookups
 //     the learning loop (investigate) and generate injections need.
 
-import { mkdirSync, appendFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export type Relation = "returns" | "is-a" | "part-of" | "depends-on" | "contradicts" | "constraints" | "example-of" | "alias-of";
@@ -18,6 +18,9 @@ export type DomainNode = {
   source: string;
   confidence: number;
   ts: string;
+  // Worm (GC) tracking — updated on query/traverse, used by evictStale.
+  lastAccessed?: string;
+  accessCount?: number;
 };
 
 export type DomainEdge = {
@@ -63,6 +66,12 @@ export function addDomainEdge(edge: Omit<DomainEdge, "ts">): void {
   try { mkdirSync(BASE_DIR, { recursive: true }); appendFileSync(edgesFile(), JSON.stringify(full) + "\n"); } catch { /* */ }
 }
 
+// Rewrite the whole nodes file (used by touch + eviction). Best-effort, never throws.
+// Append-only is the happy path; these are the only places that rewrite, and they run rarely.
+function writeNodes(nodes: DomainNode[]): void {
+  try { mkdirSync(BASE_DIR, { recursive: true }); const lines = nodes.map((n) => JSON.stringify(n)); writeFileSync(nodesFile(), lines.length ? lines.join("\n") + "\n" : ""); } catch { /* */ }
+}
+
 // Keyword match against node name + props; include every edge touching a matched node.
 export function queryDomain(keywords: string[]): { nodes: DomainNode[]; edges: DomainEdge[] } {
   const lc = keywords.map((k) => k.toLowerCase());
@@ -71,9 +80,53 @@ export function queryDomain(keywords: string[]): { nodes: DomainNode[]; edges: D
     const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
     return lc.some((k) => k && hay.includes(k));
   });
+  // Track access for the worm — lastAccessed/accessCount drive eviction.
+  if (matched.length) touchNodes(new Set(matched.map((n) => n.id)));
   const ids = new Set(matched.map((n) => n.id));
   const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to));
   return { nodes: matched, edges };
+}
+
+// Worm — update lastAccessed + accessCount for the given node ids (rewrite). Low-frequency:
+// only the matched subset changes, and only when something matched.
+export function touchNodes(ids: Set<string>): void {
+  if (ids.size === 0) return;
+  try {
+    const nodes = readNodes();
+    let changed = false;
+    const now = new Date().toISOString();
+    for (const n of nodes) {
+      if (ids.has(n.id)) {
+        n.lastAccessed = now;
+        n.accessCount = (n.accessCount ?? 0) + 1;
+        changed = true;
+      }
+    }
+    if (changed) writeNodes(nodes);
+  } catch { /* */ }
+}
+
+// Worm (GC): drop nodes not accessed within maxAgeDays, then cap the count at maxNodes
+// (keeping the most-recently-accessed). Nodes fall back to `ts` when never queried.
+// Returns how many were removed. Safe to call frequently — no-op when nothing is stale.
+export function evictStale(maxAgeDays = 30, maxNodes = 1000): { removed: number; kept: number } {
+  try {
+    const nodes = readNodes();
+    if (nodes.length === 0) return { removed: 0, kept: 0 };
+    const now = Date.now();
+    const ageMs = maxAgeDays * 86_400_000;
+    const lastTs = (n: DomainNode) => new Date(n.lastAccessed ?? n.ts).getTime();
+    // time-based: drop anything older than maxAgeDays.
+    let kept = nodes.filter((n) => now - lastTs(n) < ageMs);
+    // size-based: keep the most-recently-accessed when over the cap.
+    if (kept.length > maxNodes) {
+      kept.sort((a, b) => lastTs(b) - lastTs(a));
+      kept = kept.slice(0, maxNodes);
+    }
+    const removed = nodes.length - kept.length;
+    if (removed > 0) writeNodes(kept);
+    return { removed, kept: kept.length };
+  } catch { return { removed: 0, kept: 0 }; }
 }
 
 // Follow edges originating at nodeId, optionally filtered by rel; returns target nodes.
