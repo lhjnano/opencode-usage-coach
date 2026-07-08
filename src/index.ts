@@ -337,7 +337,7 @@ export default async function UsageCoachPlugin(input: {
         try {
           if (event.type === "session.created" || event.type === "session.idle") refreshBackground();
           // Worm (GC): run the domain-DB eviction on idle. Cheap no-op when nothing is stale.
-          if (event.type === "session.idle") { try { const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } }
+          if (event.type === "session.idle") { try { const r = await evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } }
         }
         catch (e) { log(`event err: ${String(e)}`); }
       },
@@ -473,7 +473,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords);
+                const { nodes, edges } = await queryDomain(keywords);
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n`;
@@ -484,7 +484,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const out = await runModel(input.client, cfg.generator, domainPrefix + rcaPrompt, ctx.directory);
             // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty.
             if (domainEmpty && keywords.length) {
-              try { saveInvestigationResult(keywords, out, "investigate"); } catch (e) { log(`investigate save err: ${String(e)}`); }
+              try { await saveInvestigationResult(keywords, out, "investigate"); } catch (e) { log(`investigate save err: ${String(e)}`); }
             }
             return out + "\n[usage-coach NEXT] call verify_diagnosis with this diagnosis.";
           },
@@ -554,7 +554,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords);
+                const { nodes, edges } = await queryDomain(keywords);
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n` + prefix;
@@ -564,7 +564,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory);
             // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty.
             if (domainEmpty && keywords.length) {
-              try { saveInvestigationResult(keywords, out, "generate"); } catch (e) { log(`generate save err: ${String(e)}`); }
+              try { await saveInvestigationResult(keywords, out, "generate"); } catch (e) { log(`generate save err: ${String(e)}`); }
             }
             return out + (throttle ? `\n[usage-coach] quota THROTTLE — used lighter model ${cfg.lighterModel}` : "") + `\n[usage-coach NEXT] call task_update(i, title, "grading"), then grade to evaluate this work.`;
           },

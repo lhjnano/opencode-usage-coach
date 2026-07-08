@@ -39,6 +39,9 @@
     "harness"
   ],
   "license": "MIT",
+  "dependencies": {
+    "@ladybugdb/core": "^0.18.0"
+  },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.14",
     "@opentui/core": ">=0.4.0",
@@ -58,5 +61,11 @@
     "tsup": "^8.5",
     "typescript": "^5",
     "typescript-eslint": "^8.63.0"
-  }
+  },
+  "dependencies": {
+    "@ladybugdb/core": "^0.18.0"
+  },
+  "trustedDependencies": [
+    "@ladybugdb/core"
+  ]
 }

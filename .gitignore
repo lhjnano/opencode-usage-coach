@@ -2,8 +2,6 @@ node_modules/
 *.tgz
 *.log
 .DS_Store
-ROADMAP.md
-roadmap-audit.md
-competitor-analysis.md
-learning-loop-design.md
-domain-db-design.md
+
+# Roadmap — strategy docs, not tracked
+docs/ROADMAP.md
