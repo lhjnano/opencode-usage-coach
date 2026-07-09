@@ -22,7 +22,7 @@ let STATE_FILE = join(STATE_DIR, "state.json");
 let HARNESS_FILE = join(STATE_DIR, "harness.json");
 let MARKER = join(STATE_DIR, "tui-loaded.txt");
 
-type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number; providers?: ProviderCoach[] };
+type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number; providers?: ProviderCoach[]; model?: string; provider?: string; isFree?: boolean; agent?: string };
 type ProviderCoach = { id: string; name: string; fiveHour: number; weekly: number; fiveHourReset: string; weeklyReset: string; advice: string };
 type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null; startedAt?: string };
 type ProviderQuota = { weekly: number; monthly: number; fiveHour: number };
@@ -153,21 +153,33 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     } catch { h = null; }
 
     const nodes: any[] = [];
+    // Only show panel when agent is a harness agent (or unknown — show during loading)
+    const HARNESS_AGENTS = ["usage-coach-harness"];
+    if (s && s.agent && !HARNESS_AGENTS.includes(s.agent)) {
+      return (<box></box>); // hide panel in non-harness modes
+    }
     if (s) {
       const dKey = s.decision === "GO" ? "success" : s.decision === "THROTTLE" ? "warning" : "error";
-      nodes.push(<text style={st(dKey)}>usage-coach [{TAG[s.decision]}]</text>);
-      // Coach view: per-provider breakdown (5h + wk + time remaining + big/small advice)
+      const modelShort = s.model ? (s.model.split("/").pop() ?? s.model) : "";
+      // Free model: one clean line — usage-coach [free] {model}
+      if (s.isFree) {
+        nodes.push(<box flexDirection="row"><text style={st(dKey)}>usage-coach [free]</text><text style={st("textMuted")}> {modelShort}</text></box>);
+      } else {
+        // Paid model: header + quota bars
+        if (modelShort) {
+          nodes.push(<box flexDirection="row"><text style={st(dKey)}>usage-coach [{TAG[s.decision]}]</text><text style={st("textMuted")}> {modelShort}</text></box>);
+        } else {
+          nodes.push(<text style={st(dKey)}>usage-coach [{TAG[s.decision]}]</text>);
+        }
       if (s.providers && s.providers.length > 0) {
         for (const p of s.providers) {
-          nodes.push(<text style={st("textMuted")}> {p.name}</text>);
-          nodes.push(<box flexDirection="row"><text>  5h </text><text style={st("text")}>{barFill(p.fiveHour)}</text><text style={st("text")}>{barEmpty(p.fiveHour)}</text><text> {p.fiveHour}%  {p.fiveHourReset}</text></box>);
-          nodes.push(<box flexDirection="row"><text>  1w </text><text style={st("text")}>{barFill(p.weekly)}</text><text style={st("text")}>{barEmpty(p.weekly)}</text><text> {p.weekly}%  {p.weeklyReset}</text></box>);
-          nodes.push(<text style={st(dKey)}>  {"->"} {p.advice}</text>);
+          nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(p.fiveHour)}</text><text style={st("text")}>{barEmpty(p.fiveHour)}</text><text> {p.fiveHour}%  {p.fiveHourReset}</text></box>);
+          nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(p.weekly)}</text><text style={st("text")}>{barEmpty(p.weekly)}</text><text> {p.weekly}%  {p.weeklyReset}</text></box>);
         }
       } else {
-      nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> 0%</text></box>);
-      nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> 0%</text></box>);
-        // mo (monthly) not shown — rarely hits limits, reduces clutter
+        nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> 0%</text></box>);
+        nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> 0%</text></box>);
+      }
       }
     } else {
       nodes.push(<text>usage-coach: ...</text>);

@@ -5,29 +5,6 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-07-08
-
-### Added
-- **Domain knowledge base migrated to ladybugDB** (graph DB). NDJSON flat-file storage
-  replaced with embedded property-graph (`@ladybugdb/core`, Kuzu successor). Cypher
-  `MATCH` queries replace full-file `CONTAINS` scans — relationship traversal 13–60×
-  faster. All public helpers wrapped in timeout guard (`UC_DOMAIN_TIMEOUT_MS`, default 5s).
-- **`domain-db-optimization.md`**: performance rationale, schema docs, LadybugDB benchmarks,
-  optimization headroom (full-text index, n-hop, vector search).
-
-### Changed
-- Docs reorganized: `ROADMAP.md`, `roadmap-audit.md`, `competitor-analysis.md`,
-  `domain-db-design.md`, `domain-db-optimization.md`, `learning-loop-design.md` moved to
-  `docs/` directory. Root level keeps only `README.md` and `CHANGELOG.md`.
-- `.gitignore` cleaned up: removed stale individual entries, added
-  `docs/ROADMAP.md` + `docs/roadmap-audit.md`.
-- `package.json`: removed duplicate `dependencies` block, added `trustedDependencies`
-  for `@ladybugdb/core`.
-
-### Fixed
-- LadybugDB `Connection.query()` return type handled as `any` (upstream typings incomplete).
-- Automatic NDJSON → ladybugDB migration on first open (best-effort, never double-imports).
-
 ## [0.5.0] - 2026-07-08
 
 ### Added

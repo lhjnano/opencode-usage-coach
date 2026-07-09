@@ -1,5 +1,5 @@
 // src/index.ts
-import { mkdirSync, writeFileSync, appendFileSync, readFileSync as readFileSync2, existsSync as existsSync2 } from "fs";
+import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, appendFileSync as appendFileSync2, readFileSync as readFileSync2, existsSync as existsSync2 } from "fs";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { homedir } from "os";
@@ -7,193 +7,123 @@ import { join as join2, resolve, dirname } from "path";
 import { tool } from "@opencode-ai/plugin";
 
 // src/domain.ts
-import { Database, Connection } from "@ladybugdb/core";
+import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "fs";
 import { join } from "path";
-import { existsSync, readFileSync } from "fs";
-var QUERY_TIMEOUT_MS = (() => {
-  try {
-    const v = Number(process.env.UC_DOMAIN_TIMEOUT_MS);
-    return Number.isFinite(v) && v > 0 ? v : 5e3;
-  } catch {
-    return 5e3;
-  }
-})();
 var BASE_DIR = "";
-var DB_PATH = "";
-var db = null;
-var conn = null;
-var schemaReady = false;
-var migrated = false;
 function initDomain(stateDir) {
   BASE_DIR = stateDir;
-  DB_PATH = join(BASE_DIR, "domain.ladybug");
-  db = null;
-  conn = null;
-  schemaReady = false;
-  migrated = false;
+}
+var nodesFile = () => join(BASE_DIR, "nodes.ndjson");
+var edgesFile = () => join(BASE_DIR, "edges.ndjson");
+function readNdjson(path) {
+  try {
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+}
+function readNodes() {
+  return readNdjson(nodesFile());
+}
+function readEdges() {
+  return readNdjson(edgesFile());
 }
 function uid(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
-function esc(s) {
-  return String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-}
-function timed(op, fallback) {
-  let timer;
-  const timeout = new Promise((resolve2) => {
-    timer = setTimeout(() => resolve2(fallback), QUERY_TIMEOUT_MS);
-  });
-  return Promise.race([op().catch(() => fallback), timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
-}
-function parseNode(r) {
-  let props = {};
+function addDomainNode(node) {
+  const full = { ...node, id: uid("node"), ts: (/* @__PURE__ */ new Date()).toISOString() };
   try {
-    if (r.props) props = JSON.parse(r.props);
+    mkdirSync(BASE_DIR, { recursive: true });
+    appendFileSync(nodesFile(), JSON.stringify(full) + "\n");
   } catch {
   }
-  return {
-    id: r.id,
-    type: r.type,
-    name: r.name,
-    props,
-    source: r.source ?? "",
-    confidence: r.confidence ?? 0,
-    ts: r.ts,
-    lastAccessed: r.lastAccessed || void 0,
-    accessCount: r.accessCount ?? void 0
-  };
+  return full.id;
 }
-var NODE_COLS = "n.id AS id, n.type AS type, n.name AS name, n.props AS props, n.source AS source, n.confidence AS confidence, n.ts AS ts, n.lastAccessed AS lastAccessed, n.accessCount AS accessCount";
-async function ready() {
-  if (!conn) {
-    db = new Database(DB_PATH);
-    conn = new Connection(db);
-  }
-  if (!schemaReady) {
-    try {
-      await conn.query("CREATE NODE TABLE DomainNode(id STRING, type STRING, name STRING, props STRING, source STRING, confidence DOUBLE, lastAccessed STRING, accessCount INT64 DEFAULT 0, ts STRING, PRIMARY KEY(id))");
-    } catch {
-    }
-    try {
-      await conn.query("CREATE REL TABLE Related(FROM DomainNode TO DomainNode, rel STRING, note STRING, ts STRING)");
-    } catch {
-    }
-    schemaReady = true;
-  }
-  if (!migrated) {
-    migrated = true;
-    await migrateFromNdjson();
-  }
-  return conn;
-}
-async function migrateFromNdjson() {
-  if (!conn) return;
-  const nf = join(BASE_DIR, "nodes.ndjson");
-  const ef = join(BASE_DIR, "edges.ndjson");
-  if (!existsSync(nf)) return;
+function writeNodes(nodes) {
   try {
-    const existing = await conn.query("MATCH (n:DomainNode) RETURN count(n) AS c");
-    const cnt = (await existing.getAll())[0]?.c ?? 0;
-    if (cnt > 0) return;
-    const readNdjson = (p) => {
-      try {
-        return readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-      } catch {
-        return [];
-      }
-    };
-    for (const n of readNdjson(nf)) {
-      await conn.query(`CREATE (n:DomainNode {id:'${esc(n.id)}',type:'${esc(n.type)}',name:'${esc(n.name)}',props:'${esc(JSON.stringify(n.props ?? {}))}',source:'${esc(n.source ?? "")}',confidence:${Number(n.confidence ?? 0)},ts:'${esc(n.ts ?? "")}',lastAccessed:'${esc(n.lastAccessed ?? "")}',accessCount:${Number(n.accessCount ?? 0)}})`);
-    }
-    if (existsSync(ef)) {
-      for (const e of readNdjson(ef)) {
-        await conn.query(`MATCH (a:DomainNode {id:'${esc(e.from)}'}), (b:DomainNode {id:'${esc(e.to)}'}) CREATE (a)-[:Related {rel:'${esc(e.rel)}',note:'${esc(e.note ?? "")}',ts:'${esc(e.ts ?? "")}'}]->(b)`);
-      }
-    }
+    mkdirSync(BASE_DIR, { recursive: true });
+    const lines = nodes.map((n) => JSON.stringify(n));
+    writeFileSync(nodesFile(), lines.length ? lines.join("\n") + "\n" : "");
   } catch {
   }
-}
-async function _readNodes() {
-  const c = await ready();
-  const r = await c.query(`MATCH (n:DomainNode) RETURN ${NODE_COLS}`);
-  return (await r.getAll()).map(parseNode);
-}
-async function _addDomainNode(node) {
-  const c = await ready();
-  const id = uid("node");
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  await c.query(`CREATE (n:DomainNode {id:'${esc(id)}',type:'${esc(node.type)}',name:'${esc(node.name)}',props:'${esc(JSON.stringify(node.props ?? {}))}',source:'${esc(node.source ?? "")}',confidence:${Number(node.confidence ?? 0)},ts:'${esc(now)}',lastAccessed:'',accessCount:0})`);
-  return id;
 }
 function queryDomain(keywords) {
-  return timed(() => _queryDomain(keywords), { nodes: [], edges: [] });
-}
-async function _queryDomain(keywords) {
-  const lc = keywords.map((k) => k.toLowerCase()).filter(Boolean);
-  if (lc.length === 0) return { nodes: [], edges: [] };
-  const c = await ready();
-  const conds = lc.map((kw) => `(lower(n.name) CONTAINS '${esc(kw)}' OR lower(n.props) CONTAINS '${esc(kw)}')`).join(" OR ");
-  const r = await c.query(`MATCH (n:DomainNode) WHERE ${conds} RETURN ${NODE_COLS}`);
-  const matched = (await r.getAll()).map(parseNode);
-  if (matched.length) await _touchNodes(new Set(matched.map((n) => n.id)));
-  let edges = [];
-  if (matched.length) {
-    const ids = matched.map((n) => `'${esc(n.id)}'`).join(",");
-    const er = await c.query(`MATCH (a:DomainNode)-[r:Related]->(b:DomainNode) WHERE a.id IN [${ids}] OR b.id IN [${ids}] RETURN a.id AS from, b.id AS to, r.rel AS rel, r.note AS note, r.ts AS ts`);
-    edges = await er.getAll();
-  }
+  const lc = keywords.map((k) => k.toLowerCase());
+  const nodes = readNodes();
+  const matched = nodes.filter((n) => {
+    const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
+    return lc.some((k) => k && hay.includes(k));
+  });
+  if (matched.length) touchNodes(new Set(matched.map((n) => n.id)));
+  const ids = new Set(matched.map((n) => n.id));
+  const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to));
   return { nodes: matched, edges };
 }
-async function _touchNodes(ids) {
+function touchNodes(ids) {
   if (ids.size === 0) return;
-  const c = await ready();
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const idList = [...ids].map((id) => `'${esc(id)}'`).join(",");
-  await c.query(`MATCH (n:DomainNode) WHERE n.id IN [${idList}] SET n.lastAccessed = '${esc(now)}', n.accessCount = COALESCE(n.accessCount, 0) + 1`);
-}
-function evictStale(maxAgeDays = 30, maxNodes = 1e5) {
-  return timed(() => _evictStale(maxAgeDays, maxNodes), { removed: 0, kept: 0 });
-}
-async function _evictStale(maxAgeDays, maxNodes) {
-  const c = await ready();
-  const all = await _readNodes();
-  if (all.length === 0) return { removed: 0, kept: 0 };
-  const now = Date.now();
-  const ageMs = maxAgeDays * 864e5;
-  const lastTs = (n) => {
-    const la = n.lastAccessed ? new Date(n.lastAccessed).getTime() : 0;
-    return la || new Date(n.ts).getTime();
-  };
-  let kept = all.filter((n) => now - lastTs(n) < ageMs);
-  if (kept.length > maxNodes) {
-    kept.sort((a, b) => lastTs(b) - lastTs(a));
-    kept = kept.slice(0, maxNodes);
+  try {
+    const nodes = readNodes();
+    let changed = false;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    for (const n of nodes) {
+      if (ids.has(n.id)) {
+        n.lastAccessed = now;
+        n.accessCount = (n.accessCount ?? 0) + 1;
+        changed = true;
+      }
+    }
+    if (changed) writeNodes(nodes);
+  } catch {
   }
-  const keepIds = new Set(kept.map((n) => n.id));
-  const toRemove = all.filter((n) => !keepIds.has(n.id));
-  for (const n of toRemove) {
-    await c.query(`MATCH (n:DomainNode {id:'${esc(n.id)}'}) DETACH DELETE n`);
+}
+function evictStale(maxAgeDays = 30, maxNodes = 1e3) {
+  try {
+    const nodes = readNodes();
+    if (nodes.length === 0) return { removed: 0, kept: 0 };
+    const now = Date.now();
+    const ageMs = maxAgeDays * 864e5;
+    const lastTs = (n) => new Date(n.lastAccessed ?? n.ts).getTime();
+    let kept = nodes.filter((n) => now - lastTs(n) < ageMs);
+    if (kept.length > maxNodes) {
+      kept.sort((a, b) => lastTs(b) - lastTs(a));
+      kept = kept.slice(0, maxNodes);
+    }
+    const removed = nodes.length - kept.length;
+    if (removed > 0) writeNodes(kept);
+    return { removed, kept: kept.length };
+  } catch {
+    return { removed: 0, kept: 0 };
   }
-  return { removed: toRemove.length, kept: kept.length };
 }
 function saveInvestigationResult(keywords, result, source) {
-  return timed(() => _saveInvestigationResult(keywords, result, source), "");
-}
-async function _saveInvestigationResult(keywords, result, source) {
-  return _addDomainNode({
-    type: "fact",
-    name: keywords.join(" "),
-    props: { result },
-    source: source || "investigation",
-    confidence: 0.7
-  });
+  try {
+    return addDomainNode({
+      type: "fact",
+      name: keywords.join(" "),
+      props: { result },
+      source: source || "investigation",
+      confidence: 0.7
+    });
+  } catch {
+    return "";
+  }
 }
 
 // src/index.ts
 var PLUGIN_NAME = "opencode-usage-coach";
 var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
+var PIPE_LOG = join2(homedir(), ".cache", "opencode-usage-coach", "pipeline.log");
+function pipeLog(msg) {
+  try {
+    mkdirSync2(dirname(PIPE_LOG), { recursive: true });
+    appendFileSync2(PIPE_LOG, `[SERVER] ${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+`);
+  } catch {
+  }
+}
+pipeLog(`MODULE LOADED | node=${process.version} | pid=${process.pid}`);
 var STATE_DIR = join2(homedir(), ".cache", "opencode-usage-coach");
 var STATE_FILE = join2(STATE_DIR, "state.json");
 var LOG_FILE = join2(STATE_DIR, "coach.log");
@@ -210,15 +140,15 @@ function setStateDir(dir) {
 var NOOP_HOOKS = {};
 function log(msg) {
   try {
-    appendFileSync(LOG_FILE, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+    appendFileSync2(LOG_FILE, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
 `);
   } catch {
   }
 }
 function writeState(c) {
   try {
-    mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(STATE_FILE, JSON.stringify({ ...c, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }));
+    mkdirSync2(STATE_DIR, { recursive: true });
+    writeFileSync2(STATE_FILE, JSON.stringify({ ...c, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }));
   } catch {
   }
 }
@@ -269,9 +199,9 @@ function readHarness(sessionID) {
 function writeHarness(sessionID, h) {
   try {
     const f = harnessFile(sessionID);
-    mkdirSync(dirname(f), { recursive: true });
+    mkdirSync2(dirname(f), { recursive: true });
     h.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    writeFileSync(f, JSON.stringify(h, null, 2));
+    writeFileSync2(f, JSON.stringify(h, null, 2));
   } catch {
   }
 }
@@ -451,14 +381,44 @@ function coach(q, lighter) {
   return { decision: "GO", advice: `Comfortable \u2014 weekly ${wk}% \xB7 5h ${h5}% \xB7 monthly ${mo}%. proceed. 5h window ${h5R}.`, weekly: wk, monthly: mo, fiveHour: h5 };
 }
 var agentCache = /* @__PURE__ */ new Map();
+var currentModel = "";
+var currentProvider = "";
+var currentAgent = "";
+var modelChanged = false;
+function isFreeModel(model, provider) {
+  if (!model && !provider) return false;
+  if (provider === "opencode") return true;
+  if (model.toLowerCase().includes("free")) return true;
+  return false;
+}
+function providerToCodexbar(provider) {
+  if (!provider) return "";
+  return provider.split("-")[0];
+}
 async function resolveAgent(client, sessionID) {
   if (!sessionID) return "";
   const hit = agentCache.get(sessionID);
-  if (hit && Date.now() - hit.ts < 6e4) return hit.agent;
+  if (hit && Date.now() - hit.ts < 6e4) {
+    currentModel = hit.model;
+    currentProvider = hit.provider;
+    return hit.agent;
+  }
   try {
     const s = await client.session.get({ path: { id: sessionID } });
-    const agent = String(s?.data?.info?.agent ?? s?.data?.agent ?? s?.info?.agent ?? "");
-    agentCache.set(sessionID, { agent, ts: Date.now() });
+    log(`resolveAgent raw session: ${JSON.stringify(s?.data?.info ?? s?.data ?? s?.info ?? s).slice(0, 500)}`);
+    const info = s?.data?.info ?? s?.data ?? s?.info ?? s;
+    const agent = String(info?.agent ?? "");
+    const rawModel = info?.model;
+    const model = typeof rawModel === "string" ? rawModel : rawModel?.id ?? rawModel?.modelID ?? rawModel?.name ?? "";
+    const rawProvider = info?.providerID ?? info?.provider ?? (typeof rawModel === "object" ? rawModel?.providerID ?? rawModel?.provider : "");
+    const provider = typeof rawProvider === "string" ? rawProvider : rawProvider?.id ?? "";
+    if (currentModel && model && currentModel !== model) {
+      log(`MODEL CHANGED: ${currentModel} \u2192 ${model} (provider: ${currentProvider} \u2192 ${provider})`);
+      modelChanged = true;
+    }
+    agentCache.set(sessionID, { agent, model, provider, ts: Date.now() });
+    currentModel = model;
+    currentProvider = provider;
     return agent;
   } catch (e) {
     log(`resolveAgent err: ${String(e)}`);
@@ -483,9 +443,19 @@ async function UsageCoachPlugin(input) {
     const refreshBackground = () => {
       try {
         if (refreshing) return;
-        if (last && Date.now() - lastFetchedAt < TTL_MS) return;
+        if (last && !modelChanged && Date.now() - lastFetchedAt < TTL_MS) return;
         refreshing = true;
-        fetchQuota(PROVIDER).then(async (q) => {
+        modelChanged = false;
+        if (isFreeModel(currentModel, currentProvider)) {
+          last = { decision: "GO", advice: `${currentModel || currentProvider || "free model"} \u2014 no quota limit.`, weekly: -1, monthly: -1, fiveHour: -1, model: currentModel, provider: currentProvider, isFree: true };
+          lastFetchedAt = Date.now();
+          writeState({ ...last, providers: [], model: currentModel, provider: currentProvider, isFree: true, agent: currentAgent, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+          log(`FREE | model=${currentModel} provider=${currentProvider}`);
+          refreshing = false;
+          return;
+        }
+        const activeProvider = providerToCodexbar(currentProvider) || PROVIDER;
+        fetchQuota(activeProvider).then(async (q) => {
           try {
             last = coach(q, LIGHTER);
             lastFetchedAt = Date.now();
@@ -498,7 +468,7 @@ async function UsageCoachPlugin(input) {
               const p0 = providers[0];
               last = { ...last, weekly: p0.weekly, fiveHour: p0.fiveHour, monthly: p0.weekly >= 0 ? 0 : -1, advice: p0.advice, decision: p0.weekly >= STOP_WK ? "STOP" : p0.weekly >= THR_WK ? "THROTTLE" : "GO" };
             }
-            writeState({ ...last, providers, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+            writeState({ ...last, providers, model: currentModel, provider: currentProvider, isFree: false, agent: currentAgent, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
           } catch (e) {
             log(`refresh-in-then err: ${String(e)}`);
@@ -526,7 +496,7 @@ async function UsageCoachPlugin(input) {
           if (event.type === "session.created" || event.type === "session.idle") refreshBackground();
           if (event.type === "session.idle") {
             try {
-              const r = await evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES);
+              const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES);
               if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`);
             } catch (e) {
               log(`evictStale err: ${String(e)}`);
@@ -536,13 +506,14 @@ async function UsageCoachPlugin(input) {
           log(`event err: ${String(e)}`);
         }
       },
-      // ACT(1) hard gate — harness tools are restricted to the configured harness
-      // agent mode AND gated by quota STOP. General tools (read/edit/bash/grep/task)
-      // are NEVER gated, in ANY mode — they don't consume model quota.
+      // ACT(1) — model/agent detection on EVERY tool call (cached 60s, negligible overhead).
+      // Then hard-gate harness tools by agent mode + quota STOP.
       "tool.execute.before": async (_input) => {
+        const agent = await resolveAgent(input.client, _input.sessionID);
+        currentAgent = agent;
+        refreshBackground();
         const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure"];
         if (!harnessTools.includes(_input.tool)) return;
-        const agent = await resolveAgent(input.client, _input.sessionID);
         if (!isHarnessAgent(agent)) {
           throw new Error(`[${PLUGIN_NAME}] '${_input.tool}' is restricted to agent mode ${JSON.stringify(HARNESS_AGENTS)} (current: ${JSON.stringify(agent || "unknown")}). Switch to that agent mode to use it.`);
         }
@@ -562,6 +533,7 @@ async function UsageCoachPlugin(input) {
         try {
           if (_input.sessionID) {
             const agent = await resolveAgent(input.client, _input.sessionID);
+            refreshBackground();
             if (!isHarnessAgent(agent)) return;
           }
           const c = current();
@@ -651,8 +623,8 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           async execute(args, _ctx) {
             const rec = { ts: (/* @__PURE__ */ new Date()).toISOString(), task: args.task, prompt: args.prompt, gradeResult: args.gradeResult, model: args.model, revisions: args.revisions };
             try {
-              mkdirSync(STATE_DIR, { recursive: true });
-              appendFileSync(failuresFile(), JSON.stringify(rec) + "\n");
+              mkdirSync2(STATE_DIR, { recursive: true });
+              appendFileSync2(failuresFile(), JSON.stringify(rec) + "\n");
             } catch (e) {
               log(`record_failure err: ${String(e)}`);
             }
@@ -676,7 +648,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
               if (keywords.length) {
-                const { nodes, edges } = await queryDomain(keywords);
+                const { nodes, edges } = queryDomain(keywords);
                 if (nodes && nodes.length || edges && edges.length) {
                   domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
@@ -700,7 +672,7 @@ evidence: <file/line or specific quote>`;
             const out = await runModel(input.client, cfg.generator, domainPrefix + rcaPrompt, ctx.directory);
             if (domainEmpty && keywords.length) {
               try {
-                await saveInvestigationResult(keywords, out, "investigate");
+                saveInvestigationResult(keywords, out, "investigate");
               } catch (e) {
                 log(`investigate save err: ${String(e)}`);
               }
@@ -756,8 +728,8 @@ Keep it concrete and actionable.`;
             const rule = out;
             try {
               const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-              mkdirSync(STATE_DIR, { recursive: true });
-              appendFileSync(rulesFile(), `## Rule (${date})
+              mkdirSync2(STATE_DIR, { recursive: true });
+              appendFileSync2(rulesFile(), `## Rule (${date})
 ${rule}
 Origin: ${args.task}
 
@@ -796,7 +768,7 @@ ${rules}
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
-                const { nodes, edges } = await queryDomain(keywords);
+                const { nodes, edges } = queryDomain(keywords);
                 if (nodes && nodes.length || edges && edges.length) {
                   domainEmpty = false;
                   prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
@@ -812,7 +784,7 @@ ${rules}
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory);
             if (domainEmpty && keywords.length) {
               try {
-                await saveInvestigationResult(keywords, out, "generate");
+                saveInvestigationResult(keywords, out, "generate");
               } catch (e) {
                 log(`generate save err: ${String(e)}`);
               }

@@ -21,6 +21,14 @@ import { initDomain, queryDomain, saveInvestigationResult, evictStale } from "./
 const PLUGIN_NAME = "opencode-usage-coach";
 const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
 
+// Unified pipeline log — survives even if setStateDir fails. Traces the FULL flow:
+// module load → plugin init → hooks → refresh → state.json write.
+const PIPE_LOG = join(homedir(), ".cache", "opencode-usage-coach", "pipeline.log");
+function pipeLog(msg: string) { try { mkdirSync(dirname(PIPE_LOG), { recursive: true }); appendFileSync(PIPE_LOG, `[SERVER] ${new Date().toISOString()} ${msg}\n`); } catch { /* */ } }
+
+// Module load marker — fires when this file is imported, before UsageCoachPlugin is called.
+pipeLog(`MODULE LOADED | node=${process.version} | pid=${process.pid}`);
+
 // Per-directory state isolation: each project dir gets its own state/harness files,
 // so multiple sessions/dirs don't share harness state. UC_STATE_DIR overrides (global).
 let STATE_DIR = join(homedir(), ".cache", "opencode-usage-coach");
@@ -40,7 +48,7 @@ function setStateDir(dir: string) {
 type QuotaWindow = { resetDescription?: string; usedPercent: number; resetsAt?: string };
 type Quota = { weekly: QuotaWindow; monthly: QuotaWindow; fiveHour: QuotaWindow };
 type Decision = "GO" | "THROTTLE" | "STOP";
-type Coaching = { decision: Decision; advice: string; weekly: number; monthly: number; fiveHour: number };
+type Coaching = { decision: Decision; advice: string; weekly: number; monthly: number; fiveHour: number; model?: string; provider?: string; isFree?: boolean };
 
 const NOOP_HOOKS = {}; // returned on init failure so opencode keeps working
 
@@ -261,17 +269,55 @@ function coach(q: Quota | null, lighter: string): Coaching {
   return { decision: "GO", advice: `Comfortable — weekly ${wk}% · 5h ${h5}% · monthly ${mo}%. proceed. 5h window ${h5R}.`, weekly: wk, monthly: mo, fiveHour: h5 };
 }
 
-// Resolve the current session's agent name via the SDK client. Cached per sessionID
-// (60s TTL) so we don't hit the API on every tool call. "" when unknown (not-harness).
-const agentCache = new Map<string, { agent: string; ts: number }>();
+// Resolve the current session's agent name + model + provider via the SDK client.
+// Cached per sessionID (60s TTL). Also detects model changes (triggers quota refresh).
+const agentCache = new Map<string, { agent: string; model: string; provider: string; ts: number }>();
+// Global: last-known model/provider (updated by resolveAgent, read by refreshBackground)
+let currentModel = "";
+let currentProvider = "";
+let currentAgent = "";
+let modelChanged = false; // set by resolveAgent on model change, cleared by refreshBackground
+
+function isFreeModel(model: string, provider: string): boolean {
+  if (!model && !provider) return false;
+  if (provider === "opencode") return true;
+  if (model.toLowerCase().includes("free")) return true;
+  return false;
+}
+
+// Map opencode providerID (e.g. "zai-coding-plan") to codexbar provider name (e.g. "zai").
+function providerToCodexbar(provider: string): string {
+  if (!provider) return "";
+  return provider.split("-")[0];
+}
+
 async function resolveAgent(client: any, sessionID: string): Promise<string> {
   if (!sessionID) return "";
   const hit = agentCache.get(sessionID);
-  if (hit && Date.now() - hit.ts < 60000) return hit.agent;
+  if (hit && Date.now() - hit.ts < 60000) {
+    currentModel = hit.model;
+    currentProvider = hit.provider;
+    return hit.agent;
+  }
   try {
     const s: any = await client.session.get({ path: { id: sessionID } });
-    const agent = String(s?.data?.info?.agent ?? s?.data?.agent ?? s?.info?.agent ?? "");
-    agentCache.set(sessionID, { agent, ts: Date.now() });
+    // Debug: dump the raw session object structure to find model/provider fields
+    log(`resolveAgent raw session: ${JSON.stringify(s?.data?.info ?? s?.data ?? s?.info ?? s).slice(0, 500)}`);
+    const info = s?.data?.info ?? s?.data ?? s?.info ?? s;
+    const agent = String(info?.agent ?? "");
+    // model might be an object like { id: "...", providerID: "..." } or a string
+    const rawModel = info?.model;
+    const model = typeof rawModel === "string" ? rawModel : (rawModel?.id ?? rawModel?.modelID ?? rawModel?.name ?? "");
+    const rawProvider = info?.providerID ?? info?.provider ?? (typeof rawModel === "object" ? rawModel?.providerID ?? rawModel?.provider : "");
+    const provider = typeof rawProvider === "string" ? rawProvider : (rawProvider?.id ?? "");
+    // Detect model change
+    if (currentModel && model && currentModel !== model) {
+      log(`MODEL CHANGED: ${currentModel} → ${model} (provider: ${currentProvider} → ${provider})`);
+      modelChanged = true;
+    }
+    agentCache.set(sessionID, { agent, model, provider, ts: Date.now() });
+    currentModel = model;
+    currentProvider = provider;
     return agent;
   } catch (e) { log(`resolveAgent err: ${String(e)}`); return ""; }
 }
@@ -301,12 +347,27 @@ export default async function UsageCoachPlugin(input: {
     let refreshing = false;
 
     // Background refresh: never awaited. Skips re-call within TTL.
+    // Also triggered on model change (lastFetchedAt reset by caller).
     const refreshBackground = () => {
       try {
         if (refreshing) return;
-        if (last && Date.now() - lastFetchedAt < TTL_MS) return;
+        if (last && !modelChanged && Date.now() - lastFetchedAt < TTL_MS) return;
         refreshing = true;
-        fetchQuota(PROVIDER).then(async (q) => {
+        modelChanged = false; // consumed
+
+        // Free model short-circuit: no quota to track.
+        if (isFreeModel(currentModel, currentProvider)) {
+          last = { decision: "GO", advice: `${currentModel || currentProvider || "free model"} — no quota limit.`, weekly: -1, monthly: -1, fiveHour: -1, model: currentModel, provider: currentProvider, isFree: true };
+          lastFetchedAt = Date.now();
+          writeState({ ...last, providers: [], model: currentModel, provider: currentProvider, isFree: true, agent: currentAgent, updatedAt: new Date().toISOString() } as any);
+          log(`FREE | model=${currentModel} provider=${currentProvider}`);
+          refreshing = false;
+          return;
+        }
+
+        // Paid model: fetch quota for the ACTIVE provider (detected from session), mapped to codexbar name.
+        const activeProvider = providerToCodexbar(currentProvider) || PROVIDER;
+        fetchQuota(activeProvider).then(async (q) => {
           try {
             last = coach(q, LIGHTER); lastFetchedAt = Date.now();
             // also fetch per-provider coach view (best-effort, non-blocking on failure)
@@ -318,7 +379,7 @@ export default async function UsageCoachPlugin(input: {
               const p0 = providers[0];
               last = { ...last, weekly: p0.weekly, fiveHour: p0.fiveHour, monthly: p0.weekly >= 0 ? 0 : -1, advice: p0.advice, decision: p0.weekly >= STOP_WK ? "STOP" : p0.weekly >= THR_WK ? "THROTTLE" : "GO" };
             }
-            writeState({ ...last, providers, updatedAt: new Date().toISOString() } as any);
+            writeState({ ...last, providers, model: currentModel, provider: currentProvider, isFree: false, agent: currentAgent, updatedAt: new Date().toISOString() } as any);
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
           }
           catch (e) { log(`refresh-in-then err: ${String(e)}`); }
@@ -337,19 +398,21 @@ export default async function UsageCoachPlugin(input: {
         try {
           if (event.type === "session.created" || event.type === "session.idle") refreshBackground();
           // Worm (GC): run the domain-DB eviction on idle. Cheap no-op when nothing is stale.
-          if (event.type === "session.idle") { try { const r = await evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } }
+          if (event.type === "session.idle") { try { const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } }
         }
         catch (e) { log(`event err: ${String(e)}`); }
       },
 
-      // ACT(1) hard gate — harness tools are restricted to the configured harness
-      // agent mode AND gated by quota STOP. General tools (read/edit/bash/grep/task)
-      // are NEVER gated, in ANY mode — they don't consume model quota.
+      // ACT(1) — model/agent detection on EVERY tool call (cached 60s, negligible overhead).
+      // Then hard-gate harness tools by agent mode + quota STOP.
       "tool.execute.before": async (_input: { tool: string; sessionID: string; callID: string }) => {
-        const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure"];
-        if (!harnessTools.includes(_input.tool)) return; // only harness tools are gated
-        // (1) agent-mode gate: harness tools only run inside the harness agent mode.
+        // Detect model + agent on every tool call (bash, read, write, etc.) — not just harness tools.
         const agent = await resolveAgent(input.client, _input.sessionID);
+        currentAgent = agent;
+        refreshBackground(); // picks up model changes immediately
+
+        const harnessTools = ["generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure"];
+        if (!harnessTools.includes(_input.tool)) return; // only harness tools are gated below
         if (!isHarnessAgent(agent)) {
           throw new Error(`[${PLUGIN_NAME}] '${_input.tool}' is restricted to agent mode ${JSON.stringify(HARNESS_AGENTS)} (current: ${JSON.stringify(agent || "unknown")}). Switch to that agent mode to use it.`);
         }
@@ -367,6 +430,7 @@ export default async function UsageCoachPlugin(input: {
         try {
           if (_input.sessionID) {
             const agent = await resolveAgent(input.client, _input.sessionID);
+            refreshBackground(); // picks up model changes immediately
             if (!isHarnessAgent(agent)) return; // not harness mode — don't inject
           }
           const c = current();
@@ -473,7 +537,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
               if (keywords.length) {
-                const { nodes, edges } = await queryDomain(keywords);
+                const { nodes, edges } = queryDomain(keywords);
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n`;
@@ -484,7 +548,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const out = await runModel(input.client, cfg.generator, domainPrefix + rcaPrompt, ctx.directory);
             // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty.
             if (domainEmpty && keywords.length) {
-              try { await saveInvestigationResult(keywords, out, "investigate"); } catch (e) { log(`investigate save err: ${String(e)}`); }
+              try { saveInvestigationResult(keywords, out, "investigate"); } catch (e) { log(`investigate save err: ${String(e)}`); }
             }
             return out + "\n[usage-coach NEXT] call verify_diagnosis with this diagnosis.";
           },
@@ -554,7 +618,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
-                const { nodes, edges } = await queryDomain(keywords);
+                const { nodes, edges } = queryDomain(keywords);
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n` + prefix;
@@ -564,7 +628,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory);
             // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty.
             if (domainEmpty && keywords.length) {
-              try { await saveInvestigationResult(keywords, out, "generate"); } catch (e) { log(`generate save err: ${String(e)}`); }
+              try { saveInvestigationResult(keywords, out, "generate"); } catch (e) { log(`generate save err: ${String(e)}`); }
             }
             return out + (throttle ? `\n[usage-coach] quota THROTTLE — used lighter model ${cfg.lighterModel}` : "") + `\n[usage-coach NEXT] call task_update(i, title, "grading"), then grade to evaluate this work.`;
           },

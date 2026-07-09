@@ -1,6 +1,6 @@
 {
   "name": "opencode-usage-coach",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "opencode closed-loop usage coach — quota SENSE -> coaching DECIDE -> loop ACT + TUI integration",
   "type": "module",
   "main": "./dist/index.js",
@@ -58,11 +58,5 @@
     "tsup": "^8.5",
     "typescript": "^5",
     "typescript-eslint": "^8.63.0"
-  },
-  "dependencies": {
-    "@ladybugdb/core": "^0.18.0"
-  },
-  "trustedDependencies": [
-    "@ladybugdb/core"
-  ]
+  }
 }
