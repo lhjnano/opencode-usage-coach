@@ -7,7 +7,13 @@
 import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type Relation = "returns" | "is-a" | "part-of" | "depends-on" | "contradicts" | "constraints" | "example-of" | "alias-of";
+export type Relation =
+  | "returns" | "is-a" | "part-of" | "depends-on" | "contradicts"
+  | "constraints" | "example-of" | "alias-of"
+  // Graph-enhanced unknown detection (unknown-scan-design.md §13.5):
+  | "related-to"   // loose association — traversed bidirectionally
+  | "includes"     // inverse of part-of ("A includes B")
+  | "references";  // citation/reference to a doc or external context
 export type NodeType = "api-method" | "concept" | "limit" | "pattern" | "fact";
 
 export type DomainNode = {
@@ -21,6 +27,10 @@ export type DomainNode = {
   // Worm (GC) tracking — updated on query/traverse, used by evictStale.
   lastAccessed?: string;
   accessCount?: number;
+  // Hop distance from the nearest seed — only set on nodes returned by
+  // traverseNeighborhood / queryDomainGraph. Never persisted (writers always
+  // re-read fresh from file), so this is a transient view-layer annotation.
+  distance?: number;
 };
 
 export type DomainEdge = {
@@ -64,6 +74,19 @@ export function addDomainNode(node: Omit<DomainNode, "id" | "ts">): string {
 export function addDomainEdge(edge: Omit<DomainEdge, "ts">): void {
   const full: DomainEdge = { ...edge, ts: new Date().toISOString() };
   try { mkdirSync(BASE_DIR, { recursive: true }); appendFileSync(edgesFile(), JSON.stringify(full) + "\n"); } catch { /* */ }
+}
+
+// Batch append of edges — the multi-edge variant of addDomainEdge. Writes all
+// edges in a single append (one syscall). ts is stamped if missing (callers may
+// pass pre-stamped edges for replay/restore). Best-effort, never throws.
+export function writeEdges(edges: DomainEdge[]): void {
+  if (edges.length === 0) return;
+  try {
+    mkdirSync(BASE_DIR, { recursive: true });
+    const now = new Date().toISOString();
+    const lines = edges.map((e) => JSON.stringify({ ...e, ts: e.ts ?? now }));
+    appendFileSync(edgesFile(), lines.join("\n") + "\n");
+  } catch { /* */ }
 }
 
 // Rewrite the whole nodes file (used by touch + eviction). Best-effort, never throws.
@@ -138,14 +161,106 @@ export function traverse(nodeId: string, rel?: Relation): DomainNode[] {
     .filter((n): n is DomainNode => Boolean(n));
 }
 
-export function saveInvestigationResult(keywords: string[], result: string, source?: string): string {
+// Multi-hop BFS neighborhood expansion (unknown-scan-design.md §13.3).
+// Starts from seedNodeIds and walks edges BIDIRECTIONALLY (both from→to and
+// to→from, regardless of rel) up to maxDepth hops. Pure read — no side effects,
+// does not touch the worm GC. Each returned node carries `distance` (hops from
+// the nearest seed; 0 = seed itself).
+//
+// Guards against graph explosion: (1) maxDepth caps depth, (2) a visited Set
+// breaks cycles, (3) maxNodes (default 60) caps total nodes returned.
+export function traverseNeighborhood(
+  seedNodeIds: string[],
+  maxDepth = 2,
+  opts: { maxNodes?: number } = {},
+): { nodes: DomainNode[]; edges: DomainEdge[] } {
+  const maxNodes = opts.maxNodes ?? 60;
+  const allNodes = readNodes();
+  const allEdges = readEdges();
+  const byId = new Map(allNodes.map((n) => [n.id, n] as const));
+
+  // Seeds that actually exist in the DB (ignore unknown ids defensively).
+  const seeds = seedNodeIds.filter((id) => byId.has(id));
+  if (seeds.length === 0) return { nodes: [], edges: [] };
+
+  // Bidirectional adjacency: every edge links both endpoints to each other.
+  const adj = new Map<string, Set<string>>();
+  const link = (a: string, b: string): void => {
+    const s = adj.get(a) ?? new Set<string>();
+    s.add(b);
+    adj.set(a, s);
+  };
+  for (const e of allEdges) {
+    link(e.from, e.to);
+    link(e.to, e.from);
+  }
+
+  // BFS — distance from the nearest seed.
+  const distance = new Map<string, number>();
+  const visited = new Set<string>();
+  const frontier: string[] = [];
+  for (const s of seeds) {
+    if (visited.has(s)) continue;
+    visited.add(s);
+    distance.set(s, 0);
+    frontier.push(s);
+    if (visited.size >= maxNodes) break;
+  }
+  while (frontier.length > 0) {
+    if (visited.size >= maxNodes) break;
+    const cur = frontier.shift() as string;
+    const d = distance.get(cur) ?? 0;
+    if (d >= maxDepth) continue; // don't expand past maxDepth
+    for (const nxt of adj.get(cur) ?? []) {
+      if (visited.has(nxt)) continue;
+      visited.add(nxt);
+      distance.set(nxt, d + 1);
+      frontier.push(nxt);
+      if (visited.size >= maxNodes) break;
+    }
+  }
+
+  // Collect visited nodes (copies stamped with distance) + edges between them.
+  const nodes: DomainNode[] = [];
+  for (const id of visited) {
+    const n = byId.get(id);
+    if (n) nodes.push({ ...n, distance: distance.get(id) ?? 0 });
+  }
+  const edges = allEdges.filter((e) => visited.has(e.from) && visited.has(e.to));
+  return { nodes, edges };
+}
+
+// Keyword-match seeds via the existing queryDomain, then BFS-expand to neighbors.
+// Drop-in superset of queryDomain: maxDepth=0 (or no seed hits) returns exactly
+// what queryDomain would (compatibility). maxDepth≥1 adds edge-traversed nodes.
+export function queryDomainGraph(
+  keywords: string[],
+  maxDepth = 2,
+  opts: { maxNodes?: number } = {},
+): { nodes: DomainNode[]; edges: DomainEdge[] } {
+  // queryDomain touches the seed nodes (worm GC) — kept for behavior parity.
+  const seed = queryDomain(keywords);
+  const seedIds = seed.nodes.map((n) => n.id);
+  if (maxDepth <= 0 || seedIds.length === 0) {
+    return { nodes: seed.nodes, edges: seed.edges };
+  }
+  const graph = traverseNeighborhood(seedIds, maxDepth, opts);
+  // Record access for the recovered neighborhood beyond the seeds, so eviction
+  // keeps recently-useful associated knowledge. (queryDomain already touched seeds.)
+  const seedSet = new Set(seedIds);
+  const neighborIds = graph.nodes.filter((n) => !seedSet.has(n.id)).map((n) => n.id);
+  if (neighborIds.length > 0) touchNodes(new Set(neighborIds));
+  return { nodes: graph.nodes, edges: graph.edges };
+}
+
+export function saveInvestigationResult(keywords: string[], result: string, source?: string, confidence = 0.7): string {
   try {
     return addDomainNode({
       type: "fact",
       name: keywords.join(" "),
       props: { result },
       source: source || "investigation",
-      confidence: 0.7,
+      confidence,
     });
   } catch {
     return "";

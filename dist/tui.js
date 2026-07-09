@@ -83,8 +83,11 @@ var TLABEL = {
   completed: "done",
   failed: "fail",
   timed_out: "timeout",
-  halted_quota: "quota-halt"
+  halted_quota: "quota-halt",
+  stale: "STALE"
 };
+var STALE_MS = 5 * 6e4;
+var HIDE_MS = 30 * 6e4;
 function barFill(p) {
   const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
   return "\u2588".repeat(n);
@@ -202,246 +205,259 @@ function initializeTui(api, disposeRoot) {
       h = null;
     }
     const nodes = [];
-    const HARNESS_AGENTS = ["usage-coach-harness"];
-    if (s && s.agent && !HARNESS_AGENTS.includes(s.agent)) {
-      return _$createElement("box");
-    }
     if (s) {
       const dKey = s.decision === "GO" ? "success" : s.decision === "THROTTLE" ? "warning" : "error";
       const modelShort = s.model ? s.model.split("/").pop() ?? s.model : "";
       if (s.isFree) {
         nodes.push((() => {
-          var _el$5 = _$createElement("box"), _el$6 = _$createElement("text"), _el$8 = _$createElement("text"), _el$9 = _$createTextNode(` `);
-          _$insertNode(_el$5, _el$6);
-          _$insertNode(_el$5, _el$8);
-          _$setProp(_el$5, "flexDirection", "row");
-          _$insertNode(_el$6, _$createTextNode(`usage-coach [free]`));
-          _$insertNode(_el$8, _el$9);
-          _$insert(_el$8, modelShort, null);
+          var _el$4 = _$createElement("box"), _el$5 = _$createElement("text"), _el$7 = _$createElement("text"), _el$8 = _$createTextNode(` `);
+          _$insertNode(_el$4, _el$5);
+          _$insertNode(_el$4, _el$7);
+          _$setProp(_el$4, "flexDirection", "row");
+          _$insertNode(_el$5, _$createTextNode(`usage-coach [free]`));
+          _$insertNode(_el$7, _el$8);
+          _$insert(_el$7, modelShort, null);
           _$effect((_p$) => {
             var _v$ = st(dKey), _v$2 = st("textMuted");
-            _v$ !== _p$.e && (_p$.e = _$setProp(_el$6, "style", _v$, _p$.e));
-            _v$2 !== _p$.t && (_p$.t = _$setProp(_el$8, "style", _v$2, _p$.t));
+            _v$ !== _p$.e && (_p$.e = _$setProp(_el$5, "style", _v$, _p$.e));
+            _v$2 !== _p$.t && (_p$.t = _$setProp(_el$7, "style", _v$2, _p$.t));
             return _p$;
           }, {
             e: void 0,
             t: void 0
           });
-          return _el$5;
+          return _el$4;
         })());
       } else {
         if (modelShort) {
           nodes.push((() => {
-            var _el$0 = _$createElement("box"), _el$1 = _$createElement("text"), _el$10 = _$createTextNode(`usage-coach [`), _el$11 = _$createTextNode(`]`), _el$12 = _$createElement("text"), _el$13 = _$createTextNode(` `);
+            var _el$9 = _$createElement("box"), _el$0 = _$createElement("text"), _el$1 = _$createTextNode(`usage-coach [`), _el$10 = _$createTextNode(`]`), _el$11 = _$createElement("text"), _el$12 = _$createTextNode(` `);
+            _$insertNode(_el$9, _el$0);
+            _$insertNode(_el$9, _el$11);
+            _$setProp(_el$9, "flexDirection", "row");
             _$insertNode(_el$0, _el$1);
-            _$insertNode(_el$0, _el$12);
-            _$setProp(_el$0, "flexDirection", "row");
-            _$insertNode(_el$1, _el$10);
-            _$insertNode(_el$1, _el$11);
-            _$insert(_el$1, () => TAG[s.decision], _el$11);
-            _$insertNode(_el$12, _el$13);
-            _$insert(_el$12, modelShort, null);
+            _$insertNode(_el$0, _el$10);
+            _$insert(_el$0, () => TAG[s.decision], _el$10);
+            _$insertNode(_el$11, _el$12);
+            _$insert(_el$11, modelShort, null);
             _$effect((_p$) => {
               var _v$3 = st(dKey), _v$4 = st("textMuted");
-              _v$3 !== _p$.e && (_p$.e = _$setProp(_el$1, "style", _v$3, _p$.e));
-              _v$4 !== _p$.t && (_p$.t = _$setProp(_el$12, "style", _v$4, _p$.t));
+              _v$3 !== _p$.e && (_p$.e = _$setProp(_el$0, "style", _v$3, _p$.e));
+              _v$4 !== _p$.t && (_p$.t = _$setProp(_el$11, "style", _v$4, _p$.t));
               return _p$;
             }, {
               e: void 0,
               t: void 0
             });
-            return _el$0;
+            return _el$9;
           })());
         } else {
           nodes.push((() => {
-            var _el$14 = _$createElement("text"), _el$15 = _$createTextNode(`usage-coach [`), _el$16 = _$createTextNode(`]`);
-            _$insertNode(_el$14, _el$15);
-            _$insertNode(_el$14, _el$16);
-            _$insert(_el$14, () => TAG[s.decision], _el$16);
-            _$effect((_$p) => _$setProp(_el$14, "style", st(dKey), _$p));
-            return _el$14;
+            var _el$13 = _$createElement("text"), _el$14 = _$createTextNode(`usage-coach [`), _el$15 = _$createTextNode(`]`);
+            _$insertNode(_el$13, _el$14);
+            _$insertNode(_el$13, _el$15);
+            _$insert(_el$13, () => TAG[s.decision], _el$15);
+            _$effect((_$p) => _$setProp(_el$13, "style", st(dKey), _$p));
+            return _el$13;
           })());
         }
         if (s.providers && s.providers.length > 0) {
           for (const p of s.providers) {
             nodes.push((() => {
-              var _el$17 = _$createElement("box"), _el$18 = _$createElement("text"), _el$20 = _$createElement("text"), _el$21 = _$createElement("text"), _el$22 = _$createElement("text"), _el$23 = _$createTextNode(` `), _el$24 = _$createTextNode(`% `);
-              _$insertNode(_el$17, _el$18);
-              _$insertNode(_el$17, _el$20);
-              _$insertNode(_el$17, _el$21);
-              _$insertNode(_el$17, _el$22);
-              _$setProp(_el$17, "flexDirection", "row");
-              _$insertNode(_el$18, _$createTextNode(` 5h `));
-              _$insert(_el$20, () => barFill(p.fiveHour));
-              _$insert(_el$21, () => barEmpty(p.fiveHour));
-              _$insertNode(_el$22, _el$23);
-              _$insertNode(_el$22, _el$24);
-              _$insert(_el$22, () => p.fiveHour, _el$24);
-              _$insert(_el$22, () => p.fiveHourReset, null);
+              var _el$16 = _$createElement("box"), _el$17 = _$createElement("text"), _el$19 = _$createElement("text"), _el$20 = _$createElement("text"), _el$21 = _$createElement("text"), _el$22 = _$createTextNode(` `), _el$23 = _$createTextNode(`% `);
+              _$insertNode(_el$16, _el$17);
+              _$insertNode(_el$16, _el$19);
+              _$insertNode(_el$16, _el$20);
+              _$insertNode(_el$16, _el$21);
+              _$setProp(_el$16, "flexDirection", "row");
+              _$insertNode(_el$17, _$createTextNode(` 5h `));
+              _$insert(_el$19, () => barFill(p.fiveHour));
+              _$insert(_el$20, () => barEmpty(p.fiveHour));
+              _$insertNode(_el$21, _el$22);
+              _$insertNode(_el$21, _el$23);
+              _$insert(_el$21, () => p.fiveHour, _el$23);
+              _$insert(_el$21, () => p.fiveHourReset, null);
               _$effect((_p$) => {
                 var _v$5 = st("text"), _v$6 = st("text");
-                _v$5 !== _p$.e && (_p$.e = _$setProp(_el$20, "style", _v$5, _p$.e));
-                _v$6 !== _p$.t && (_p$.t = _$setProp(_el$21, "style", _v$6, _p$.t));
+                _v$5 !== _p$.e && (_p$.e = _$setProp(_el$19, "style", _v$5, _p$.e));
+                _v$6 !== _p$.t && (_p$.t = _$setProp(_el$20, "style", _v$6, _p$.t));
                 return _p$;
               }, {
                 e: void 0,
                 t: void 0
               });
-              return _el$17;
+              return _el$16;
             })());
             nodes.push((() => {
-              var _el$25 = _$createElement("box"), _el$26 = _$createElement("text"), _el$28 = _$createElement("text"), _el$29 = _$createElement("text"), _el$30 = _$createElement("text"), _el$31 = _$createTextNode(` `), _el$32 = _$createTextNode(`% `);
-              _$insertNode(_el$25, _el$26);
-              _$insertNode(_el$25, _el$28);
-              _$insertNode(_el$25, _el$29);
-              _$insertNode(_el$25, _el$30);
-              _$setProp(_el$25, "flexDirection", "row");
-              _$insertNode(_el$26, _$createTextNode(` 1w `));
-              _$insert(_el$28, () => barFill(p.weekly));
-              _$insert(_el$29, () => barEmpty(p.weekly));
-              _$insertNode(_el$30, _el$31);
-              _$insertNode(_el$30, _el$32);
-              _$insert(_el$30, () => p.weekly, _el$32);
-              _$insert(_el$30, () => p.weeklyReset, null);
+              var _el$24 = _$createElement("box"), _el$25 = _$createElement("text"), _el$27 = _$createElement("text"), _el$28 = _$createElement("text"), _el$29 = _$createElement("text"), _el$30 = _$createTextNode(` `), _el$31 = _$createTextNode(`% `);
+              _$insertNode(_el$24, _el$25);
+              _$insertNode(_el$24, _el$27);
+              _$insertNode(_el$24, _el$28);
+              _$insertNode(_el$24, _el$29);
+              _$setProp(_el$24, "flexDirection", "row");
+              _$insertNode(_el$25, _$createTextNode(` 1w `));
+              _$insert(_el$27, () => barFill(p.weekly));
+              _$insert(_el$28, () => barEmpty(p.weekly));
+              _$insertNode(_el$29, _el$30);
+              _$insertNode(_el$29, _el$31);
+              _$insert(_el$29, () => p.weekly, _el$31);
+              _$insert(_el$29, () => p.weeklyReset, null);
               _$effect((_p$) => {
                 var _v$7 = st("text"), _v$8 = st("text");
-                _v$7 !== _p$.e && (_p$.e = _$setProp(_el$28, "style", _v$7, _p$.e));
-                _v$8 !== _p$.t && (_p$.t = _$setProp(_el$29, "style", _v$8, _p$.t));
+                _v$7 !== _p$.e && (_p$.e = _$setProp(_el$27, "style", _v$7, _p$.e));
+                _v$8 !== _p$.t && (_p$.t = _$setProp(_el$28, "style", _v$8, _p$.t));
                 return _p$;
               }, {
                 e: void 0,
                 t: void 0
               });
-              return _el$25;
+              return _el$24;
             })());
           }
         } else {
           nodes.push((() => {
-            var _el$33 = _$createElement("box"), _el$34 = _$createElement("text"), _el$36 = _$createElement("text"), _el$37 = _$createElement("text"), _el$38 = _$createElement("text");
-            _$insertNode(_el$33, _el$34);
-            _$insertNode(_el$33, _el$36);
-            _$insertNode(_el$33, _el$37);
-            _$insertNode(_el$33, _el$38);
-            _$setProp(_el$33, "flexDirection", "row");
-            _$insertNode(_el$34, _$createTextNode(` 5h `));
-            _$insert(_el$36, () => barFill(s.fiveHour));
-            _$insert(_el$37, () => barEmpty(s.fiveHour));
-            _$insertNode(_el$38, _$createTextNode(` 0%`));
+            var _el$32 = _$createElement("box"), _el$33 = _$createElement("text"), _el$35 = _$createElement("text"), _el$36 = _$createElement("text"), _el$37 = _$createElement("text");
+            _$insertNode(_el$32, _el$33);
+            _$insertNode(_el$32, _el$35);
+            _$insertNode(_el$32, _el$36);
+            _$insertNode(_el$32, _el$37);
+            _$setProp(_el$32, "flexDirection", "row");
+            _$insertNode(_el$33, _$createTextNode(` 5h `));
+            _$insert(_el$35, () => barFill(s.fiveHour));
+            _$insert(_el$36, () => barEmpty(s.fiveHour));
+            _$insertNode(_el$37, _$createTextNode(` 0%`));
             _$effect((_p$) => {
               var _v$9 = st("text"), _v$0 = st("text");
-              _v$9 !== _p$.e && (_p$.e = _$setProp(_el$36, "style", _v$9, _p$.e));
-              _v$0 !== _p$.t && (_p$.t = _$setProp(_el$37, "style", _v$0, _p$.t));
+              _v$9 !== _p$.e && (_p$.e = _$setProp(_el$35, "style", _v$9, _p$.e));
+              _v$0 !== _p$.t && (_p$.t = _$setProp(_el$36, "style", _v$0, _p$.t));
               return _p$;
             }, {
               e: void 0,
               t: void 0
             });
-            return _el$33;
+            return _el$32;
           })());
           nodes.push((() => {
-            var _el$40 = _$createElement("box"), _el$41 = _$createElement("text"), _el$43 = _$createElement("text"), _el$44 = _$createElement("text"), _el$45 = _$createElement("text");
-            _$insertNode(_el$40, _el$41);
-            _$insertNode(_el$40, _el$43);
-            _$insertNode(_el$40, _el$44);
-            _$insertNode(_el$40, _el$45);
-            _$setProp(_el$40, "flexDirection", "row");
-            _$insertNode(_el$41, _$createTextNode(` 1w `));
-            _$insert(_el$43, () => barFill(s.weekly));
-            _$insert(_el$44, () => barEmpty(s.weekly));
-            _$insertNode(_el$45, _$createTextNode(` 0%`));
+            var _el$39 = _$createElement("box"), _el$40 = _$createElement("text"), _el$42 = _$createElement("text"), _el$43 = _$createElement("text"), _el$44 = _$createElement("text");
+            _$insertNode(_el$39, _el$40);
+            _$insertNode(_el$39, _el$42);
+            _$insertNode(_el$39, _el$43);
+            _$insertNode(_el$39, _el$44);
+            _$setProp(_el$39, "flexDirection", "row");
+            _$insertNode(_el$40, _$createTextNode(` 1w `));
+            _$insert(_el$42, () => barFill(s.weekly));
+            _$insert(_el$43, () => barEmpty(s.weekly));
+            _$insertNode(_el$44, _$createTextNode(` 0%`));
             _$effect((_p$) => {
               var _v$1 = st("text"), _v$10 = st("text");
-              _v$1 !== _p$.e && (_p$.e = _$setProp(_el$43, "style", _v$1, _p$.e));
-              _v$10 !== _p$.t && (_p$.t = _$setProp(_el$44, "style", _v$10, _p$.t));
+              _v$1 !== _p$.e && (_p$.e = _$setProp(_el$42, "style", _v$1, _p$.e));
+              _v$10 !== _p$.t && (_p$.t = _$setProp(_el$43, "style", _v$10, _p$.t));
               return _p$;
             }, {
               e: void 0,
               t: void 0
             });
-            return _el$40;
+            return _el$39;
           })());
         }
       }
     } else {
       nodes.push((() => {
-        var _el$47 = _$createElement("text");
-        _$insertNode(_el$47, _$createTextNode(`usage-coach: ...`));
-        return _el$47;
+        var _el$46 = _$createElement("text");
+        _$insertNode(_el$46, _$createTextNode(`usage-coach: ...`));
+        return _el$46;
       })());
     }
-    if (h && h.active !== false && h.tasks.length > 0) {
-      nodes.push((() => {
-        var _el$49 = _$createElement("text");
-        _$insertNode(_el$49, _$createTextNode(` `));
-        return _el$49;
-      })());
-      nodes.push((() => {
-        var _el$51 = _$createElement("text"), _el$52 = _$createTextNode(`harness: `), _el$53 = _$createTextNode(` `), _el$54 = _$createTextNode(`/`);
-        _$insertNode(_el$51, _el$52);
-        _$insertNode(_el$51, _el$53);
-        _$insertNode(_el$51, _el$54);
-        _$insert(_el$51, () => h.name, _el$53);
-        _$insert(_el$51, () => h.current, _el$54);
-        _$insert(_el$51, () => h.total, null);
-        _$effect((_$p) => _$setProp(_el$51, "style", st("textMuted"), _$p));
-        return _el$51;
-      })());
-      for (const t of h.tasks) {
-        const sKey = statusKey[t.status] ?? "text";
-        const lbl = TLABEL[t.status] ?? t.status;
-        const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
-        const mdl = t.model ? ` ${t.model.split("/").pop() ?? t.model}` : "";
-        const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1e3)) : 0;
-        const elapsedStr = t.status === "completed" || t.status === "failed" ? "" : elapsed > 0 ? ` ${elapsed}s` : "";
+    if (h && h.tasks.length > 0 && h.active !== false) {
+      const hAge = h.updatedAt ? Date.now() - new Date(h.updatedAt).getTime() : 0;
+      const hasActiveSub = h.tasks.some((t) => !!t.subSessionId);
+      const isStale = !hasActiveSub && hAge > STALE_MS;
+      const shouldHide = hAge > HIDE_MS && !hasActiveSub;
+      if (shouldHide) {
+      } else {
         nodes.push((() => {
-          var _el$55 = _$createElement("text"), _el$56 = _$createTextNode(` \u25CF `), _el$57 = _$createTextNode(` `), _el$58 = _$createTextNode(` `);
-          _$insertNode(_el$55, _el$56);
-          _$insertNode(_el$55, _el$57);
-          _$insertNode(_el$55, _el$58);
-          _$insert(_el$55, () => t.id, _el$57);
-          _$insert(_el$55, mdl, _el$57);
-          _$insert(_el$55, lbl, _el$58);
-          _$insert(_el$55, rev, _el$58);
-          _$insert(_el$55, elapsedStr, _el$58);
-          _$insert(_el$55, () => t.title, null);
-          _$effect((_$p) => _$setProp(_el$55, "style", st(sKey), _$p));
-          return _el$55;
+          var _el$48 = _$createElement("text");
+          _$insertNode(_el$48, _$createTextNode(` `));
+          return _el$48;
         })());
-        const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
-        const provCoach = pv ? s?.providers?.find((p) => p.id === pv || pv && p.id.startsWith(pv) || pv && pv.startsWith(p.id)) : s?.providers?.[0];
-        const rawPct = provCoach?.fiveHour ?? s?.fiveHour ?? -1;
-        const pct = rawPct < 0 ? 0 : rawPct;
-        const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
         nodes.push((() => {
-          var _el$59 = _$createElement("box"), _el$60 = _$createElement("text"), _el$62 = _$createElement("text"), _el$63 = _$createElement("text"), _el$64 = _$createElement("text"), _el$65 = _$createTextNode(` `);
-          _$insertNode(_el$59, _el$60);
-          _$insertNode(_el$59, _el$62);
-          _$insertNode(_el$59, _el$63);
-          _$insertNode(_el$59, _el$64);
-          _$setProp(_el$59, "flexDirection", "row");
-          _$insertNode(_el$60, _$createTextNode(` 5h `));
-          _$insert(_el$62, () => barFill(pct));
-          _$insert(_el$63, () => barEmpty(pct));
-          _$insertNode(_el$64, _el$65);
-          _$insert(_el$64, pctLabel, null);
-          _$effect((_p$) => {
-            var _v$11 = st("text"), _v$12 = st("text");
-            _v$11 !== _p$.e && (_p$.e = _$setProp(_el$62, "style", _v$11, _p$.e));
-            _v$12 !== _p$.t && (_p$.t = _$setProp(_el$63, "style", _v$12, _p$.t));
-            return _p$;
-          }, {
-            e: void 0,
-            t: void 0
-          });
-          return _el$59;
+          var _el$50 = _$createElement("text"), _el$51 = _$createTextNode(`harness: `), _el$52 = _$createTextNode(` `), _el$53 = _$createTextNode(`/`);
+          _$insertNode(_el$50, _el$51);
+          _$insertNode(_el$50, _el$52);
+          _$insertNode(_el$50, _el$53);
+          _$insert(_el$50, () => h.name, _el$52);
+          _$insert(_el$50, () => h.current, _el$53);
+          _$insert(_el$50, () => h.total, null);
+          _$insert(_el$50, isStale ? " (stale)" : "", null);
+          _$effect((_$p) => _$setProp(_el$50, "style", st("textMuted"), _$p));
+          return _el$50;
         })());
+        for (const t of h.tasks) {
+          const TERMINAL = /* @__PURE__ */ new Set(["completed", "failed", "timed_out", "halted_quota"]);
+          const displayStatus = isStale && !TERMINAL.has(t.status) ? "stale" : t.status;
+          const sKey = statusKey[displayStatus] ?? "text";
+          const lbl = TLABEL[displayStatus] ?? displayStatus;
+          const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
+          const mdl = t.model ? ` ${t.model.split("/").pop() ?? t.model}` : "";
+          const hasSub = !!t.subSessionId;
+          const subStepStr = hasSub && t.subStep !== void 0 && t.subStep > 0 ? ` step:${t.subStep}` : "";
+          const subEl = hasSub && t.subElapsed !== void 0 ? ` ${t.subElapsed}s` : "";
+          const subWarn = hasSub && (t.subElapsed ?? 0) > 300;
+          const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1e3)) : 0;
+          const taskEl = t.status === "completed" || t.status === "failed" ? "" : elapsed > 0 ? ` ${elapsed}s` : "";
+          const displayEl = hasSub ? subEl : taskEl;
+          const lineKey = subWarn ? "warning" : sKey;
+          nodes.push((() => {
+            var _el$54 = _$createElement("text"), _el$55 = _$createTextNode(` \u25CF `), _el$56 = _$createTextNode(` `), _el$57 = _$createTextNode(` `);
+            _$insertNode(_el$54, _el$55);
+            _$insertNode(_el$54, _el$56);
+            _$insertNode(_el$54, _el$57);
+            _$insert(_el$54, () => t.id, _el$56);
+            _$insert(_el$54, mdl, _el$56);
+            _$insert(_el$54, lbl, _el$57);
+            _$insert(_el$54, rev, _el$57);
+            _$insert(_el$54, subStepStr, _el$57);
+            _$insert(_el$54, displayEl, _el$57);
+            _$insert(_el$54, () => t.title, null);
+            _$effect((_$p) => _$setProp(_el$54, "style", st(lineKey), _$p));
+            return _el$54;
+          })());
+          const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
+          const provCoach = pv ? s?.providers?.find((p) => p.id === pv || pv && p.id.startsWith(pv) || pv && pv.startsWith(p.id)) : s?.providers?.[0];
+          const rawPct = provCoach?.fiveHour ?? s?.fiveHour ?? -1;
+          const pct = rawPct < 0 ? 0 : rawPct;
+          const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
+          nodes.push((() => {
+            var _el$58 = _$createElement("box"), _el$59 = _$createElement("text"), _el$61 = _$createElement("text"), _el$62 = _$createElement("text"), _el$63 = _$createElement("text"), _el$64 = _$createTextNode(` `);
+            _$insertNode(_el$58, _el$59);
+            _$insertNode(_el$58, _el$61);
+            _$insertNode(_el$58, _el$62);
+            _$insertNode(_el$58, _el$63);
+            _$setProp(_el$58, "flexDirection", "row");
+            _$insertNode(_el$59, _$createTextNode(` 5h `));
+            _$insert(_el$61, () => barFill(pct));
+            _$insert(_el$62, () => barEmpty(pct));
+            _$insertNode(_el$63, _el$64);
+            _$insert(_el$63, pctLabel, null);
+            _$effect((_p$) => {
+              var _v$11 = st("text"), _v$12 = st("text");
+              _v$11 !== _p$.e && (_p$.e = _$setProp(_el$61, "style", _v$11, _p$.e));
+              _v$12 !== _p$.t && (_p$.t = _$setProp(_el$62, "style", _v$12, _p$.t));
+              return _p$;
+            }, {
+              e: void 0,
+              t: void 0
+            });
+            return _el$58;
+          })());
+        }
       }
     }
     return (() => {
-      var _el$66 = _$createElement("box");
-      _$setProp(_el$66, "flexDirection", "column");
-      _$insert(_el$66, nodes);
-      return _el$66;
+      var _el$65 = _$createElement("box");
+      _$setProp(_el$65, "flexDirection", "column");
+      _$insert(_el$65, nodes);
+      return _el$65;
     })();
   };
   tlog("registering slots");
@@ -456,9 +472,9 @@ function initializeTui(api, disposeRoot) {
         } catch (e) {
           tlog(`sidebar_footer err: ${String(e)}`);
           result = (() => {
-            var _el$67 = _$createElement("text");
-            _$insertNode(_el$67, _$createTextNode(`usage-coach`));
-            return _el$67;
+            var _el$66 = _$createElement("text");
+            _$insertNode(_el$66, _$createTextNode(`usage-coach`));
+            return _el$66;
           })();
         }
         return result;

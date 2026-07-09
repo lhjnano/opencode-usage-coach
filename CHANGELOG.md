@@ -5,6 +5,131 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-07-10
+
+### Fixed
+- **unknown_scan find output leaking to TUI.** `input.$` (BunShell) was used to run `find` for
+  codebase profiling — its stdout leaked into the opencode TUI, flooding it with file listings
+  (including `~/.zai/` log files). Switched to `spawnSync` (same pattern as the codexbar fix).
+  Added `spawnSync` to imports.
+
+## [0.8.4] - 2026-07-10
+
+### Changed
+- **README rewritten** (269 → 93 lines). Clean open-source style: badges (npm, license, coverage,
+  Ko-fi, GitHub Sponsors), Features bullet list, Quick Start, links to docs/ for detail.
+- **docs/ restructured**: Unknowns Matrix design docs (3 files) removed. README detail sections
+  moved to `docs/architecture.md`, `docs/configuration.md`, `docs/troubleshooting.md`.
+
+### Added
+- `.github/FUNDING.yml` (Ko-fi: lhjnano, GitHub Sponsors: lhjnano).
+- README badges: npm version, license, coverage (planned), Ko-fi, GitHub Sponsors.
+
+## [0.8.3] - 2026-07-09
+
+### Added
+- **TUI staleness detection.** Abandoned harnesses (interrupted without `harness_done`) are
+  detected via `updatedAt` + `STALE_MS` (5 min). Non-terminal tasks show `STALE` label.
+  After `HIDE_MS` (30 min), the entire harness section is hidden. Prevents stale "generating"
+  tasks from showing forever when a session is abandoned.
+- **Completed harness hiding.** `h.active !== false` check added — `harness_done()` sets
+  `active=false`, and the TUI now hides completed harnesses instead of leaving them visible.
+
+## [0.8.2] - 2026-07-09
+
+### Added
+- **Diagnosis gate (enforcement, not advisory).** `harness_start` sets `scanRequired=true` in
+  harness.json. `unknown_scan` sets `scanDone=true` + `scanSummary`. `generate`/`generate_batch`
+  call `checkScanGate()` — if scan was required but not done, a `⚠ DIAGNOSIS GATE` warning is
+  injected into the sub-session prompt. If scan was done, findings (`scanSummary`) are injected
+  so the sub-session knows about blind spots without manual copying. Does NOT block (revisions
+  and trivial tasks can skip), but forces conscious choice over forgetfulness.
+- `buildScanSummary()`: compact summary of unknown unknowns + implicit knowledge + questions.
+- `checkScanGate()`: returns `{ warning, summary }` based on harness.json scan flags.
+- **Rules**: "Diagnose before acting" + "unknown_scan is mandatory" written to rules.md.
+- **Agent definition**: step 2 changed from "PRE-FLIGHT (advisory)" to "DIAGNOSIS GATE (REQUIRED)".
+  Added "Diagnose before acting" as first rule.
+- **Design doc** (`docs/unknown-scan-design.md` §4): updated from advisory to enforced design.
+
+### Changed
+- `harness_start` return message: `⚠ DIAGNOSIS GATE — unknown_scan is REQUIRED` (was advisory).
+- `HarnessJson` type: added `scanRequired?`, `scanDone?`, `scanSummary?` fields.
+- `writeUnknownScan()`: now also sets `scanDone=true` and `scanSummary`.
+
+## [0.8.1] - 2026-07-09
+
+### Changed
+- **generate_batch resilience.** `Promise.all` → `Promise.allSettled` (one rejection no longer
+  kills the entire batch). Failed tasks are automatically retried sequentially (once). If retry
+  also fails, `[usage-coach NEXT]` directs the orchestrator to fall back to sequential `generate()`.
+
+## [0.8.0] - 2026-07-09
+
+### Added
+- **Unknowns Matrix tools** (3 tools implemented in `src/index.ts`):
+  - `unknown_scan`: pre-flight gap analysis — scans codebase, queries domain graph, runs model-assisted
+    gap analysis, stores findings to domain DB, returns structured report. 5-phase pipeline.
+  - `reverse_interview`: stateful Q&A — generates priority-ranked questions, records answers,
+    completes with summary. Graph-enhanced question prioritization via `queryDomainGraph`.
+  - `impl_notes`: `<impl-notes>` XML extraction from generate output → `impl-notes.md` + domain DB
+    nodes (confidence 0.5) + edge promotion. `IMPL_NOTE_INSTRUCTION` injected into all generate calls.
+- **Domain graph functions** (`src/domain.ts`):
+  - `traverseNeighborhood()`: multi-hop BFS (bidirectional, maxDepth, maxNodes cap, cycle-safe).
+  - `queryDomainGraph()`: keyword-match seeds → BFS-expand neighbors. Drop-in superset of `queryDomain`.
+  - `writeEdges()`: batch edge append (single syscall).
+  - New Relation types: `related-to`, `includes`, `references`.
+  - `distance?` field on DomainNode (transient, not persisted).
+- **Helper functions**: `parseFileList`, `buildGapPrompt`, `parseGapAnalysis`, `formatReport`,
+  `writeUnknownScan`, `extractKeywords`, `extractImplNotes`, `readImplNotes`, `readImplNotesByGraph`,
+  `appendImplNotes`, `linkImplNoteToDomain`, `readInterview`, `writeInterview`, `completeInterview`.
+- **Design docs**: `unknown-scan-design.md`, `reverse-interview-design.md`, `impl-notes-design.md`.
+
+## [0.7.1] - 2026-07-09
+
+### Added
+- **Step limit enforcement.** `runModel` monitors sub-session assistant turns via a watchdog
+  poller (every `UC_WATCHDOG_POLL_MS` = 3s). If turns exceed `UC_MAX_STEPS` (default 30), the
+  session is aborted and the caller is told to split the task. Prevents runaway tasks from
+  burning quota.
+- **Sub-session observability.** Watchdog poller writes live progress (step count, elapsed time)
+  to `harness.json` → TUI displays `step:N` and `Ns` per task. Warning color when elapsed > 300s.
+- `updateSubSession()` / `clearSubSession()`: harness.json task fields for live TUI progress.
+
+## [0.7.0] - 2026-07-09
+
+### Added
+- **Model-aware quota tracking.** `resolveAgent()` detects the session's model + provider from
+  `client.session.get`. `isFreeModel()` short-circuits quota fetch for free models (provider
+  `opencode` or model name contains `free`). `providerToCodexbar()` maps opencode provider IDs
+  (e.g. `zai-coding-plan`) to codexbar provider names (e.g. `zai`).
+- **Model change detection.** `modelChanged` flag bypasses TTL cache for immediate quota refresh
+  when the session switches models.
+- `tool.execute.before` now calls `resolveAgent` on ALL tools (not just harness tools), so the
+  quota panel always reflects the current model.
+
+### Changed
+- **TUI display**: free model → `usage-coach [free] {model}` (one line). Paid model →
+  `usage-coach [ok] {model}` + quota bars. Model name in `textMuted` color.
+- **Agent gating removed**: quota panel always visible (was hidden for non-harness agents).
+- **`active` check removed** from harness section (completed harnesses stay visible). *(Note:
+  partially reverted in 0.8.3 — completed harnesses now hidden.)*
+- `state.json`: now includes `model`, `provider`, `isFree`, `agent` fields.
+
+## [0.6.2] - 2026-07-09
+
+### Fixed
+- Revert of v0.6.1 (broken state). Restores v0.6.0 behavior.
+
+## [0.6.1] - 2026-07-09
+
+### Changed
+- *(Reverted in v0.6.2 — broken state.)*
+
+## [0.6.0] - 2026-07-08
+
+### Changed
+- ladybugDB migration groundwork, docs reorganization. Consolidated design docs under `docs/`.
+
 ## [0.5.0] - 2026-07-08
 
 ### Added

@@ -24,9 +24,9 @@ let MARKER = join(STATE_DIR, "tui-loaded.txt");
 
 type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number; providers?: ProviderCoach[]; model?: string; provider?: string; isFree?: boolean; agent?: string };
 type ProviderCoach = { id: string; name: string; fiveHour: number; weekly: number; fiveHourReset: string; weeklyReset: string; advice: string };
-type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null; startedAt?: string };
+type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null; startedAt?: string; subSessionId?: string; subStep?: number; lastActivity?: string; subElapsed?: number };
 type ProviderQuota = { weekly: number; monthly: number; fiveHour: number };
-type HarnessState = { name: string; total: number; current: number; tasks: TaskState[]; quotas?: Record<string, ProviderQuota>; active?: boolean };
+type HarnessState = { name: string; total: number; current: number; tasks: TaskState[]; quotas?: Record<string, ProviderQuota>; active?: boolean; updatedAt?: string };
 
 function readState(): State | null {
   try { if (!existsSync(STATE_FILE)) return null; return JSON.parse(readFileSync(STATE_FILE, "utf8")) as State; }
@@ -63,8 +63,14 @@ function readHarness(): HarnessState | null {
 const TAG: Record<State["decision"], string> = { GO: "ok", THROTTLE: "slow", STOP: "STOP" };
 const TLABEL: Record<string, string> = {
   generating: "gen", grading: "grade", revising: "revise", completed: "done",
-  failed: "fail", timed_out: "timeout", halted_quota: "quota-halt",
+  failed: "fail", timed_out: "timeout", halted_quota: "quota-halt", stale: "STALE",
 };
+
+// Staleness thresholds: a harness with no active sub-sessions that hasn't been
+// updated in STALE_MS is "stale" (abandoned — session interrupted without
+// harness_done). After HIDE_MS, hide it entirely to reduce noise.
+const STALE_MS = 5 * 60_000;   // 5 min: mark non-terminal tasks as STALE
+const HIDE_MS  = 30 * 60_000;  // 30 min: hide the whole harness section
 
 function barFill(p: number): string {
   // 0% = empty; anything > 0% shows at least 1 block (otherwise low % looks like 0 / invisible row)
@@ -153,11 +159,6 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     } catch { h = null; }
 
     const nodes: any[] = [];
-    // Only show panel when agent is a harness agent (or unknown — show during loading)
-    const HARNESS_AGENTS = ["usage-coach-harness"];
-    if (s && s.agent && !HARNESS_AGENTS.includes(s.agent)) {
-      return (<box></box>); // hide panel in non-harness modes
-    }
     if (s) {
       const dKey = s.decision === "GO" ? "success" : s.decision === "THROTTLE" ? "warning" : "error";
       const modelShort = s.model ? (s.model.split("/").pop() ?? s.model) : "";
@@ -185,19 +186,40 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
       nodes.push(<text>usage-coach: ...</text>);
     }
 
-    // Harness section: ONLY when a harness is active (running). Hidden when done (active===false).
-    if (h && h.active !== false && h.tasks.length > 0) {
+    // Harness section: show only for ACTIVE or STALE (abandoned) harnesses.
+    // Completed harnesses (active=false, recently updated) are hidden — the TUI
+    // is for live status, not history. Abandoned harnesses show as STALE until
+    // HIDE_MS, then disappear.
+    if (h && h.tasks.length > 0 && h.active !== false) {
+      const hAge = h.updatedAt ? Date.now() - new Date(h.updatedAt).getTime() : 0;
+      const hasActiveSub = h.tasks.some((t: any) => !!t.subSessionId);
+      const isStale = !hasActiveSub && hAge > STALE_MS;
+      const shouldHide = hAge > HIDE_MS && !hasActiveSub;
+      if (shouldHide) {
+        // Very stale — skip rendering the harness section entirely.
+      } else {
       nodes.push(<text>{" "}</text>);
-      nodes.push(<text style={st("textMuted")}>harness: {h.name} {h.current}/{h.total}</text>);
+      nodes.push(<text style={st("textMuted")}>harness: {h.name} {h.current}/{h.total}{isStale ? " (stale)" : ""}</text>);
       for (const t of h.tasks) {
-        const sKey = statusKey[t.status] ?? "text";
-        const lbl = TLABEL[t.status] ?? t.status;
+        const TERMINAL = new Set(["completed", "failed", "timed_out", "halted_quota"]);
+        const displayStatus = isStale && !TERMINAL.has(t.status) ? "stale" : t.status;
+        const sKey = statusKey[displayStatus] ?? "text";
+        const lbl = TLABEL[displayStatus] ?? displayStatus;
         const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
         const mdl = t.model ? ` ${(t.model.split("/").pop() ?? t.model)}` : "";
-        // elapsed time in current status (hide on terminal states)
+        // Sub-session live progress (when runModel is actively executing for this task).
+        // subSessionId present = sub-session is alive (poller running); cleared on completion.
+        const hasSub = !!t.subSessionId;
+        const subStepStr = hasSub && t.subStep !== undefined && t.subStep > 0 ? ` step:${t.subStep}` : "";
+        const subEl = hasSub && t.subElapsed !== undefined ? ` ${t.subElapsed}s` : "";
+        const subWarn = hasSub && (t.subElapsed ?? 0) > 300;
+        // Task-level elapsed (fallback when no active sub-session; hidden on terminal states)
         const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1000)) : 0;
-        const elapsedStr = (t.status === "completed" || t.status === "failed") ? "" : (elapsed > 0 ? ` ${elapsed}s` : "");
-        nodes.push(<text style={st(sKey)}> ● {t.id}{mdl} {lbl}{rev}{elapsedStr} {t.title}</text>);
+        const taskEl = (t.status === "completed" || t.status === "failed") ? "" : (elapsed > 0 ? ` ${elapsed}s` : "");
+        const displayEl = hasSub ? subEl : taskEl;
+        // Warning color when sub-session elapsed > 300s
+        const lineKey = subWarn ? "warning" : sKey;
+        nodes.push(<text style={st(lineKey)}> ● {t.id}{mdl} {lbl}{rev}{subStepStr}{displayEl} {t.title}</text>);
         // quota: read from coaching state (h.quotas is not populated — use the live state)
         const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
         // match by provider id; fall back to first provider if task has no model
@@ -208,6 +230,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         const pct = rawPct < 0 ? 0 : rawPct;  // -1 means no quota data — show empty bar
         const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
         nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("text")}>{barEmpty(pct)}</text><text> {pctLabel}</text></box>);
+      }
       }
     }
 

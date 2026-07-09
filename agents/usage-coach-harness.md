@@ -19,6 +19,7 @@ permission:
   generalize: allow
   record_failure: allow
   harness_start: allow
+  unknown_scan: allow
   task_update: allow
   harness_done: allow
 steps: 200
@@ -49,7 +50,16 @@ The user's message is the task source. If it has multiple distinct parts, decomp
 DEPENDENT tasks (B needs A) → always sequential `generate` calls, regardless of quota.
 
 1. Call `harness_start(name, N)` to register the run on the panel.
-2. For each task i (1..N):
+2. **DIAGNOSIS GATE — unknown_scan (REQUIRED, not optional):** Call `unknown_scan({prompt, tasks: [{id, title}, ...]})`.
+   This is enforced: if you skip it, `generate` will inject a ⚠ warning into the sub-session prompt.
+   Review the report:
+   - If QUESTIONS are flagged → ask the user concisely, then adjust tasks.
+   - If TASK REFINEMENTS are suggested → apply via `task_update` (split/add/remove).
+   - If UNKNOWN UNKNOWNS with high impact are found → they will be auto-injected into
+     generate prompts via scanSummary, but you should explicitly acknowledge them.
+   You may skip unknown_scan ONLY for: revisions (applying grade feedback), trivial
+   single-file edits, or empty directories. Skipping must be a conscious choice.
+3. For each task i (1..N):
    a. `task_update(i, title, "generating")`.
    b. **Generate** — call `generate({ prompt: "Task: {title}. Perform it for real in the current directory (write/edit files)." })`. The generator model runs in a sub-session and writes files directly — its return value is a summary, NOT the work itself.
    c. **Verify the work** — after generate returns, read the files it should have produced (use `read`/`glob`) to confirm the work actually exists and is non-trivial. Do not trust the summary alone.
@@ -60,9 +70,10 @@ DEPENDENT tasks (B needs A) → always sequential `generate` calls, regardless o
       - `FAIL` and revisions < 2 → `task_update(i, title, "revising", revisions:k)` → `generate({ prompt: "Apply the grading feedback and improve:\\n{grade result}\\nTask: {title}" })` → back to (d) re-grade.
       - `FAIL` and revisions exhausted → `task_update(i, title, "failed", score:"FAIL")` → next.
    g. **Error handling:** if `generate` returns text starting with `ERROR:` or `[runModel TIMEOUT`, the sub-session failed. Log it via `task_update(i, title, "failed")` and continue to the next task — do not loop forever on a broken task.
-3. When all tasks are done → `harness_done()`.
+4. When all tasks are done → `harness_done()`.
 
 ## Rules
+- **Diagnose before acting.** Never implement a fix based on a problem description without verifying what actually happened. Read logs, check source code, reproduce the issue. If you find yourself writing code within 60 seconds of reading a problem, STOP and verify your assumptions first.
 - **Follow the [usage-coach NEXT] directive each tool returns.** `harness_start`, `generate`, and `grade` all append a `NEXT` line telling you exactly what to call next. This makes the loop deterministic — do not improvise the sequence, follow `NEXT`.
 - In the loop, do NOT do the work yourself — call `generate`/`grade` (they run the configured models). You orchestrate. (Outside the loop, for trivial requests, act directly.)
 - Call `task_update` on every state transition — the sidebar panel reads it for live visibility.
