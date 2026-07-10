@@ -5,6 +5,53 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-11
+
+### Fixed
+- **`coach(NaN)` silently returned GO.** `NaN >= threshold` is always `false` in JS, so invalid quota
+  data (NaN usedPercent from malformed API responses) bypassed all STOP/THROTTLE thresholds and
+  produced a GO decision. Added `Number.isNaN` guard → returns THROTTLE with 0 values.
+- **`barFill(NaN)` / `barEmpty(NaN)` bypassed the `p <= 0` guard.** `NaN <= 0` is `false`, so NaN
+  propagated through `Math.max/min` and `"█".repeat(NaN)` coerced to `""`, hiding the progress bar
+  entirely. Added `!Number.isFinite(p)` check to both functions.
+- **`providerToCodexbar("-openai")` returned `""`.** `"-openai".split("-")[0]` = `""`, silently losing
+  the provider name. Now falls back to the full provider string when the first segment is empty.
+- **`isHarnessVisible` treated `active=undefined` as visible.** Changed from `h.active === false` to
+  `h.active !== true` — an incompletely initialized harness is now hidden.
+
+### Added
+- **`question` tool.** Two-phase interactive question gate: presents questions to the user, then stores
+  answers. `checkScanGate` is now 3-stage: (1) scan not done → warning, (2) unresolved questions →
+  prompt to ask them, (3) resolved → answers injected into generate prompt.
+- **`parseQuotaResponse` exported as pure function.** Extracted from inline closure in
+  `fetchQuotaWithRetry` — no longer depends on `spawnSync`. Enables direct unit testing.
+- **`lastKnownQuota` cache.** Successful quota fetches are cached and used as fallback on transient
+  failures, preventing the TUI from flickering to `-2` on a single network blip.
+- **`fetchQuotaWithRetry`.** 3 attempts with 1s/2s exponential backoff before giving up.
+- **Harness termination on missing generator.** `generate` / `generate_batch` now set `h.active=false`
+  when no generator model is configured, instead of leaving the harness stuck in "generating" forever.
+- **`taskQuotaPct` loading vs failed labels.** TUI shows `…` for loading (-1) and `retry` for failed
+  (< -1), instead of always `0%`.
+- **Wall-clock timeout for `runModel`.** `WALL_TIMEOUT_MS` (default 30 min, override via
+  `UC_WALL_TIMEOUT_MIN`) aborts hung sub-sessions even if step counting fails.
+- **`pollerDone` guard in `runModel`.** Prevents stale `setInterval` callbacks from writing to
+  harness.json after the prompt has resolved or timed out. Fixes the "subElapsed 49000s" zombie poller
+  bug where aborted generate calls left a poller running forever.
+
+### Changed
+- **`coach(null)` returns `weekly: -2`** (fetch failed), distinct from `-1` (still loading). This lets
+  the TUI distinguish "retrying" from "first load" states.
+- **254 tests** (up from 180). New test files:
+  - `test/adversarial.test.ts` (74 tests): exception-path coverage — NaN, Infinity, null, undefined,
+    empty strings, malformed JSON, corrupt state files, boundary conditions. Found 4 real bugs (fixed).
+  - `test/tool-lifecycle.test.ts` (16 tests): integration — gate enforcement, state transitions,
+    concurrency stress, stale detection.
+  - `test/tui-render.test.ts` (76 tests): staleness thresholds, progress bars, task status rendering,
+    visibility rules.
+- **`src/tui-logic.ts`** extracted: pure rendering functions (computeStaleness, isHarnessVisible,
+  computeTaskDisplay, barFill, barEmpty, taskQuotaPct, computeHarnessRender) separated from tui.tsx
+  for testability.
+
 ## [0.8.5] - 2026-07-10
 
 ### Fixed
