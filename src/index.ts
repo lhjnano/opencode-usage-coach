@@ -27,6 +27,10 @@ const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
 // if the assistant-turn count exceeds maxSteps, the session is aborted.
 const DEFAULT_MAX_STEPS = Number(process.env.UC_MAX_STEPS ?? 30) || 30;
 const WATCHDOG_POLL_MS = Math.max(1000, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3000) || 3000);
+// Wall-clock timeout: if the prompt hasn't completed within this many minutes,
+// abort the sub-session regardless of step count. Prevents zombie pollers from
+// aborted/interrupted generate calls running forever. Override via UC_WALL_TIMEOUT_MIN.
+const WALL_TIMEOUT_MS = (Math.max(1, Number(process.env.UC_WALL_TIMEOUT_MIN ?? 30) || 30)) * 60 * 1000;
 // Reverse interview: hard cap on questions per interview (override via UC_MAX_QUESTIONS).
 const DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUESTIONS ?? 7)) || 7);
 
@@ -848,8 +852,10 @@ async function runModel(client: any, model: string, prompt: string, directory: s
   const t0 = Date.now();
   const subStart = Date.now();
   let poller: ReturnType<typeof setInterval> | null = null;
+  let wallTimer: ReturnType<typeof setTimeout> | null = null;
   let subId: string | null = null;
   let timedOut = false;
+  let pollerDone = false; // set in finally — stops pending async poller callbacks from writing stale data
   // Deferred promise: resolves when the step limit is exceeded (races against prompt).
   let signalTimeout!: () => void;
   const timeoutSignal = new Promise<void>((resolve) => { signalTimeout = resolve; });
@@ -865,12 +871,15 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     // Poller: every WATCHDOG_POLL_MS, count steps from messages, enforce step limit,
     // and (when track is provided) write live progress to harness.json for the TUI.
     poller = setInterval(async () => {
-      if (timedOut) return; // already timed out — skip
+      if (timedOut || pollerDone) return; // already timed out or cleaned up — skip
       try {
         let step = 0;
         let lastTs = new Date().toISOString();
         try {
           const msgs: any = await client.session.messages?.({ path: { id } });
+          // After await: re-check pollerDone — the finally block may have run
+          // while we were waiting for the messages API response.
+          if (pollerDone) return;
           const msgList: any[] = Array.isArray(msgs?.data) ? msgs.data : Array.isArray(msgs) ? msgs : [];
           if (msgList.length) {
             // Count assistant turns as steps (each assistant message = one loop iteration).
@@ -891,8 +900,8 @@ async function runModel(client: any, model: string, prompt: string, directory: s
           signalTimeout();
           return;
         }
-        // Update TUI progress (only when tracking is enabled).
-        if (track) {
+        // Update TUI progress (only when tracking is enabled and not cleaned up).
+        if (track && !pollerDone) {
           const elapsed = Math.round((Date.now() - subStart) / 1000);
           updateSubSession(track.sessionID, track.taskId, {
             subSessionId: id, subStep: step, lastActivity: lastTs, subElapsed: elapsed,
@@ -900,7 +909,18 @@ async function runModel(client: any, model: string, prompt: string, directory: s
         }
       } catch (e) { log(`runModel poller err: ${String(e)}`); }
     }, WATCHDOG_POLL_MS);
-    // Race: prompt completes normally vs step-limit timeout.
+    // Wall-clock timeout: if the prompt hasn't resolved within WALL_TIMEOUT_MS
+    // (regardless of step count), abort the session. This catches cases where
+    // the messages endpoint is unavailable (step stays 0) or the prompt hangs.
+    wallTimer = setTimeout(() => {
+      if (!timedOut) {
+        timedOut = true;
+        log(`runModel(${model}): WALL-CLOCK timeout after ${WALL_TIMEOUT_MS / 1000}s, aborting session ${id}`);
+        try { client.session.abort?.({ path: { id } }); } catch { /* */ }
+        signalTimeout();
+      }
+    }, WALL_TIMEOUT_MS);
+    // Race: prompt completes normally vs step-limit/wall-clock timeout.
     // Wrap prompt with .then(onFulfilled, onRejected) so that aborting the session
     // (which causes prompt to reject) never produces an unhandled promise rejection.
     const promptP: Promise<any> = client.session.prompt({
@@ -942,8 +962,11 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     log(`runModel err (${model}, ${elapsed}s): ${String(e)}`);
     return `ERROR: runModel exception after ${elapsed}s: ${String(e)}`;
   } finally {
-    // Stop poller, clear sub-session progress, and ensure session cleanup.
+    // Set pollerDone FIRST — stops pending async poller callbacks from writing
+    // stale data after clearSubSession runs.
+    pollerDone = true;
     if (poller) clearInterval(poller);
+    if (wallTimer) clearTimeout(wallTimer);
     if (track) { try { clearSubSession(track.sessionID, track.taskId); } catch { /* */ } }
     if (subId) { try { await client.session.delete?.({ path: { id: subId } }); } catch { /* */ } }
   }
@@ -1036,6 +1059,21 @@ async function fetchProvidersCoach(): Promise<ProviderCoach[]> {
   return results.filter(Boolean) as ProviderCoach[];
 }
 
+/** Parse raw codexbar --json output into a Quota object. Pure function — no I/O. */
+export function parseQuotaResponse(rawText: string): Quota | null {
+  try {
+    const text = (rawText || "").trim();
+    if (!text || text === "[]") return null;
+    const u = (JSON.parse(text)[0]?.usage) as { primary?: QuotaWindow; secondary?: QuotaWindow; tertiary?: QuotaWindow } | undefined;
+    if (!u) return null;
+    return {
+      weekly: u.primary ?? { usedPercent: 0 },
+      monthly: u.secondary ?? { usedPercent: 0 },
+      fiveHour: u.tertiary ?? { usedPercent: 0 },
+    };
+  } catch { return null; }
+}
+
 // spawn codexbar — capture stdout in a pipe only, never leak to parent stdio (TUI).
 // (opencode $ BunShell displays command output in the TUI, so $ must not be used here.)
 // provider="" omits --provider so codexbar uses its default.
@@ -1052,20 +1090,29 @@ function fetchQuota(provider: string): Promise<Quota | null> {
     p.stdout?.on("data", (d) => { out += d.toString(); });
     p.on("error", () => resolve(null));
     p.on("close", () => {
-      try {
-        const text = out.trim();
-        if (!text || text === "[]") return resolve(null);
-        const u = (JSON.parse(text)[0]?.usage) as { primary?: QuotaWindow; secondary?: QuotaWindow; tertiary?: QuotaWindow } | undefined;
-        if (!u) return resolve(null);
-        resolve({ weekly: u.primary ?? { usedPercent: 0 }, monthly: u.secondary ?? { usedPercent: 0 }, fiveHour: u.tertiary ?? { usedPercent: 0 } });
-      } catch { resolve(null); }
+      resolve(parseQuotaResponse(out));
     });
   });
 }
 
+/** fetchQuota with retry: max 3 attempts with 1s, 2s delays between failures. */
+function fetchQuotaWithRetry(provider: string, maxRetries = 3): Promise<Quota | null> {
+  return new Promise(async (resolve) => {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const q = await fetchQuota(provider);
+      if (q) return resolve(q);
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      }
+    }
+    resolve(null);
+  });
+}
+
 function coach(q: Quota | null, lighter: string): Coaching {
-  if (!q) return { decision: "GO", advice: "quota unavailable — proceeding cautiously.", weekly: -1, monthly: -1, fiveHour: -1 };
+  if (!q) return { decision: "GO", advice: "quota unavailable — retrying. proceeding cautiously.", weekly: -2, monthly: -2, fiveHour: -2 };
   const wk = Math.round(q.weekly?.usedPercent ?? 0), mo = Math.round(q.monthly?.usedPercent ?? 0), h5 = Math.round(q.fiveHour?.usedPercent ?? 0);
+  if (Number.isNaN(wk) || Number.isNaN(mo) || Number.isNaN(h5)) return { decision: "THROTTLE", advice: "invalid quota data — proceeding with caution. switch to lighter model if available.", weekly: Number.isNaN(wk) ? 0 : wk, monthly: Number.isNaN(mo) ? 0 : mo, fiveHour: Number.isNaN(h5) ? 0 : h5 };
   const wkR = humanRemaining(q.weekly?.resetsAt), h5R = humanRemaining(q.fiveHour?.resetsAt);
   const stop = (r: string): Coaching => ({ decision: "STOP", advice: `STOP recommend — ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk, monthly: mo, fiveHour: h5 });
   const thr = (r: string): Coaching => ({ decision: "THROTTLE", advice: `Throttle recommend — ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk, monthly: mo, fiveHour: h5 });
@@ -1096,7 +1143,8 @@ function isFreeModel(model: string, provider: string): boolean {
 // Map opencode providerID (e.g. "zai-coding-plan") to codexbar provider name (e.g. "zai").
 function providerToCodexbar(provider: string): string {
   if (!provider) return "";
-  return provider.split("-")[0];
+  const first = provider.split("-")[0];
+  return first || provider; // fallback to full provider if first segment is empty (e.g. "-openai")
 }
 
 async function resolveAgent(client: any, sessionID: string): Promise<string> {
@@ -1151,6 +1199,7 @@ export default async function UsageCoachPlugin(input: {
     const PROVIDER = process.env.UC_PROVIDER ?? cfg0.provider ?? "";
     const LIGHTER = process.env.UC_LIGHTER_MODEL ?? cfg0.lighterModel ?? "a lighter model";
     let last: Coaching | null = null;
+    let lastKnownQuota: Quota | null = null; // persists across refresh cycles for retry fallback
     let lastFetchedAt = 0;
     let refreshing = false;
 
@@ -1175,9 +1224,11 @@ export default async function UsageCoachPlugin(input: {
 
         // Paid model: fetch quota for the ACTIVE provider (detected from session), mapped to codexbar name.
         const activeProvider = providerToCodexbar(currentProvider) || PROVIDER;
-        fetchQuota(activeProvider).then(async (q) => {
+        fetchQuotaWithRetry(activeProvider).then(async (q) => {
           try {
-            last = coach(q, LIGHTER); lastFetchedAt = Date.now();
+            if (q) lastKnownQuota = q; // cache for retry fallback
+            const effectiveQ = q ?? lastKnownQuota; // fall back to last known good
+            last = coach(effectiveQ, LIGHTER); lastFetchedAt = Date.now();
             // also fetch per-provider coach view (best-effort, non-blocking on failure)
             let providers: ProviderCoach[] = [];
             try { providers = await fetchProvidersCoach(); } catch { /* */ }
@@ -1191,7 +1242,7 @@ export default async function UsageCoachPlugin(input: {
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
           }
           catch (e) { log(`refresh-in-then err: ${String(e)}`); }
-        }).catch((e) => { log(`fetchQuota err: ${String(e)}`); }).finally(() => { refreshing = false; });
+        }).catch((e) => { log(`fetchQuotaWithRetry err: ${String(e)}`); }).finally(() => { refreshing = false; });
       } catch (e) { log(`refreshBackground err: ${String(e)}`); }
     };
 
@@ -1566,7 +1617,11 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           args: { prompt: tool.schema.string(), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps before timeout (default 30). Increase for complex tasks, decrease to fail fast on scope creep.") },
           async execute(args: { prompt: string; max_steps?: number }, ctx: any) {
             const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json).";
+            if (!cfg.generator) {
+              const h = readHarness(ctx.sessionID);
+              if (h) { h.active = false; writeHarness(ctx.sessionID, h); }
+              return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json). HARNESS TERMINATED — configure a generator model, then restart the harness.";
+            }
             let decision = "GO"; try { decision = current().decision; } catch { /* */ }
             const throttle = decision === "THROTTLE" && cfg.lighterModel;
             const model = throttle ? cfg.lighterModel! : cfg.generator;
@@ -1638,7 +1693,11 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           args: { tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), prompt: tool.schema.string() })), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps per task before timeout (default 30).") },
           async execute(args: { tasks: Array<{ id: number; prompt: string }>; max_steps?: number }, ctx: any) {
             const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json).";
+            if (!cfg.generator) {
+              const h = readHarness(ctx.sessionID);
+              if (h) { h.active = false; writeHarness(ctx.sessionID, h); }
+              return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json). HARNESS TERMINATED — configure a generator model, then restart the harness.";
+            }
             let decision = "GO"; try { decision = current().decision; } catch { /* */ }
             if (decision === "STOP") return "ERROR: quota STOP — halt the harness loop now. Call task_update(current, \"halted_quota\") and stop.";
             const throttle = decision === "THROTTLE" && cfg.lighterModel;
@@ -1911,7 +1970,7 @@ export {
   detectLanguage, buildScanSummary, parseGapAnalysis, providerAdvice,
   buildGapPrompt, formatReport, isFreeModel, providerToCodexbar,
   isHarnessAgent, humanRemaining,
-  setStateDir, readHarness, writeHarness,
+  setStateDir, readHarness, writeHarness, readRules,
   checkScanGate, updateSubSession, clearSubSession, findActiveTaskId,
 };
 export type { Quota, Coaching, CodebaseProfile, UnknownScanResult, HarnessJson };

@@ -184,6 +184,7 @@ var PLUGIN_NAME = "opencode-usage-coach";
 var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
 var DEFAULT_MAX_STEPS = Number(process.env.UC_MAX_STEPS ?? 30) || 30;
 var WATCHDOG_POLL_MS = Math.max(1e3, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3e3) || 3e3);
+var WALL_TIMEOUT_MS = Math.max(1, Number(process.env.UC_WALL_TIMEOUT_MIN ?? 30) || 30) * 60 * 1e3;
 var DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUESTIONS ?? 7)) || 7);
 var PIPE_LOG = join2(homedir(), ".cache", "opencode-usage-coach", "pipeline.log");
 function pipeLog(msg) {
@@ -912,8 +913,10 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
   const t0 = Date.now();
   const subStart = Date.now();
   let poller = null;
+  let wallTimer = null;
   let subId = null;
   let timedOut = false;
+  let pollerDone = false;
   let signalTimeout;
   const timeoutSignal = new Promise((resolve2) => {
     signalTimeout = resolve2;
@@ -928,12 +931,13 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
     subId = id;
     log(`runModel(${model}): session ${id} created, sending prompt (${prompt.length} chars), max_steps=${maxSteps}`);
     poller = setInterval(async () => {
-      if (timedOut) return;
+      if (timedOut || pollerDone) return;
       try {
         let step = 0;
         let lastTs = (/* @__PURE__ */ new Date()).toISOString();
         try {
           const msgs = await client.session.messages?.({ path: { id } });
+          if (pollerDone) return;
           const msgList = Array.isArray(msgs?.data) ? msgs.data : Array.isArray(msgs) ? msgs : [];
           if (msgList.length) {
             step = msgList.filter((m) => {
@@ -956,7 +960,7 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
           signalTimeout();
           return;
         }
-        if (track) {
+        if (track && !pollerDone) {
           const elapsed2 = Math.round((Date.now() - subStart) / 1e3);
           updateSubSession(track.sessionID, track.taskId, {
             subSessionId: id,
@@ -969,6 +973,17 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
         log(`runModel poller err: ${String(e)}`);
       }
     }, WATCHDOG_POLL_MS);
+    wallTimer = setTimeout(() => {
+      if (!timedOut) {
+        timedOut = true;
+        log(`runModel(${model}): WALL-CLOCK timeout after ${WALL_TIMEOUT_MS / 1e3}s, aborting session ${id}`);
+        try {
+          client.session.abort?.({ path: { id } });
+        } catch {
+        }
+        signalTimeout();
+      }
+    }, WALL_TIMEOUT_MS);
     const promptP = client.session.prompt({
       path: { id },
       body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] }
@@ -1013,7 +1028,9 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
     log(`runModel err (${model}, ${elapsed}s): ${String(e)}`);
     return `ERROR: runModel exception after ${elapsed}s: ${String(e)}`;
   } finally {
+    pollerDone = true;
     if (poller) clearInterval(poller);
+    if (wallTimer) clearTimeout(wallTimer);
     if (track) {
       try {
         clearSubSession(track.sessionID, track.taskId);
@@ -1047,7 +1064,9 @@ var WORM_MAX_NODES = num("UC_WORM_MAX_NODES", 1e5);
 function humanRemaining(iso) {
   try {
     if (!iso) return "";
-    const mins = Math.floor((new Date(iso).getTime() - Date.now()) / 6e4);
+    const ms = new Date(iso).getTime();
+    if (Number.isNaN(ms)) return "";
+    const mins = Math.floor((ms - Date.now()) / 6e4);
     if (mins < 0) return "resets soon";
     if (mins < 60) return `resets in ${mins}m`;
     if (mins < 1440) return `resets in ${Math.floor(mins / 60)}h ${mins % 60}m`;
@@ -1114,6 +1133,21 @@ async function fetchProvidersCoach() {
   }));
   return results.filter(Boolean);
 }
+function parseQuotaResponse(rawText) {
+  try {
+    const text = (rawText || "").trim();
+    if (!text || text === "[]") return null;
+    const u = JSON.parse(text)[0]?.usage;
+    if (!u) return null;
+    return {
+      weekly: u.primary ?? { usedPercent: 0 },
+      monthly: u.secondary ?? { usedPercent: 0 },
+      fiveHour: u.tertiary ?? { usedPercent: 0 }
+    };
+  } catch {
+    return null;
+  }
+}
 function fetchQuota(provider) {
   return new Promise((resolve2) => {
     let out = "";
@@ -1131,21 +1165,26 @@ function fetchQuota(provider) {
     });
     p.on("error", () => resolve2(null));
     p.on("close", () => {
-      try {
-        const text = out.trim();
-        if (!text || text === "[]") return resolve2(null);
-        const u = JSON.parse(text)[0]?.usage;
-        if (!u) return resolve2(null);
-        resolve2({ weekly: u.primary ?? { usedPercent: 0 }, monthly: u.secondary ?? { usedPercent: 0 }, fiveHour: u.tertiary ?? { usedPercent: 0 } });
-      } catch {
-        resolve2(null);
-      }
+      resolve2(parseQuotaResponse(out));
     });
   });
 }
+function fetchQuotaWithRetry(provider, maxRetries = 3) {
+  return new Promise(async (resolve2) => {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const q = await fetchQuota(provider);
+      if (q) return resolve2(q);
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, 1e3 * (attempt + 1)));
+      }
+    }
+    resolve2(null);
+  });
+}
 function coach(q, lighter) {
-  if (!q) return { decision: "GO", advice: "quota unavailable \u2014 proceeding cautiously.", weekly: -1, monthly: -1, fiveHour: -1 };
+  if (!q) return { decision: "GO", advice: "quota unavailable \u2014 retrying. proceeding cautiously.", weekly: -2, monthly: -2, fiveHour: -2 };
   const wk = Math.round(q.weekly?.usedPercent ?? 0), mo = Math.round(q.monthly?.usedPercent ?? 0), h5 = Math.round(q.fiveHour?.usedPercent ?? 0);
+  if (Number.isNaN(wk) || Number.isNaN(mo) || Number.isNaN(h5)) return { decision: "THROTTLE", advice: "invalid quota data \u2014 proceeding with caution. switch to lighter model if available.", weekly: Number.isNaN(wk) ? 0 : wk, monthly: Number.isNaN(mo) ? 0 : mo, fiveHour: Number.isNaN(h5) ? 0 : h5 };
   const wkR = humanRemaining(q.weekly?.resetsAt), h5R = humanRemaining(q.fiveHour?.resetsAt);
   const stop = (r) => ({ decision: "STOP", advice: `STOP recommend \u2014 ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk, monthly: mo, fiveHour: h5 });
   const thr = (r) => ({ decision: "THROTTLE", advice: `Throttle recommend \u2014 ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk, monthly: mo, fiveHour: h5 });
@@ -1169,7 +1208,8 @@ function isFreeModel(model, provider) {
 }
 function providerToCodexbar(provider) {
   if (!provider) return "";
-  return provider.split("-")[0];
+  const first = provider.split("-")[0];
+  return first || provider;
 }
 async function resolveAgent(client, sessionID) {
   if (!sessionID) return "";
@@ -1214,6 +1254,7 @@ async function UsageCoachPlugin(input) {
     const PROVIDER = process.env.UC_PROVIDER ?? cfg0.provider ?? "";
     const LIGHTER = process.env.UC_LIGHTER_MODEL ?? cfg0.lighterModel ?? "a lighter model";
     let last = null;
+    let lastKnownQuota = null;
     let lastFetchedAt = 0;
     let refreshing = false;
     const refreshBackground = () => {
@@ -1231,9 +1272,11 @@ async function UsageCoachPlugin(input) {
           return;
         }
         const activeProvider = providerToCodexbar(currentProvider) || PROVIDER;
-        fetchQuota(activeProvider).then(async (q) => {
+        fetchQuotaWithRetry(activeProvider).then(async (q) => {
           try {
-            last = coach(q, LIGHTER);
+            if (q) lastKnownQuota = q;
+            const effectiveQ = q ?? lastKnownQuota;
+            last = coach(effectiveQ, LIGHTER);
             lastFetchedAt = Date.now();
             let providers = [];
             try {
@@ -1250,7 +1293,7 @@ async function UsageCoachPlugin(input) {
             log(`refresh-in-then err: ${String(e)}`);
           }
         }).catch((e) => {
-          log(`fetchQuota err: ${String(e)}`);
+          log(`fetchQuotaWithRetry err: ${String(e)}`);
         }).finally(() => {
           refreshing = false;
         });
@@ -1709,7 +1752,14 @@ Origin: ${args.task}
           args: { prompt: tool.schema.string(), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps before timeout (default 30). Increase for complex tasks, decrease to fail fast on scope creep.") },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
+            if (!cfg.generator) {
+              const h = readHarness(ctx.sessionID);
+              if (h) {
+                h.active = false;
+                writeHarness(ctx.sessionID, h);
+              }
+              return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json). HARNESS TERMINATED \u2014 configure a generator model, then restart the harness.';
+            }
             let decision = "GO";
             try {
               decision = current().decision;
@@ -1815,7 +1865,14 @@ ${gate.summary}
           args: { tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), prompt: tool.schema.string() })), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps per task before timeout (default 30).") },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json).';
+            if (!cfg.generator) {
+              const h = readHarness(ctx.sessionID);
+              if (h) {
+                h.active = false;
+                writeHarness(ctx.sessionID, h);
+              }
+              return 'ERROR: no generator model configured. Set "generator" in harness.config.json (see harness.config.example.json). HARNESS TERMINATED \u2014 configure a generator model, then restart the harness.';
+            }
             let decision = "GO";
             try {
               decision = current().decision;
@@ -2093,13 +2150,28 @@ If the task is already well-specified with no significant ambiguities, return {"
   }
 }
 export {
+  buildGapPrompt,
   buildScanSummary,
+  checkScanGate,
+  clearSubSession,
   coach,
   UsageCoachPlugin as default,
   detectLanguage,
   extractImplNotes,
   extractKeywords,
+  findActiveTaskId,
+  formatReport,
+  humanRemaining,
+  isFreeModel,
+  isHarnessAgent,
   parseFileList,
   parseGapAnalysis,
-  providerAdvice
+  parseQuotaResponse,
+  providerAdvice,
+  providerToCodexbar,
+  readHarness,
+  readRules,
+  setStateDir,
+  updateSubSession,
+  writeHarness
 };

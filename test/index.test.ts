@@ -116,12 +116,12 @@ test("detectLanguage: returns 'unknown' for empty or unrecognized extensions", (
 });
 
 // ── coach ────────────────────────────────────────────────────────────────────
-test("coach: returns GO with -1 values for null quota", () => {
+test("coach: returns GO with -2 values for null quota (fetch failed)", () => {
   const c = coach(null, "lighter-model");
   assert.equal(c.decision, "GO");
-  assert.equal(c.weekly, -1);
-  assert.equal(c.monthly, -1);
-  assert.equal(c.fiveHour, -1);
+  assert.equal(c.weekly, -2);
+  assert.equal(c.monthly, -2);
+  assert.equal(c.fiveHour, -2);
 });
 
 test("coach: returns GO for comfortable usage levels", () => {

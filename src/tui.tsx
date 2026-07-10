@@ -9,6 +9,12 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRoot, createSignal, onCleanup } from "solid-js";
+import {
+  STALE_MS, HIDE_MS, TAG, TLABEL, STATUS_KEY, TERMINAL_STATUSES,
+  barFill, barEmpty,
+  computeStaleness, isHarnessVisible,
+  computeTaskDisplay, taskQuotaPct, decisionThemeKey,
+} from "./tui-logic.js";
 
 // Per-directory state (matches the server plugin & harness script). UC_STATE_DIR overrides.
 function projectStateDir(dir: string): string {
@@ -59,28 +65,7 @@ function readHarness(): HarnessState | null {
   catch { return null; }
 }
 
-// Plain ASCII indicators (no emoji — avoids static decorations that don't change live)
-const TAG: Record<State["decision"], string> = { GO: "ok", THROTTLE: "slow", STOP: "STOP" };
-const TLABEL: Record<string, string> = {
-  generating: "gen", grading: "grade", revising: "revise", completed: "done",
-  failed: "fail", timed_out: "timeout", halted_quota: "quota-halt", stale: "STALE",
-};
-
-// Staleness thresholds: a harness with no active sub-sessions that hasn't been
-// updated in STALE_MS is "stale" (abandoned — session interrupted without
-// harness_done). After HIDE_MS, hide it entirely to reduce noise.
-const STALE_MS = 5 * 60_000;   // 5 min: mark non-terminal tasks as STALE
-const HIDE_MS  = 30 * 60_000;  // 30 min: hide the whole harness section
-
-function barFill(p: number): string {
-  // 0% = empty; anything > 0% shows at least 1 block (otherwise low % looks like 0 / invisible row)
-  const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
-  return "█".repeat(n);
-}
-function barEmpty(p: number): string {
-  const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
-  return "░".repeat(10 - n);
-}
+// TAG, TLABEL, STALE_MS, HIDE_MS, barFill, barEmpty imported from ./tui-logic.js
 
 function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
   // Per-directory state: scope to the session's working directory (matches harness/plugin).
@@ -123,11 +108,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
   } catch { /* command API unavailable — toggle disabled */ }
   onCleanup(() => { try { cmdDispose?.(); } catch { /* */ } });
 
-  // status -> theme color key (MCP-style colored dot ●)
-  const statusKey: Record<string, string> = {
-    generating: "info", grading: "accent", revising: "warning",
-    completed: "success", failed: "error", timed_out: "error", halted_quota: "error",
-  };
+  // statusKey imported as STATUS_KEY from ./tui-logic.js
 
   // panel(ctx) — one line per item. Color via style.fg using theme (opentui convention).
   // Harness is read per-SESSION (ctx.session_id), so each session sees only its own harness.
@@ -160,7 +141,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
 
     const nodes: any[] = [];
     if (s) {
-      const dKey = s.decision === "GO" ? "success" : s.decision === "THROTTLE" ? "warning" : "error";
+      const dKey = decisionThemeKey(s.decision);
       const modelShort = s.model ? (s.model.split("/").pop() ?? s.model) : "";
       // Free model: one clean line — usage-coach [free] {model}
       if (s.isFree) {
@@ -178,8 +159,8 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
           nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(p.weekly)}</text><text style={st("text")}>{barEmpty(p.weekly)}</text><text> {p.weekly}%  {p.weeklyReset}</text></box>);
         }
       } else {
-        nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> 0%</text></box>);
-        nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> 0%</text></box>);
+        nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> {s.fiveHour}%</text></box>);
+        nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> {s.weekly}%</text></box>);
       }
       }
     } else {
@@ -187,48 +168,16 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
     }
 
     // Harness section: show only for ACTIVE or STALE (abandoned) harnesses.
-    // Completed harnesses (active=false, recently updated) are hidden — the TUI
-    // is for live status, not history. Abandoned harnesses show as STALE until
-    // HIDE_MS, then disappear.
-    if (h && h.tasks.length > 0 && h.active !== false) {
-      const hAge = h.updatedAt ? Date.now() - new Date(h.updatedAt).getTime() : 0;
-      const hasActiveSub = h.tasks.some((t: any) => !!t.subSessionId);
-      const isStale = !hasActiveSub && hAge > STALE_MS;
-      const shouldHide = hAge > HIDE_MS && !hasActiveSub;
-      if (shouldHide) {
-        // Very stale — skip rendering the harness section entirely.
-      } else {
+    if (h) {
+      const staleness = computeStaleness(h);
+      if (isHarnessVisible(h, staleness)) {
+      const isStale = staleness.isStale;
       nodes.push(<text>{" "}</text>);
       nodes.push(<text style={st("textMuted")}>harness: {h.name} {h.current}/{h.total}{isStale ? " (stale)" : ""}</text>);
       for (const t of h.tasks) {
-        const TERMINAL = new Set(["completed", "failed", "timed_out", "halted_quota"]);
-        const displayStatus = isStale && !TERMINAL.has(t.status) ? "stale" : t.status;
-        const sKey = statusKey[displayStatus] ?? "text";
-        const lbl = TLABEL[displayStatus] ?? displayStatus;
-        const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
-        const mdl = t.model ? ` ${(t.model.split("/").pop() ?? t.model)}` : "";
-        // Sub-session live progress (when runModel is actively executing for this task).
-        // subSessionId present = sub-session is alive (poller running); cleared on completion.
-        const hasSub = !!t.subSessionId;
-        const subStepStr = hasSub && t.subStep !== undefined && t.subStep > 0 ? ` step:${t.subStep}` : "";
-        const subEl = hasSub && t.subElapsed !== undefined ? ` ${t.subElapsed}s` : "";
-        const subWarn = hasSub && (t.subElapsed ?? 0) > 300;
-        // Task-level elapsed (fallback when no active sub-session; hidden on terminal states)
-        const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1000)) : 0;
-        const taskEl = (t.status === "completed" || t.status === "failed") ? "" : (elapsed > 0 ? ` ${elapsed}s` : "");
-        const displayEl = hasSub ? subEl : taskEl;
-        // Warning color when sub-session elapsed > 300s
-        const lineKey = subWarn ? "warning" : sKey;
-        nodes.push(<text style={st(lineKey)}> ● {t.id}{mdl} {lbl}{rev}{subStepStr}{displayEl} {t.title}</text>);
-        // quota: read from coaching state (h.quotas is not populated — use the live state)
-        const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
-        // match by provider id; fall back to first provider if task has no model
-        const provCoach = pv
-          ? s?.providers?.find((p: any) => p.id === pv || (pv && p.id.startsWith(pv)) || (pv && pv.startsWith(p.id)))
-          : s?.providers?.[0];
-        const rawPct = provCoach?.fiveHour ?? s?.fiveHour ?? -1;
-        const pct = rawPct < 0 ? 0 : rawPct;  // -1 means no quota data — show empty bar
-        const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
+        const td = computeTaskDisplay(t, isStale);
+        nodes.push(<text style={st(td.themeKey)}> ● {t.id}{td.modelStr} {td.label}{td.revSuffix}{td.stepStr}{td.elapsedStr} {t.title}</text>);
+        const { pct, label: pctLabel } = taskQuotaPct(t, s);
         nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("text")}>{barEmpty(pct)}</text><text> {pctLabel}</text></box>);
       }
       }

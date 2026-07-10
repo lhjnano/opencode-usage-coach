@@ -10,6 +10,101 @@ import { createHash } from "crypto";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { createRoot, createSignal, onCleanup } from "solid-js";
+
+// src/tui-logic.ts
+var STALE_MS = 5 * 6e4;
+var HIDE_MS = 30 * 6e4;
+var TAG = {
+  GO: "ok",
+  THROTTLE: "slow",
+  STOP: "STOP"
+};
+var TLABEL = {
+  generating: "gen",
+  grading: "grade",
+  revising: "revise",
+  completed: "done",
+  failed: "fail",
+  timed_out: "timeout",
+  halted_quota: "quota-halt",
+  stale: "STALE"
+};
+var STATUS_KEY = {
+  generating: "info",
+  grading: "accent",
+  revising: "warning",
+  completed: "success",
+  failed: "error",
+  timed_out: "error",
+  halted_quota: "error"
+};
+var TERMINAL_STATUSES = /* @__PURE__ */ new Set([
+  "completed",
+  "failed",
+  "timed_out",
+  "halted_quota"
+]);
+function barFill(p) {
+  const n = !Number.isFinite(p) || p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
+  return "\u2588".repeat(n);
+}
+function barEmpty(p) {
+  const n = !Number.isFinite(p) || p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
+  return "\u2591".repeat(10 - n);
+}
+function computeStaleness(h, now = Date.now()) {
+  const hAge = h.updatedAt ? now - new Date(h.updatedAt).getTime() : 0;
+  const hasActiveSub = h.tasks.some((t) => !!t.subSessionId);
+  const isStale = !hasActiveSub && hAge > STALE_MS;
+  const shouldHide = hAge > HIDE_MS && !hasActiveSub;
+  return { hAge, hasActiveSub, isStale, shouldHide };
+}
+function isHarnessVisible(h, staleness) {
+  if (!h) return false;
+  if (h.tasks.length === 0) return false;
+  if (h.active !== true) return false;
+  if (staleness.shouldHide) return false;
+  return true;
+}
+function computeTaskDisplay(t, isStale, now = Date.now()) {
+  const displayStatus = isStale && !TERMINAL_STATUSES.has(t.status) ? "stale" : t.status;
+  const sKey = STATUS_KEY[displayStatus] ?? "text";
+  const lbl = TLABEL[displayStatus] ?? displayStatus;
+  const rev = (t.revisions ?? 0) > 0 && t.status === "revising" ? `(${t.revisions})` : "";
+  const mdl = t.model ? ` ${t.model.split("/").pop() ?? t.model}` : "";
+  const hasSub = !!t.subSessionId;
+  const subStepStr = hasSub && t.subStep !== void 0 && t.subStep > 0 ? ` step:${t.subStep}` : "";
+  const subEl = hasSub && t.subElapsed !== void 0 ? ` ${t.subElapsed}s` : "";
+  const subWarn = hasSub && (t.subElapsed ?? 0) > 300;
+  const elapsed = t.startedAt ? Math.max(0, Math.round((now - new Date(t.startedAt).getTime()) / 1e3)) : 0;
+  const taskEl = t.status === "completed" || t.status === "failed" ? "" : elapsed > 0 ? ` ${elapsed}s` : "";
+  const displayEl = hasSub ? subEl : taskEl;
+  const lineKey = subWarn ? "warning" : sKey;
+  return {
+    displayStatus,
+    themeKey: lineKey,
+    label: lbl,
+    revSuffix: rev,
+    modelStr: mdl,
+    stepStr: subStepStr,
+    elapsedStr: displayEl,
+    hasSub,
+    subWarn
+  };
+}
+function decisionThemeKey(decision) {
+  return decision === "GO" ? "success" : decision === "THROTTLE" ? "warning" : "error";
+}
+function taskQuotaPct(t, s) {
+  const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
+  const provCoach = pv ? s?.providers?.find((p) => p.id === pv || pv && p.id.startsWith(pv) || pv && pv.startsWith(p.id)) : s?.providers?.[0];
+  const rawPct = provCoach?.fiveHour ?? s?.fiveHour ?? -1;
+  const pct = rawPct < 0 ? 0 : rawPct;
+  const label = rawPct === -1 ? "\u2026" : rawPct < 0 ? "retry" : `${rawPct}%`;
+  return { pct, label };
+}
+
+// src/tui.tsx
 function projectStateDir(dir) {
   const abs = resolve(dir || ".");
   const h = createHash("sha1").update(abs).digest("hex").slice(0, 12);
@@ -70,31 +165,6 @@ function readHarness() {
   } catch {
     return null;
   }
-}
-var TAG = {
-  GO: "ok",
-  THROTTLE: "slow",
-  STOP: "STOP"
-};
-var TLABEL = {
-  generating: "gen",
-  grading: "grade",
-  revising: "revise",
-  completed: "done",
-  failed: "fail",
-  timed_out: "timeout",
-  halted_quota: "quota-halt",
-  stale: "STALE"
-};
-var STALE_MS = 5 * 6e4;
-var HIDE_MS = 30 * 6e4;
-function barFill(p) {
-  const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
-  return "\u2588".repeat(n);
-}
-function barEmpty(p) {
-  const n = p <= 0 ? 0 : Math.max(1, Math.min(10, Math.round(p / 10)));
-  return "\u2591".repeat(10 - n);
 }
 function initializeTui(api, disposeRoot) {
   STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(api.state.path.directory);
@@ -162,15 +232,6 @@ function initializeTui(api, disposeRoot) {
     } catch {
     }
   });
-  const statusKey = {
-    generating: "info",
-    grading: "accent",
-    revising: "warning",
-    completed: "success",
-    failed: "error",
-    timed_out: "error",
-    halted_quota: "error"
-  };
   const panel = (ctx) => {
     const th = ctx.theme?.current ?? {};
     const st = (k) => ({
@@ -206,7 +267,7 @@ function initializeTui(api, disposeRoot) {
     }
     const nodes = [];
     if (s) {
-      const dKey = s.decision === "GO" ? "success" : s.decision === "THROTTLE" ? "warning" : "error";
+      const dKey = decisionThemeKey(s.decision);
       const modelShort = s.model ? s.model.split("/").pop() ?? s.model : "";
       if (s.isFree) {
         nodes.push((() => {
@@ -316,7 +377,7 @@ function initializeTui(api, disposeRoot) {
           }
         } else {
           nodes.push((() => {
-            var _el$32 = _$createElement("box"), _el$33 = _$createElement("text"), _el$35 = _$createElement("text"), _el$36 = _$createElement("text"), _el$37 = _$createElement("text");
+            var _el$32 = _$createElement("box"), _el$33 = _$createElement("text"), _el$35 = _$createElement("text"), _el$36 = _$createElement("text"), _el$37 = _$createElement("text"), _el$38 = _$createTextNode(` `), _el$39 = _$createTextNode(`%`);
             _$insertNode(_el$32, _el$33);
             _$insertNode(_el$32, _el$35);
             _$insertNode(_el$32, _el$36);
@@ -325,7 +386,9 @@ function initializeTui(api, disposeRoot) {
             _$insertNode(_el$33, _$createTextNode(` 5h `));
             _$insert(_el$35, () => barFill(s.fiveHour));
             _$insert(_el$36, () => barEmpty(s.fiveHour));
-            _$insertNode(_el$37, _$createTextNode(` 0%`));
+            _$insertNode(_el$37, _el$38);
+            _$insertNode(_el$37, _el$39);
+            _$insert(_el$37, () => s.fiveHour, _el$39);
             _$effect((_p$) => {
               var _v$9 = st("text"), _v$0 = st("text");
               _v$9 !== _p$.e && (_p$.e = _$setProp(_el$35, "style", _v$9, _p$.e));
@@ -338,126 +401,111 @@ function initializeTui(api, disposeRoot) {
             return _el$32;
           })());
           nodes.push((() => {
-            var _el$39 = _$createElement("box"), _el$40 = _$createElement("text"), _el$42 = _$createElement("text"), _el$43 = _$createElement("text"), _el$44 = _$createElement("text");
-            _$insertNode(_el$39, _el$40);
-            _$insertNode(_el$39, _el$42);
-            _$insertNode(_el$39, _el$43);
-            _$insertNode(_el$39, _el$44);
-            _$setProp(_el$39, "flexDirection", "row");
-            _$insertNode(_el$40, _$createTextNode(` 1w `));
-            _$insert(_el$42, () => barFill(s.weekly));
-            _$insert(_el$43, () => barEmpty(s.weekly));
-            _$insertNode(_el$44, _$createTextNode(` 0%`));
+            var _el$40 = _$createElement("box"), _el$41 = _$createElement("text"), _el$43 = _$createElement("text"), _el$44 = _$createElement("text"), _el$45 = _$createElement("text"), _el$46 = _$createTextNode(` `), _el$47 = _$createTextNode(`%`);
+            _$insertNode(_el$40, _el$41);
+            _$insertNode(_el$40, _el$43);
+            _$insertNode(_el$40, _el$44);
+            _$insertNode(_el$40, _el$45);
+            _$setProp(_el$40, "flexDirection", "row");
+            _$insertNode(_el$41, _$createTextNode(` 1w `));
+            _$insert(_el$43, () => barFill(s.weekly));
+            _$insert(_el$44, () => barEmpty(s.weekly));
+            _$insertNode(_el$45, _el$46);
+            _$insertNode(_el$45, _el$47);
+            _$insert(_el$45, () => s.weekly, _el$47);
             _$effect((_p$) => {
               var _v$1 = st("text"), _v$10 = st("text");
-              _v$1 !== _p$.e && (_p$.e = _$setProp(_el$42, "style", _v$1, _p$.e));
-              _v$10 !== _p$.t && (_p$.t = _$setProp(_el$43, "style", _v$10, _p$.t));
+              _v$1 !== _p$.e && (_p$.e = _$setProp(_el$43, "style", _v$1, _p$.e));
+              _v$10 !== _p$.t && (_p$.t = _$setProp(_el$44, "style", _v$10, _p$.t));
               return _p$;
             }, {
               e: void 0,
               t: void 0
             });
-            return _el$39;
+            return _el$40;
           })());
         }
       }
     } else {
       nodes.push((() => {
-        var _el$46 = _$createElement("text");
-        _$insertNode(_el$46, _$createTextNode(`usage-coach: ...`));
-        return _el$46;
+        var _el$48 = _$createElement("text");
+        _$insertNode(_el$48, _$createTextNode(`usage-coach: ...`));
+        return _el$48;
       })());
     }
-    if (h && h.tasks.length > 0 && h.active !== false) {
-      const hAge = h.updatedAt ? Date.now() - new Date(h.updatedAt).getTime() : 0;
-      const hasActiveSub = h.tasks.some((t) => !!t.subSessionId);
-      const isStale = !hasActiveSub && hAge > STALE_MS;
-      const shouldHide = hAge > HIDE_MS && !hasActiveSub;
-      if (shouldHide) {
-      } else {
+    if (h) {
+      const staleness = computeStaleness(h);
+      if (isHarnessVisible(h, staleness)) {
+        const isStale = staleness.isStale;
         nodes.push((() => {
-          var _el$48 = _$createElement("text");
-          _$insertNode(_el$48, _$createTextNode(` `));
-          return _el$48;
-        })());
-        nodes.push((() => {
-          var _el$50 = _$createElement("text"), _el$51 = _$createTextNode(`harness: `), _el$52 = _$createTextNode(` `), _el$53 = _$createTextNode(`/`);
-          _$insertNode(_el$50, _el$51);
-          _$insertNode(_el$50, _el$52);
-          _$insertNode(_el$50, _el$53);
-          _$insert(_el$50, () => h.name, _el$52);
-          _$insert(_el$50, () => h.current, _el$53);
-          _$insert(_el$50, () => h.total, null);
-          _$insert(_el$50, isStale ? " (stale)" : "", null);
-          _$effect((_$p) => _$setProp(_el$50, "style", st("textMuted"), _$p));
+          var _el$50 = _$createElement("text");
+          _$insertNode(_el$50, _$createTextNode(` `));
           return _el$50;
         })());
+        nodes.push((() => {
+          var _el$52 = _$createElement("text"), _el$53 = _$createTextNode(`harness: `), _el$54 = _$createTextNode(` `), _el$55 = _$createTextNode(`/`);
+          _$insertNode(_el$52, _el$53);
+          _$insertNode(_el$52, _el$54);
+          _$insertNode(_el$52, _el$55);
+          _$insert(_el$52, () => h.name, _el$54);
+          _$insert(_el$52, () => h.current, _el$55);
+          _$insert(_el$52, () => h.total, null);
+          _$insert(_el$52, isStale ? " (stale)" : "", null);
+          _$effect((_$p) => _$setProp(_el$52, "style", st("textMuted"), _$p));
+          return _el$52;
+        })());
         for (const t of h.tasks) {
-          const TERMINAL = /* @__PURE__ */ new Set(["completed", "failed", "timed_out", "halted_quota"]);
-          const displayStatus = isStale && !TERMINAL.has(t.status) ? "stale" : t.status;
-          const sKey = statusKey[displayStatus] ?? "text";
-          const lbl = TLABEL[displayStatus] ?? displayStatus;
-          const rev = t.revisions > 0 && t.status === "revising" ? `(${t.revisions})` : "";
-          const mdl = t.model ? ` ${t.model.split("/").pop() ?? t.model}` : "";
-          const hasSub = !!t.subSessionId;
-          const subStepStr = hasSub && t.subStep !== void 0 && t.subStep > 0 ? ` step:${t.subStep}` : "";
-          const subEl = hasSub && t.subElapsed !== void 0 ? ` ${t.subElapsed}s` : "";
-          const subWarn = hasSub && (t.subElapsed ?? 0) > 300;
-          const elapsed = t.startedAt ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1e3)) : 0;
-          const taskEl = t.status === "completed" || t.status === "failed" ? "" : elapsed > 0 ? ` ${elapsed}s` : "";
-          const displayEl = hasSub ? subEl : taskEl;
-          const lineKey = subWarn ? "warning" : sKey;
+          const td = computeTaskDisplay(t, isStale);
           nodes.push((() => {
-            var _el$54 = _$createElement("text"), _el$55 = _$createTextNode(` \u25CF `), _el$56 = _$createTextNode(` `), _el$57 = _$createTextNode(` `);
-            _$insertNode(_el$54, _el$55);
-            _$insertNode(_el$54, _el$56);
-            _$insertNode(_el$54, _el$57);
-            _$insert(_el$54, () => t.id, _el$56);
-            _$insert(_el$54, mdl, _el$56);
-            _$insert(_el$54, lbl, _el$57);
-            _$insert(_el$54, rev, _el$57);
-            _$insert(_el$54, subStepStr, _el$57);
-            _$insert(_el$54, displayEl, _el$57);
-            _$insert(_el$54, () => t.title, null);
-            _$effect((_$p) => _$setProp(_el$54, "style", st(lineKey), _$p));
-            return _el$54;
+            var _el$56 = _$createElement("text"), _el$57 = _$createTextNode(` \u25CF `), _el$58 = _$createTextNode(` `), _el$59 = _$createTextNode(` `);
+            _$insertNode(_el$56, _el$57);
+            _$insertNode(_el$56, _el$58);
+            _$insertNode(_el$56, _el$59);
+            _$insert(_el$56, () => t.id, _el$58);
+            _$insert(_el$56, () => td.modelStr, _el$58);
+            _$insert(_el$56, () => td.label, _el$59);
+            _$insert(_el$56, () => td.revSuffix, _el$59);
+            _$insert(_el$56, () => td.stepStr, _el$59);
+            _$insert(_el$56, () => td.elapsedStr, _el$59);
+            _$insert(_el$56, () => t.title, null);
+            _$effect((_$p) => _$setProp(_el$56, "style", st(td.themeKey), _$p));
+            return _el$56;
           })());
-          const pv = t.model ? (t.model.split("/")[0] ?? "").split("-")[0] : "";
-          const provCoach = pv ? s?.providers?.find((p) => p.id === pv || pv && p.id.startsWith(pv) || pv && pv.startsWith(p.id)) : s?.providers?.[0];
-          const rawPct = provCoach?.fiveHour ?? s?.fiveHour ?? -1;
-          const pct = rawPct < 0 ? 0 : rawPct;
-          const pctLabel = rawPct < 0 ? "n/a" : `${rawPct}%`;
+          const {
+            pct,
+            label: pctLabel
+          } = taskQuotaPct(t, s);
           nodes.push((() => {
-            var _el$58 = _$createElement("box"), _el$59 = _$createElement("text"), _el$61 = _$createElement("text"), _el$62 = _$createElement("text"), _el$63 = _$createElement("text"), _el$64 = _$createTextNode(` `);
-            _$insertNode(_el$58, _el$59);
-            _$insertNode(_el$58, _el$61);
-            _$insertNode(_el$58, _el$62);
-            _$insertNode(_el$58, _el$63);
-            _$setProp(_el$58, "flexDirection", "row");
-            _$insertNode(_el$59, _$createTextNode(` 5h `));
-            _$insert(_el$61, () => barFill(pct));
-            _$insert(_el$62, () => barEmpty(pct));
-            _$insertNode(_el$63, _el$64);
-            _$insert(_el$63, pctLabel, null);
+            var _el$60 = _$createElement("box"), _el$61 = _$createElement("text"), _el$63 = _$createElement("text"), _el$64 = _$createElement("text"), _el$65 = _$createElement("text"), _el$66 = _$createTextNode(` `);
+            _$insertNode(_el$60, _el$61);
+            _$insertNode(_el$60, _el$63);
+            _$insertNode(_el$60, _el$64);
+            _$insertNode(_el$60, _el$65);
+            _$setProp(_el$60, "flexDirection", "row");
+            _$insertNode(_el$61, _$createTextNode(` 5h `));
+            _$insert(_el$63, () => barFill(pct));
+            _$insert(_el$64, () => barEmpty(pct));
+            _$insertNode(_el$65, _el$66);
+            _$insert(_el$65, pctLabel, null);
             _$effect((_p$) => {
               var _v$11 = st("text"), _v$12 = st("text");
-              _v$11 !== _p$.e && (_p$.e = _$setProp(_el$61, "style", _v$11, _p$.e));
-              _v$12 !== _p$.t && (_p$.t = _$setProp(_el$62, "style", _v$12, _p$.t));
+              _v$11 !== _p$.e && (_p$.e = _$setProp(_el$63, "style", _v$11, _p$.e));
+              _v$12 !== _p$.t && (_p$.t = _$setProp(_el$64, "style", _v$12, _p$.t));
               return _p$;
             }, {
               e: void 0,
               t: void 0
             });
-            return _el$58;
+            return _el$60;
           })());
         }
       }
     }
     return (() => {
-      var _el$65 = _$createElement("box");
-      _$setProp(_el$65, "flexDirection", "column");
-      _$insert(_el$65, nodes);
-      return _el$65;
+      var _el$67 = _$createElement("box");
+      _$setProp(_el$67, "flexDirection", "column");
+      _$insert(_el$67, nodes);
+      return _el$67;
     })();
   };
   tlog("registering slots");
@@ -472,9 +520,9 @@ function initializeTui(api, disposeRoot) {
         } catch (e) {
           tlog(`sidebar_footer err: ${String(e)}`);
           result = (() => {
-            var _el$66 = _$createElement("text");
-            _$insertNode(_el$66, _$createTextNode(`usage-coach`));
-            return _el$66;
+            var _el$68 = _$createElement("text");
+            _$insertNode(_el$68, _$createTextNode(`usage-coach`));
+            return _el$68;
           })();
         }
         return result;
