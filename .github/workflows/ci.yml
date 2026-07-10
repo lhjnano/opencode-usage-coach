@@ -21,3 +21,14 @@ jobs:
       - run: bun run typecheck
 
       - run: bun run test:coverage
+
+      # Generate self-hosted coverage badge (committed to repo, no external service)
+      - run: bun run coverage:badge
+
+      - name: Commit coverage badge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add coverage-badge.json
+          git diff --cached --quiet || git commit -m "chore: update coverage badge [skip ci]"
+          git push

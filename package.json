@@ -21,7 +21,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test": "node --import tsx --test test/**/*.test.ts",
-    "test:coverage": "c8 --reporter=text --reporter=lcov node --import tsx --test test/**/*.test.ts",
+    "test:coverage": "c8 --reporter=text --reporter=lcov --reporter=json-summary node --import tsx --test test/**/*.test.ts",
+    "coverage:badge": "node scripts/coverage-badge.mjs",
     "prepack": "tsup"
   },
   "files": [
