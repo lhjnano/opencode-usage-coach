@@ -2,7 +2,7 @@
 
 A closed-loop usage coach and harness for [OpenCode](https://opencode.ai). Built for flat-rate / quota-metered coding plans — it **senses quota → coaches → stops/advances the loop**. Provider-agnostic, configurable via `harness.config.json`.
 
-[![npm version](https://img.shields.io/npm/v/opencode-usage-coach)](https://www.npmjs.com/package/opencode-usage-coach) [![license](https://img.shields.io/npm/l/opencode-usage-coach)](./LICENSE) [![coverage](https://img.shields.io/badge/coverage-planned-yellow)](#) [![Ko-fi](https://img.shields.io/badge/Ko--fi-sponsor-FF5E5B)](https://ko-fi.com/lhjnano) [![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-ea4aaa)](https://github.com/sponsors/lhjnano)
+[![npm version](https://img.shields.io/npm/v/opencode-usage-coach)](https://www.npmjs.com/package/opencode-usage-coach) [![license](https://img.shields.io/npm/l/opencode-usage-coach)](./LICENSE) [![Ko-fi](https://img.shields.io/badge/Ko--fi-sponsor-FF5E5B)](https://ko-fi.com/lhjnano) [![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-ea4aaa)](https://github.com/sponsors/lhjnano)
 
 ## Features
 

@@ -827,7 +827,7 @@ Questions for the user (${r.questions.length}):`);
   if (r.rawAnalysis) L.push(`
 Raw analysis: ${r.rawAnalysis.slice(0, 200)}`);
   L.push("\n[usage-coach NEXT] unknowns reviewed:");
-  L.push("  - If questions are flagged, ask the user first.");
+  L.push("  - If questions are flagged, call question() to present them to the user.");
   L.push("  - If task splits are suggested, adjust via task_update.");
   L.push("  - Then proceed to generate/generate_batch.");
   return L.join("\n");
@@ -870,11 +870,27 @@ function checkScanGate(sessionID) {
   try {
     const h = readHarness(sessionID);
     if (!h || !h.scanRequired) return { warning: null, summary: null };
-    if (h.scanDone) return { warning: null, summary: h.scanSummary ?? null };
-    return {
-      warning: `\u26A0 DIAGNOSIS GATE: unknown_scan was NOT called before this generate. You are generating without pre-flight gap analysis. Blind spots (unknown unknowns) may cause wrong assumptions and waste steps. Call unknown_scan first, OR proceed consciously accepting the risk.`,
-      summary: null
-    };
+    if (!h.scanDone) {
+      return {
+        warning: `\u26A0 DIAGNOSIS GATE: unknown_scan was NOT called before this generate. You are generating without pre-flight gap analysis. Blind spots (unknown unknowns) may cause wrong assumptions and waste steps. Call unknown_scan first, OR proceed consciously accepting the risk.`,
+        summary: null
+      };
+    }
+    if (h.unknownScan?.questions?.length && !h.questionsResolved) {
+      return {
+        warning: `\u26A0 UNRESOLVED QUESTIONS: unknown_scan found ${h.unknownScan.questions.length} question(s) for the user, but the question tool was not called. You MUST call question() to present these to the user before generating. The answers materially affect the approach. Do NOT proceed without asking.`,
+        summary: h.scanSummary ?? null
+      };
+    }
+    let summary = h.scanSummary ?? null;
+    if (h.questionsResolved && h.questionAnswers) {
+      const answers = Object.entries(h.questionAnswers).map(([id, ans]) => `  ${id}: ${ans}`).join("\n");
+      summary = summary ? `${summary}
+User answers to scan questions:
+${answers}` : `User answers to scan questions:
+${answers}`;
+    }
+    return { warning: null, summary };
   } catch {
     return { warning: null, summary: null };
   }
@@ -1272,7 +1288,7 @@ async function UsageCoachPlugin(input) {
         const agent = await resolveAgent(input.client, _input.sessionID);
         currentAgent = agent;
         refreshBackground();
-        const harnessTools = ["unknown_scan", "generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure", "reverse_interview"];
+        const harnessTools = ["unknown_scan", "question", "generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure", "reverse_interview"];
         if (!harnessTools.includes(_input.tool)) return;
         if (!isHarnessAgent(agent)) {
           throw new Error(`[${PLUGIN_NAME}] '${_input.tool}' is restricted to agent mode ${JSON.stringify(HARNESS_AGENTS)} (current: ${JSON.stringify(agent || "unknown")}). Switch to that agent mode to use it.`);
@@ -1318,9 +1334,11 @@ async function UsageCoachPlugin(input) {
 \u26A0 DIAGNOSIS GATE \u2014 unknown_scan is REQUIRED before generate/generate_batch.
   unknown_scan({ prompt: "<user request>", tasks: [{id:1, title:"..."}, ...] })
   If you skip it, generate will inject a \u26A0 warning into the sub-session prompt.
-  Review the report: if QUESTIONS are flagged \u2192 ask the user first. If TASK
-  REFINEMENTS are suggested \u2192 apply via task_update. Unknown unknowns found will
-  be automatically injected into generate prompts as context.
+  Review the report: if QUESTIONS are flagged \u2192 call question() to present them
+  to the user BEFORE generate (it is enforced \u2014 generate will block with a
+  warning until answers are recorded). If TASK REFINEMENTS are suggested \u2192
+  apply via task_update. Unknown unknowns found will be automatically injected
+  into generate prompts as context.
 
 STEP LIMIT (default ${DEFAULT_MAX_STEPS}): each generate call creates a sub-session that is automatically aborted if it exceeds ${DEFAULT_MAX_STEPS} assistant steps. Before starting the loop, review each task: can it be completed in a focused, single-pass effort? If a task seems too broad (multiple files, multiple features, open-ended research), SPLIT it now into 2-3 smaller subtasks. A timeout wastes quota \u2014 split upfront.
 
@@ -1460,6 +1478,42 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             }
             writeUnknownScan(ctx.sessionID, result);
             return formatReport(result);
+          }
+        }),
+        question: tool({
+          description: "Present unknown_scan questions to the user. REQUIRED after unknown_scan finds questions \u2014 call BEFORE generate. First call (no answers) returns the questions formatted for presentation. Present them to the user, then call again with their answers.",
+          args: {
+            answers: tool.schema.record(tool.schema.string(), tool.schema.string()).optional().describe(`User's answers keyed by question ID (e.g. {"Q1": "yes", "Q2": "node"}). Omit on first call to get the questions.`)
+          },
+          async execute(args, ctx) {
+            const h = readHarness(ctx.sessionID);
+            if (!h || !h.unknownScan || !h.unknownScan.questions?.length) {
+              return "No questions from unknown_scan. [usage-coach NEXT] proceed to generate.";
+            }
+            const questions = h.unknownScan.questions;
+            if (!args.answers) {
+              const lines2 = [`unknown_scan found ${questions.length} question(s) that need user input before proceeding:
+`];
+              questions.forEach((q) => {
+                lines2.push(`[${q.id}] ${q.question}`);
+              });
+              lines2.push('\nPresent ALL of these questions to the user. Collect their answers, then call question({ answers: { "' + questions[0].id + '": "..." } }) with ALL answers.');
+              lines2.push("[usage-coach NEXT] Present the questions above to the user verbatim. After they respond, call question({answers:{...}}) to record answers, then proceed to generate.");
+              return lines2.join("\n");
+            }
+            h.questionsResolved = true;
+            h.questionAnswers = args.answers;
+            writeHarness(ctx.sessionID, h);
+            const answered = Object.keys(args.answers).length;
+            const lines = [`Questions resolved (${answered}/${questions.length} answered).
+`];
+            questions.forEach((q) => {
+              const ans = args.answers[q.id];
+              if (ans) lines.push(`  ${q.id}: ${q.question}
+  \u2192 ${ans}`);
+            });
+            lines.push("\n[usage-coach NEXT] Answers recorded. Proceed to generate \u2014 they will be injected into the sub-session prompt.");
+            return lines.join("\n");
           }
         }),
         task_update: tool({
@@ -2039,5 +2093,13 @@ If the task is already well-specified with no significant ambiguities, return {"
   }
 }
 export {
-  UsageCoachPlugin as default
+  buildScanSummary,
+  coach,
+  UsageCoachPlugin as default,
+  detectLanguage,
+  extractImplNotes,
+  extractKeywords,
+  parseFileList,
+  parseGapAnalysis,
+  providerAdvice
 };

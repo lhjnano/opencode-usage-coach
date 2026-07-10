@@ -20,6 +20,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "test:coverage": "c8 --reporter=text --reporter=lcov node --import tsx --test test/**/*.test.ts",
     "prepack": "tsup"
   },
   "files": [
@@ -50,12 +52,14 @@
     "@opencode-ai/plugin": "*",
     "@opentui/core": ">=0.4.0",
     "@opentui/solid": ">=0.4.0",
+    "c8": "^11.0.0",
     "esbuild-plugin-solid": "^0.6.0",
     "eslint": "^10.6.0",
     "eslint-plugin-solid": "^0.14.5",
     "globals": "^17.7.0",
     "solid-js": "^1.9",
     "tsup": "^8.5",
+    "tsx": "^4.23.0",
     "typescript": "^5",
     "typescript-eslint": "^8.63.0"
   }
