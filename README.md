@@ -49,6 +49,18 @@ For local dev without npm: `bun install && bun run build`, then point both confi
 
 Four config surfaces; only the first two (install config + codexbar) are required to run. The **harness config** (`harness.config.json`) maps roles to models so per-model quota is tracked — set `generator` (required) and optionally `grader`, `lighterModel`, and `provider`. Thresholds and tuning live in env vars (`UC_STOP_5H`, `UC_THROTTLE_5H`, …).
 
+### Changing models at runtime
+
+Type `/coach-config` in the TUI to view or update harness models interactively. The AI calls the `coach_config` tool, which reads/writes `harness.config.json` with merge semantics — no manual JSON editing required:
+
+```
+/coach-config                              # view current config
+"change generator to anthropic/claude-sonnet-4-20250514"
+"set grader and lighterModel to opencode/mimo-v2.5-free"
+```
+
+Changes take effect immediately for new `generate` / `grade` calls.
+
 See **[docs/configuration.md](docs/configuration.md)** for the full reference (env var table, harness config fields, agent-mode scoping, local dev setup).
 
 ## Harness Loop
