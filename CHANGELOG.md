@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-07-11
+
+### Fixed
+- **Parallel harness race condition.** When `generate_batch` runs tasks in parallel, each task's
+  poller independently calls `updateSubSession` / `clearSubSession` to write progress to
+  `harness.json`. The old read-modify-write pattern (`readHarness` → modify → `writeHarness`)
+  was not atomic — concurrent pollers could read stale state and overwrite each other's writes,
+  causing completed tasks' `subElapsed` to keep ticking (the "time flows together" bug).
+  Added `mutateHarness()` — a per-session promise-chained queue that serializes mutations so
+  they execute one-after-another, never interleaved.
+
 ## [0.10.1] - 2026-07-11
 
 ### Fixed

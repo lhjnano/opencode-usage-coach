@@ -377,6 +377,22 @@ function writeHarness(sessionID, h) {
   } catch {
   }
 }
+var harnessQueue = /* @__PURE__ */ new Map();
+function mutateHarness(sessionID, fn) {
+  const prev = harnessQueue.get(sessionID) ?? Promise.resolve();
+  const next = prev.then(() => {
+    const h = readHarness(sessionID);
+    if (!h) return;
+    const result = fn(h);
+    writeHarness(sessionID, result ?? h);
+  }).catch(() => {
+  });
+  harnessQueue.set(sessionID, next);
+  next.finally(() => {
+    if (harnessQueue.get(sessionID) === next) harnessQueue.delete(sessionID);
+  });
+  return next;
+}
 function interviewFile(sessionID) {
   return join2(STATE_DIR, sessionID || "_default", "interview.json");
 }
@@ -508,29 +524,20 @@ Output JSON ONLY (no markdown fences, no prose):
   return formatCompleteOutput(state);
 }
 function updateSubSession(sessionID, taskId, fields) {
-  try {
-    const h = readHarness(sessionID);
-    if (!h) return;
+  return mutateHarness(sessionID, (h) => {
     const t = h.tasks.find((x) => x.id === taskId);
-    if (!t) return;
-    Object.assign(t, fields);
-    writeHarness(sessionID, h);
-  } catch {
-  }
+    if (t) Object.assign(t, fields);
+  });
 }
 function clearSubSession(sessionID, taskId) {
-  try {
-    const h = readHarness(sessionID);
-    if (!h) return;
+  return mutateHarness(sessionID, (h) => {
     const t = h.tasks.find((x) => x.id === taskId);
     if (!t) return;
     t.subSessionId = void 0;
     t.subStep = void 0;
     t.lastActivity = void 0;
     t.subElapsed = void 0;
-    writeHarness(sessionID, h);
-  } catch {
-  }
+  });
 }
 function findActiveTaskId(sessionID, status) {
   try {

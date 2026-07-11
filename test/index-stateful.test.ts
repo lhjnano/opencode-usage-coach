@@ -127,8 +127,8 @@ test("checkScanGate: returns null warning + null summary when scanRequired is fa
 
 // ── updateSubSession ─────────────────────────────────────────────────────────
 
-test("updateSubSession: updates fields on an existing task", () => {
-  updateSubSession(SESSION, 1, { subSessionId: "sub-123", subStep: 5, status: "generating" });
+test("updateSubSession: updates fields on an existing task", async () => {
+  await updateSubSession(SESSION, 1, { subSessionId: "sub-123", subStep: 5, status: "generating" });
   const h = readHarness(SESSION)!;
   const t = h.tasks.find((x: any) => x.id === 1);
   assert.equal(t.subSessionId, "sub-123");
@@ -136,14 +136,13 @@ test("updateSubSession: updates fields on an existing task", () => {
   assert.equal(t.status, "generating");
 });
 
-test("updateSubSession: does nothing (no throw) for non-existent session", () => {
-  assert.doesNotThrow(() => {
-    updateSubSession("nonexistent-session", 1, { subStep: 99 });
-  });
+test("updateSubSession: does nothing (no throw) for non-existent session", async () => {
+  await updateSubSession("nonexistent-session", 1, { subStep: 99 });
+  // Should not throw — just silently no-op.
 });
 
-test("updateSubSession: does nothing (no throw) for non-existent task", () => {
-  updateSubSession(SESSION, 999, { subStep: 99 });
+test("updateSubSession: does nothing (no throw) for non-existent task", async () => {
+  await updateSubSession(SESSION, 999, { subStep: 99 });
   const h = readHarness(SESSION)!;
   // All tasks unchanged.
   const t = h.tasks.find((x: any) => x.id === 1);
@@ -152,13 +151,13 @@ test("updateSubSession: does nothing (no throw) for non-existent task", () => {
 
 // ── clearSubSession ──────────────────────────────────────────────────────────
 
-test("clearSubSession: clears sub-session fields on an existing task", () => {
+test("clearSubSession: clears sub-session fields on an existing task", async () => {
   // First set the fields via updateSubSession.
-  updateSubSession(SESSION, 1, {
+  await updateSubSession(SESSION, 1, {
     subSessionId: "sub-xyz", subStep: 10, lastActivity: "2025-01-01T00:00:00Z", subElapsed: 30,
   });
   // Then clear them.
-  clearSubSession(SESSION, 1);
+  await clearSubSession(SESSION, 1);
 
   const h = readHarness(SESSION)!;
   const t = h.tasks.find((x: any) => x.id === 1);
@@ -168,10 +167,9 @@ test("clearSubSession: clears sub-session fields on an existing task", () => {
   assert.equal(t.subElapsed, undefined, "subElapsed should be cleared");
 });
 
-test("clearSubSession: does nothing (no throw) for non-existent session", () => {
-  assert.doesNotThrow(() => {
-    clearSubSession("nonexistent-session", 1);
-  });
+test("clearSubSession: does nothing (no throw) for non-existent session", async () => {
+  await clearSubSession("nonexistent-session", 1);
+  // Should not throw — just silently no-op.
 });
 
 // ── findActiveTaskId ─────────────────────────────────────────────────────────

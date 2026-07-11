@@ -178,7 +178,7 @@ test("Scenario 2: scan with empty questions array → gate passes immediately", 
 // Scenario 3: Task state transitions across the full harness loop
 // ═══════════════════════════════════════════════════════════════════════════════
 
-test("Scenario 3: full 3-task harness loop — pending→generating→grading→completed", () => {
+test("Scenario 3: full 3-task harness loop — pending→generating→grading→completed", async () => {
   const S = "s3-full-loop";
   const TOTAL = 3;
 
@@ -198,7 +198,7 @@ test("Scenario 3: full 3-task harness loop — pending→generating→grading→
     assert.equal(findActiveTaskId(S, "generating"), i, `task ${i} should be generating`);
 
     // runModel poller: updateSubSession tracks progress
-    updateSubSession(S, i, { subSessionId: `sub-${i}`, subStep: i * 3, subElapsed: i * 10 });
+    await updateSubSession(S, i, { subSessionId: `sub-${i}`, subStep: i * 3, subElapsed: i * 10 });
     {
       const h = readHarness(S)!;
       const t = h.tasks.find((x: any) => x.id === i)!;
@@ -207,7 +207,7 @@ test("Scenario 3: full 3-task harness loop — pending→generating→grading→
     }
 
     // Generation completes: clearSubSession (runModel's finally block)
-    clearSubSession(S, i);
+    await clearSubSession(S, i);
     {
       const h = readHarness(S)!;
       const t = h.tasks.find((x: any) => x.id === i)!;
@@ -275,18 +275,17 @@ test("Scenario 3b: failing task lifecycle — generating→grading→revising→
 // Scenario 4: Concurrency stress — parallel writes don't lose data
 // ═══════════════════════════════════════════════════════════════════════════════
 
-test("Scenario 4a: synchronous concurrent updateSubSession calls preserve all writes", async () => {
+test("Scenario 4a: concurrent updateSubSession calls preserve all writes (atomic queue)", async () => {
   const S = "s4-sync-race";
   writeHarness(S, makeHarness("s4-sync", 3));
 
-  // Fire 3 "concurrent" updateSubSession calls. Since updateSubSession is fully
-  // synchronous (readFileSync→modify→writeFileSync, no await between), Node's
-  // single-threaded event loop executes each call atomically. No interleaving
-  // is possible. All 3 updates MUST survive.
+  // Fire 3 concurrent updateSubSession calls. updateSubSession uses an atomic
+  // mutation queue (mutateHarness) that serializes read-modify-write per session,
+  // preventing last-writer-wins data loss. All 3 updates MUST survive.
   await Promise.all([
-    Promise.resolve(updateSubSession(S, 1, { subSessionId: "sub-1", subStep: 1 })),
-    Promise.resolve(updateSubSession(S, 2, { subSessionId: "sub-2", subStep: 2 })),
-    Promise.resolve(updateSubSession(S, 3, { subSessionId: "sub-3", subStep: 3 })),
+    updateSubSession(S, 1, { subSessionId: "sub-1", subStep: 1 }),
+    updateSubSession(S, 2, { subSessionId: "sub-2", subStep: 2 }),
+    updateSubSession(S, 3, { subSessionId: "sub-3", subStep: 3 }),
   ]);
 
   const h = readHarness(S)!;
@@ -297,14 +296,14 @@ test("Scenario 4a: synchronous concurrent updateSubSession calls preserve all wr
   }
 });
 
-test("Scenario 4b: rapid sequential updateSubSession on same task preserves latest", () => {
+test("Scenario 4b: rapid sequential updateSubSession on same task preserves latest", async () => {
   const S = "s4-rapid-seq";
   writeHarness(S, makeHarness("s4-seq", 1));
 
-  // Fire 50 rapid updates on the same task — each read-modify-write is atomic,
-  // so the LAST value wins (expected behavior, not a bug).
+  // Fire 50 rapid updates on the same task — each read-modify-write is serialized
+  // via the atomic queue, so the LAST value wins (expected behavior).
   for (let i = 0; i < 50; i++) {
-    updateSubSession(S, 1, { subStep: i });
+    await updateSubSession(S, 1, { subStep: i });
   }
 
   const h = readHarness(S)!;
@@ -312,49 +311,44 @@ test("Scenario 4b: rapid sequential updateSubSession on same task preserves late
   assert.equal(t.subStep, 49, "last sequential update should be preserved");
 });
 
-test("Scenario 4c: BUG FOUND — async read-modify-write loses data (race condition)", async () => {
-  // BUG FOUND: updateSubSession/clearSubSession/task_update all use a synchronous
-  // read-modify-write pattern (readFileSync→JSON.parse→modify→writeFileSync).
-  // This is currently SAFE because Node.js is single-threaded and sync I/O blocks
-  // the event loop — no two calls can interleave.
+test("Scenario 4c: atomic queue prevents race condition in concurrent writes", async () => {
+  // Previously (v0.10.1), updateSubSession/clearSubSession used a synchronous
+  // read-modify-write pattern. This was safe only because Node.js is single-threaded
+  // and sync I/O blocks the event loop. But the poller callbacks in setInterval
+  // are ASYNC (they await client.session.messages), meaning two pollers CAN
+  // interleave between read and write, causing last-writer-wins data loss.
   //
-  // HOWEVER: if any of these functions are EVER refactored to use async I/O
-  // (fs.promises.readFile / writeFile), the read-modify-write becomes vulnerable
-  // to last-writer-wins data loss. This test DEMONSTRATES that vulnerability by
-  // simulating the async pattern with a yield between read and write.
+  // FIX: mutateHarness serializes mutations per session via a promise chain,
+  // so concurrent calls execute one-after-another (never interleaved).
   //
-  // The generate_batch poller (runModel's setInterval callback) calls
-  // updateSubSession for different tasks concurrently in production. If the I/O
-  // were async, parallel pollers would read stale state and overwrite each other.
+  // This test verifies the fix: concurrent updates to DIFFERENT tasks should
+  // ALL survive, and a concurrent clearSubSession should not be overwritten.
 
-  const S = "s4-async-race";
-  writeHarness(S, makeHarness("s4-async", 3));
+  const S = "s4-atomic-fix";
+  writeHarness(S, makeHarness("s4-atomic", 3));
 
-  // Simulate what updateSubSession WOULD do if it used async I/O (fs.promises).
-  const asyncUpdate = async (taskId: number, fields: Record<string, any>) => {
-    const h = readHarness(S)!; // READ (sync for test, but conceptually async)
-    await new Promise((r) => setTimeout(r, 1)); // YIELD — simulates async I/O gap
-    const t = h.tasks.find((x: any) => x.id === taskId);
-    if (t) Object.assign(t, fields);
-    writeHarness(S, h); // WRITE — uses stale read!
-  };
-
+  // Step 1: Set all 3 tasks' subElapsed simultaneously (simulates 3 pollers)
   await Promise.all([
-    asyncUpdate(1, { subSessionId: "sub-1" }),
-    asyncUpdate(2, { subSessionId: "sub-2" }),
-    asyncUpdate(3, { subSessionId: "sub-3" }),
+    updateSubSession(S, 1, { subElapsed: 10 }),
+    updateSubSession(S, 2, { subElapsed: 20 }),
+    updateSubSession(S, 3, { subElapsed: 30 }),
   ]);
 
-  const h = readHarness(S)!;
-  const updatedCount = h.tasks.filter((t: any) => t.subSessionId).length;
+  let h = readHarness(S)!;
+  let count = h.tasks.filter((t: any) => t.subElapsed !== undefined).length;
+  assert.equal(count, 3, `all 3 tasks should have subElapsed set (got ${count})`);
 
-  // With the async gap, all 3 reads captured the SAME stale state (before any write).
-  // Each write overwrites the previous one. Only the LAST writer's task survives.
-  assert.ok(
-    updatedCount < 3,
-    `RACE CONDITION CONFIRMED: only ${updatedCount}/3 tasks preserved (expected < 3). ` +
-      `If updateSubSession becomes async, generate_batch pollers WILL lose task updates silently.`,
-  );
+  // Step 2: Clear task 1 while simultaneously updating task 2 (the original bug)
+  await Promise.all([
+    clearSubSession(S, 1),
+    updateSubSession(S, 2, { subElapsed: 25 }),
+  ]);
+
+  h = readHarness(S)!;
+  const t1 = h.tasks.find((x: any) => x.id === 1)!;
+  const t2 = h.tasks.find((x: any) => x.id === 2)!;
+  assert.equal(t1.subElapsed, undefined, "task 1 cleared — must stay cleared (no clobber)");
+  assert.equal(t2.subElapsed, 25, "task 2 updated — must have latest value");
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

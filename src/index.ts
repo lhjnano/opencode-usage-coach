@@ -243,6 +243,26 @@ function writeHarness(sessionID: string, h: HarnessJson) {
   try { const f = harnessFile(sessionID); mkdirSync(dirname(f), { recursive: true }); h.updatedAt = new Date().toISOString(); writeFileSync(f, JSON.stringify(h, null, 2)); } catch { /* */ }
 }
 
+// ── Atomic harness mutation ───────────────────────────────────────────────────
+// Concurrent pollers (from parallel generate_batch tasks) all read-modify-write
+// harness.json. Without serialization, later writes overwrite earlier ones (e.g.
+// clearSubSession is undone by a concurrent updateSubSession that read stale data).
+// This queue chains mutations so they execute one-after-another, never interleaved.
+const harnessQueue: Map<string, Promise<void>> = new Map();
+function mutateHarness(sessionID: string, fn: (h: HarnessJson) => HarnessJson | void): Promise<void> {
+  const prev = harnessQueue.get(sessionID) ?? Promise.resolve();
+  const next = prev.then(() => {
+    const h = readHarness(sessionID);
+    if (!h) return;
+    const result = fn(h);
+    writeHarness(sessionID, result ?? h);
+  }).catch(() => { /* swallow — queue must not break */ });
+  harnessQueue.set(sessionID, next);
+  // Auto-cleanup: drop the entry once the chain settles to avoid unbounded growth.
+  next.finally(() => { if (harnessQueue.get(sessionID) === next) harnessQueue.delete(sessionID); });
+  return next;
+}
+
 // ── Reverse interview state ──────────────────────────────────────────────────
 // Stateful across multiple tool calls (each call = one question round). Persists
 // in STATE_DIR/<sessionID>/interview.json, mirroring harness.json's pattern.
@@ -397,28 +417,22 @@ async function completeInterview(state: InterviewState, sessionID: string, clien
 
 // Sub-session progress tracking — updates/clears sub-session fields on a harness task.
 // runModel's poller calls updateSubSession every 5s; clearSubSession runs on completion.
-function updateSubSession(sessionID: string, taskId: number, fields: Record<string, any>) {
-  try {
-    const h = readHarness(sessionID);
-    if (!h) return;
+// Both go through mutateHarness (atomic queue) so parallel pollers can't clobber each other.
+function updateSubSession(sessionID: string, taskId: number, fields: Record<string, any>): Promise<void> {
+  return mutateHarness(sessionID, (h) => {
     const t = h.tasks.find((x: any) => x.id === taskId);
-    if (!t) return;
-    Object.assign(t, fields);
-    writeHarness(sessionID, h);
-  } catch { /* */ }
+    if (t) Object.assign(t, fields);
+  });
 }
-function clearSubSession(sessionID: string, taskId: number) {
-  try {
-    const h = readHarness(sessionID);
-    if (!h) return;
+function clearSubSession(sessionID: string, taskId: number): Promise<void> {
+  return mutateHarness(sessionID, (h) => {
     const t = h.tasks.find((x: any) => x.id === taskId);
     if (!t) return;
     t.subSessionId = undefined;
     t.subStep = undefined;
     t.lastActivity = undefined;
     t.subElapsed = undefined;
-    writeHarness(sessionID, h);
-  } catch { /* */ }
+  });
 }
 // Find the harness task currently in a given status (for correlating runModel with a task).
 function findActiveTaskId(sessionID: string, status: string): number | undefined {
