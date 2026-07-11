@@ -58,7 +58,7 @@ test("writeEdges: stamps ts when not provided", () => {
   const a = addDomainNode({ type: "fact", name: "nots-a", props: {}, source: "", confidence: 0.7 });
   const b = addDomainNode({ type: "fact", name: "nots-b", props: {}, source: "", confidence: 0.7 });
 
-  writeEdges([{ from: a, to: b, rel: "related-to" }]);
+  writeEdges([{ from: a, to: b, rel: "related-to", ts: new Date().toISOString() }]);
   const edge = readEdges().find((e) => e.from === a && e.to === b && e.rel === "related-to");
   assert.ok(edge, "edge should exist");
   assert.ok(edge!.ts, "ts should be auto-stamped when not provided");

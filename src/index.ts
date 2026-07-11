@@ -1096,17 +1096,15 @@ function fetchQuota(provider: string): Promise<Quota | null> {
 }
 
 /** fetchQuota with retry: max 3 attempts with 1s, 2s delays between failures. */
-function fetchQuotaWithRetry(provider: string, maxRetries = 3): Promise<Quota | null> {
-  return new Promise(async (resolve) => {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const q = await fetchQuota(provider);
-      if (q) return resolve(q);
-      if (attempt < maxRetries - 1) {
-        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-      }
+async function fetchQuotaWithRetry(provider: string, maxRetries = 3): Promise<Quota | null> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const q = await fetchQuota(provider);
+    if (q) return q;
+    if (attempt < maxRetries - 1) {
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
     }
-    resolve(null);
-  });
+  }
+  return null;
 }
 
 function coach(q: Quota | null, lighter: string): Coaching {

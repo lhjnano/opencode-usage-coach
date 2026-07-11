@@ -28,15 +28,15 @@ const makeQuota = (weekly: number, monthly: number, fiveHour: number) => ({
 });
 
 const emptyProfile = {
-  skipped: false,
+  skipped: false as boolean,
   language: "unknown",
-  frameworks: [],
-  structure: [],
-  manifestFiles: [],
-  keyDeps: [],
-  configFiles: [],
+  frameworks: [] as string[],
+  structure: [] as { dir: string; fileCount: number }[],
+  manifestFiles: [] as string[],
+  keyDeps: [] as string[],
+  configFiles: [] as string[],
   totalFiles: 0,
-} as const;
+};
 
 // ── extractKeywords ──────────────────────────────────────────────────────────
 test("extractKeywords: extracts meaningful tokens from text", () => {

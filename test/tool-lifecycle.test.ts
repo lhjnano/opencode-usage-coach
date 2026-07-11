@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import {
   setStateDir, readHarness, writeHarness, readRules,
   checkScanGate, updateSubSession, clearSubSession, findActiveTaskId,
-  buildScanSummary, extractImplNotes, extractKeywords,
+  buildScanSummary, extractImplNotes,
 } from "../src/index.js";
 import type { HarnessJson, UnknownScanResult } from "../src/index.js";
 

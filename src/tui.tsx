@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRoot, createSignal, onCleanup } from "solid-js";
 import {
-  STALE_MS, HIDE_MS, TAG, TLABEL, STATUS_KEY, TERMINAL_STATUSES,
+  TAG,
   barFill, barEmpty,
   computeStaleness, isHarnessVisible,
   computeTaskDisplay, taskQuotaPct, decisionThemeKey,

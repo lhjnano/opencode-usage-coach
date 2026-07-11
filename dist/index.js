@@ -1169,17 +1169,15 @@ function fetchQuota(provider) {
     });
   });
 }
-function fetchQuotaWithRetry(provider, maxRetries = 3) {
-  return new Promise(async (resolve2) => {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const q = await fetchQuota(provider);
-      if (q) return resolve2(q);
-      if (attempt < maxRetries - 1) {
-        await new Promise((r) => setTimeout(r, 1e3 * (attempt + 1)));
-      }
+async function fetchQuotaWithRetry(provider, maxRetries = 3) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const q = await fetchQuota(provider);
+    if (q) return q;
+    if (attempt < maxRetries - 1) {
+      await new Promise((r) => setTimeout(r, 1e3 * (attempt + 1)));
     }
-    resolve2(null);
-  });
+  }
+  return null;
 }
 function coach(q, lighter) {
   if (!q) return { decision: "GO", advice: "quota unavailable \u2014 retrying. proceeding cautiously.", weekly: -2, monthly: -2, fiveHour: -2 };
