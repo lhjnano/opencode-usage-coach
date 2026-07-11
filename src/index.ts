@@ -843,6 +843,22 @@ function readHarnessCfg(dir: string): HarnessCfg {
            ...tryRead(join(dir, "harness.config.json")) };
 }
 
+// Write harness config to the GLOBAL config path (~/.config/opencode-usage-coach/harness.config.json).
+// Merges with existing values so partial updates don't erase other fields.
+function writeHarnessCfg(updates: HarnessCfg): string {
+  const configDir = join(homedir(), ".config", "opencode-usage-coach");
+  const configPath = join(configDir, "harness.config.json");
+  try {
+    mkdirSync(configDir, { recursive: true });
+    const existing = (() => { try { return JSON.parse(readFileSync(configPath, "utf8")); } catch { return {}; } })();
+    const merged = { ...existing, ...updates };
+    writeFileSync(configPath, JSON.stringify(merged, null, 2) + "\n");
+    return configPath;
+  } catch (e) {
+    throw new Error(`Failed to write harness config: ${String(e)}`, { cause: e });
+  }
+}
+
 // Run a specific model in a NEW session. session.prompt() blocks until the sub-session's
 // agent loop completes. A poller runs every WATCHDOG_POLL_MS during the blocking call:
 //   1. Estimates step count from session.messages (assistant turns) for TUI display.
@@ -1953,6 +1969,64 @@ If the task is already well-specified with no significant ambiguities, return {"
             return formatQuestionOutput(qNum, total, q);
           },
         }),
+
+        coach_config: tool({
+          description: 'View or update harness model configuration (generator, grader, lighterModel, provider). Call with no args to view current config. Pass any combination of generator/grader/lighterModel/provider to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free" })',
+          args: {
+            generator: tool.schema.string().optional(),
+            grader: tool.schema.string().optional(),
+            lighterModel: tool.schema.string().optional(),
+            provider: tool.schema.string().optional(),
+          },
+          async execute(args: { generator?: string; grader?: string; lighterModel?: string; provider?: string }, ctx: any) {
+            const dir = (ctx as any)?.directory ?? input.directory;
+            const current = readHarnessCfg(dir);
+
+            // If no args → view mode
+            const hasUpdates = args.generator !== undefined || args.grader !== undefined ||
+                               args.lighterModel !== undefined || args.provider !== undefined;
+            if (!hasUpdates) {
+              const envOverrides: string[] = [];
+              if (process.env.UC_PROVIDER) envOverrides.push(`UC_PROVIDER=${process.env.UC_PROVIDER}`);
+              if (process.env.UC_LIGHTER_MODEL) envOverrides.push(`UC_LIGHTER_MODEL=${process.env.UC_LIGHTER_MODEL}`);
+              return [
+                `Harness Configuration`,
+                `═══════════════════════════════════════════════`,
+                `  generator:     ${current.generator ?? "(not set — harness won't work!)"}`,
+                `  grader:        ${current.grader ?? "(defaults to generator)"}`,
+                `  lighterModel:  ${current.lighterModel ?? "(not set — no THROTTLE fallback)"}`,
+                `  provider:      ${current.provider ?? "(auto-detected from model)"}`,
+                `═══════════════════════════════════════════════`,
+                envOverrides.length > 0 ? `\nEnvironment overrides (take precedence):\n  ${envOverrides.join("\n  ")}` : "",
+                `\nConfig file: ~/.config/opencode-usage-coach/harness.config.json`,
+                `\nTo update, call: coach_config({ generator: "provider/model-id", ... })`,
+              ].filter(Boolean).join("\n");
+            }
+
+            // Build updates object (only fields that were provided)
+            const updates: HarnessCfg = {};
+            if (args.generator !== undefined) updates.generator = args.generator.trim();
+            if (args.grader !== undefined) updates.grader = args.grader.trim();
+            if (args.lighterModel !== undefined) updates.lighterModel = args.lighterModel.trim();
+            if (args.provider !== undefined) updates.provider = args.provider.trim();
+
+            const writtenPath = writeHarnessCfg(updates);
+            const updated = readHarnessCfg(dir);
+
+            return [
+              `✅ Harness config updated successfully!`,
+              `═══════════════════════════════════════════════`,
+              `  generator:     ${updated.generator ?? "(not set)"}`,
+              `  grader:        ${updated.grader ?? "(defaults to generator)"}`,
+              `  lighterModel:  ${updated.lighterModel ?? "(not set)"}`,
+              `  provider:      ${updated.provider ?? "(auto-detected)"}`,
+              `═══════════════════════════════════════════════`,
+              `\nSaved to: ${writtenPath}`,
+              `\nNote: Changes take effect immediately for new generate/grade calls.`,
+              `       A running harness will pick up the new config on the next tool call.`,
+            ].join("\n");
+          },
+        }),
       },
     };
   } catch (e) {
@@ -1970,5 +2044,6 @@ export {
   isHarnessAgent, humanRemaining,
   setStateDir, readHarness, writeHarness, readRules,
   checkScanGate, updateSubSession, clearSubSession, findActiveTaskId,
+  readHarnessCfg, writeHarnessCfg,
 };
 export type { Quota, Coaching, CodebaseProfile, UnknownScanResult, HarnessJson };

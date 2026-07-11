@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-11
+
+### Added
+- **`coach_config` tool.** View and update harness model configuration at runtime without manually
+  editing JSON. Call with no args to view current config; pass `generator` / `grader` / `lighterModel`
+  / `provider` to update. Changes merge with existing config (partial updates don't erase other fields)
+  and take effect immediately for new `generate` / `grade` calls.
+- **`/coach-config` command.** Slash command for interactive config management. Type `/coach-config`
+  in the TUI to view current models, then ask the AI to change any field.
+
+### Changed
+- `writeHarnessCfg()` helper: writes to the global config path
+  (`~/.config/opencode-usage-coach/harness.config.json`) with merge semantics.
+- `readHarnessCfg` and `writeHarnessCfg` exported for testing.
+
 ## [0.9.1] - 2026-07-11
 
 ### Fixed
