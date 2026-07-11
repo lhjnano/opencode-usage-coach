@@ -53,6 +53,7 @@
     "@opencode-ai/plugin": "*",
     "@opentui/core": ">=0.4.0",
     "@opentui/solid": ">=0.4.0",
+    "@types/node": "^26.1.1",
     "c8": "^11.0.0",
     "esbuild-plugin-solid": "^0.6.0",
     "eslint": "^10.6.0",
