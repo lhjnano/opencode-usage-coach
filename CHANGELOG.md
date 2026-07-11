@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-07-11
+
+### Fixed
+- **CI pipeline failures.** Three root causes resolved:
+  - `@types/node` missing from devDependencies — fresh `bun install` (as CI does) couldn't resolve
+    `node:*` module imports or `process` references during `tsc --noEmit`. Added explicitly.
+  - ESLint `no-undef` on `scripts/coverage-badge.mjs` — eslint flat config didn't cover `.mjs` files.
+    Added `scripts/**/*.mjs` config block with Node.js globals.
+  - ESLint `no-async-promise-executor` on `fetchQuotaWithRetry` — refactored from
+    `new Promise(async ...)` to plain `async function`.
+- **CI coverage badge push permission.** Default `GITHUB_TOKEN` lacked `contents: write`.
+  Added `permissions: contents: write` to workflow.
+
 ## [0.9.0] - 2026-07-11
 
 ### Fixed
