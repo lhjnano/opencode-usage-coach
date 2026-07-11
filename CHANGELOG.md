@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-07-11
+
+### Fixed
+- **Server plugin not loading in opencode.** opencode requires a `.ts` entry point for file-based
+  plugins — compiled `.js` files in `plugins/` are imported but the plugin function is never called.
+  Added a thin `.ts` wrapper (`opencode-usage-coach.ts`) alongside the compiled `.js`.
+- **`server` named export missing.** `PluginModule.server` is the expected export format per
+  `@opencode-ai/plugin` types. Added `export { UsageCoachPlugin as server }` alongside `default`.
+- **Silent init failure.** `UsageCoachPlugin` now logs `pipeLog` on entry and on catch, so failures
+  are visible in `pipeline.log` (previously swallowed silently → `NOOP_HOOKS` returned with no trace).
+
 ## [0.10.0] - 2026-07-11
 
 ### Added

@@ -1264,6 +1264,7 @@ function isHarnessAgent(agent) {
 }
 var LOADING = { decision: "GO", advice: "quota loading\u2026", weekly: -1, monthly: -1, fiveHour: -1 };
 async function UsageCoachPlugin(input) {
+  pipeLog(`UsageCoachPlugin CALLED | dir=${input.directory} | worktree=${input.worktree}`);
   try {
     setStateDir(input.directory);
     initDomain(STATE_DIR);
@@ -2218,6 +2219,7 @@ Note: Changes take effect immediately for new generate/grade calls.`,
       }
     };
   } catch (e) {
+    pipeLog(`PLUGIN INIT FAILED (no-op): ${String(e)}`);
     log(`PLUGIN INIT FAILED (no-op): ${String(e)}`);
     return NOOP_HOOKS;
   }
@@ -2245,6 +2247,7 @@ export {
   readHarness,
   readHarnessCfg,
   readRules,
+  UsageCoachPlugin as server,
   setStateDir,
   updateSubSession,
   writeHarness,

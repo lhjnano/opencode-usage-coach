@@ -1203,6 +1203,7 @@ export default async function UsageCoachPlugin(input: {
   $: (s: TemplateStringsArray, ...v: unknown[]) => Promise<{ stdout?: { toString(): string } | string }>;
   directory: string; worktree: string;
 }) {
+  pipeLog(`UsageCoachPlugin CALLED | dir=${input.directory} | worktree=${input.worktree}`);
   // Top-level guard: even if init fails, opencode keeps working.
   try {
     setStateDir(input.directory); // per-directory state isolation
@@ -2031,10 +2032,13 @@ If the task is already well-specified with no significant ambiguities, return {"
     };
   } catch (e) {
     // Init failure: return no-op so opencode keeps working.
+    pipeLog(`PLUGIN INIT FAILED (no-op): ${String(e)}`);
     log(`PLUGIN INIT FAILED (no-op): ${String(e)}`);
     return NOOP_HOOKS;
   }
 }
+
+export { UsageCoachPlugin as server };
 
 // ── Named exports for unit testing ──────────────────────────────────────────
 export {
