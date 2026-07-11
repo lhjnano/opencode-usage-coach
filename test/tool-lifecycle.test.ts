@@ -335,7 +335,7 @@ test("Scenario 4c: atomic queue prevents race condition in concurrent writes", a
   ]);
 
   let h = readHarness(S)!;
-  let count = h.tasks.filter((t: any) => t.subElapsed !== undefined).length;
+  const count = h.tasks.filter((t: any) => t.subElapsed !== undefined).length;
   assert.equal(count, 3, `all 3 tasks should have subElapsed set (got ${count})`);
 
   // Step 2: Clear task 1 while simultaneously updating task 2 (the original bug)
