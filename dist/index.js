@@ -179,6 +179,170 @@ function saveInvestigationResult(keywords, result, source, confidence = 0.7) {
   }
 }
 
+// src/web-search.ts
+var FRAMEWORK_DOCS = {
+  "react": { name: "React", docs: "https://react.dev", githubOrg: "facebook" },
+  "solid-js": { name: "Solid.js", docs: "https://solidjs.com", githubOrg: "solidjs" },
+  "vue": { name: "Vue", docs: "https://vuejs.org", githubOrg: "vuejs" },
+  "svelte": { name: "Svelte", docs: "https://svelte.dev", githubOrg: "sveltejs" },
+  "express": { name: "Express", docs: "https://expressjs.com", githubOrg: "expressjs" },
+  "fastify": { name: "Fastify", docs: "https://fastify.dev", githubOrg: "fastify" },
+  "hono": { name: "Hono", docs: "https://hono.dev", githubOrg: "honojs" },
+  "vitest": { name: "Vitest", docs: "https://vitest.dev", githubOrg: "vitest-dev" },
+  "jest": { name: "Jest", docs: "https://jestjs.io", githubOrg: "jestjs" },
+  "tsup": { name: "tsup", docs: "https://tsup.egoist.dev", githubOrg: "egoist" },
+  "eslint": { name: "ESLint", docs: "https://eslint.org", githubOrg: "eslint" },
+  "cloudflare": { name: "Cloudflare", docs: "https://developers.cloudflare.com", githubOrg: "cloudflare" }
+};
+var DEFAULT_TIMEOUT_MS = 8e3;
+var TARGET_RESULT_COUNT = 5;
+function ghToken() {
+  return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+}
+function ghHeaders() {
+  const headers = {
+    "Accept": "application/vnd.github.v3+json",
+    "User-Agent": "opencode-usage-coach"
+  };
+  const token = ghToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+function errMessage(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+function truncate(input, max) {
+  const text = (input ?? "").replace(/[\r\n]+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+function effectiveFrameworks(frameworks, keyDeps) {
+  const set = new Set((frameworks || []).filter(Boolean));
+  if (keyDeps) {
+    for (const dep of keyDeps) {
+      if (dep === "wrangler" || dep.startsWith("@cloudflare/")) set.add("cloudflare");
+    }
+  }
+  return [...set];
+}
+async function ghFetch(url, signal) {
+  const res = await fetch(url, { headers: ghHeaders(), signal });
+  if (!res.ok) {
+    const tag = res.status === 403 || res.status === 429 ? " (rate limit)" : "";
+    throw new Error(`HTTP ${res.status}${tag}`);
+  }
+  return await res.json();
+}
+function pushResult(results, seen, r) {
+  if (r.url && !seen.has(r.url)) {
+    seen.add(r.url);
+    results.push(r);
+  }
+}
+async function tier1OfficialDocs(query, fws, results, docRefs, seen, signal) {
+  const errors = [];
+  for (const fw of fws) {
+    const entry = FRAMEWORK_DOCS[fw];
+    if (entry) docRefs.push({ name: entry.name, url: entry.docs });
+  }
+  if (!query) return errors;
+  for (const fw of fws) {
+    if (signal.aborted || results.length >= TARGET_RESULT_COUNT) break;
+    const entry = FRAMEWORK_DOCS[fw];
+    if (!entry?.githubOrg) continue;
+    try {
+      const q = `${query} org:${entry.githubOrg}`;
+      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=3`;
+      const data = await ghFetch(url, signal);
+      for (const item of data.items ?? []) {
+        pushResult(results, seen, {
+          tier: "official-docs",
+          title: item.title,
+          url: item.html_url,
+          snippet: truncate(item.body, 200)
+        });
+      }
+    } catch (e) {
+      const m = errMessage(e);
+      console.error(`[web-search] tier1 ${fw}: ${m}`);
+      errors.push(`tier1:${fw}:${m.slice(0, 80)}`);
+    }
+  }
+  return errors;
+}
+async function tier2GitHubIssues(query, results, seen, signal) {
+  const errors = [];
+  try {
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&sort=relevance&per_page=5`;
+    const data = await ghFetch(url, signal);
+    for (const item of data.items ?? []) {
+      pushResult(results, seen, {
+        tier: "github-issues",
+        title: item.title,
+        url: item.html_url,
+        snippet: truncate(item.body, 200)
+      });
+    }
+  } catch (e) {
+    const m = errMessage(e);
+    console.error(`[web-search] tier2: ${m}`);
+    errors.push(`tier2:${m.slice(0, 80)}`);
+  }
+  return errors;
+}
+async function tier3GitHubCode(query, results, seen, signal) {
+  const errors = [];
+  if (!ghToken()) return errors;
+  try {
+    const url = `https://api.github.com/search/code?q=${encodeURIComponent(query)}&per_page=3`;
+    const data = await ghFetch(url, signal);
+    for (const item of data.items ?? []) {
+      const repo = item.repository?.full_name;
+      pushResult(results, seen, {
+        tier: "github-code",
+        title: item.path || item.name,
+        url: item.html_url,
+        snippet: repo ? `${repo} \u2014 ${item.path}` : item.path
+      });
+    }
+  } catch (e) {
+    const m = errMessage(e);
+    console.error(`[web-search] tier3: ${m}`);
+    errors.push(`tier3:${m.slice(0, 80)}`);
+  }
+  return errors;
+}
+async function searchContext(query, frameworks, keyDeps, timeoutMs) {
+  const results = [];
+  const docRefs = [];
+  const errors = [];
+  const seen = /* @__PURE__ */ new Set();
+  const timeout = Math.max(100, Number(timeoutMs ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  const signal = controller.signal;
+  try {
+    const q = (query || "").trim();
+    const fws = effectiveFrameworks(frameworks, keyDeps);
+    errors.push(...await tier1OfficialDocs(q, fws, results, docRefs, seen, signal));
+    if (q && results.length < TARGET_RESULT_COUNT && !signal.aborted) {
+      errors.push(...await tier2GitHubIssues(q, results, seen, signal));
+    }
+    if (q && results.length < TARGET_RESULT_COUNT && !signal.aborted) {
+      errors.push(...await tier3GitHubCode(q, results, seen, signal));
+    }
+  } catch (e) {
+    const m = errMessage(e);
+    console.error(`[web-search] unexpected error: ${m}`);
+    errors.push(`unexpected:${m.slice(0, 80)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  const response = { results, docRefs };
+  const joined = errors.filter(Boolean).join("; ");
+  if (joined) response.error = joined;
+  return response;
+}
+
 // src/index.ts
 var PLUGIN_NAME = "opencode-usage-coach";
 var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
@@ -667,7 +831,7 @@ function detectLanguage(extCounts) {
   if ((extCounts["java"] || 0) > 0) return "Java";
   return "unknown";
 }
-function buildGapPrompt(userRequest, tasks, profile, domainNodes) {
+function buildGapPrompt(userRequest, tasks, profile, domainNodes, webResults, docRefs) {
   const taskList = tasks.map((t) => `${t.id}: ${t.title}`).join("\n");
   const profileStr = profile.skipped ? `(skipped \u2014 ${profile.reason || "unknown reason"})` : [
     `- Language: ${profile.language}`,
@@ -680,6 +844,10 @@ function buildGapPrompt(userRequest, tasks, profile, domainNodes) {
     `- Total files: ${profile.totalFiles}`
   ].join("\n");
   const domainStr = domainNodes.length ? domainNodes.slice(0, 15).map((n) => `- ${n.name}: ${JSON.stringify(n.props).slice(0, 200)}`).join("\n") : "(empty \u2014 no prior knowledge stored)";
+  const webResultsStr = webResults && webResults.length ? webResults.slice(0, 8).map((r, i) => `${i + 1}. [${r.tier}] ${r.title}
+   ${r.url}
+   ${r.snippet}`).join("\n") : "(no web results \u2014 either network issue or no relevant findings)";
+  const docRefsStr = docRefs && docRefs.length ? docRefs.map((d) => `- ${d.name}: ${d.url}`).join("\n") : "(none)";
   return `You are a pre-flight gap analyst. Compare the user's request (the MAP) with the actual codebase (the TERRITORY) and classify every gap.
 
 USER REQUEST:
@@ -693,6 +861,12 @@ ${profileStr}
 
 EXISTING DOMAIN KNOWLEDGE (from local DB):
 ${domainStr}
+
+WEB SEARCH RESULTS (from official docs references, GitHub issues, and code search):
+${webResultsStr}
+
+OFFICIAL DOCUMENTATION REFERENCES:
+${docRefsStr}
 
 Classify into EXACTLY these 4 categories:
 
@@ -831,6 +1005,20 @@ Questions for the user (${r.questions.length}):`);
   if (r.taskRefinements.length) {
     L.push("\nTask Refinement Suggestions:");
     for (const t of r.taskRefinements) L.push(`  -> task ${t.taskId}: ${t.action} - ${t.detail}`);
+  }
+  if (r.webResults && r.webResults.length) {
+    L.push(`
+WEB SEARCH (${r.webResults.length} results):`);
+    if (r.docRefs && r.docRefs.length) {
+      L.push(`  Official docs: ${r.docRefs.map((d) => d.name).join(", ")}`);
+    }
+    L.push("  Top results:");
+    for (let i = 0; i < Math.min(r.webResults.length, 5); i++) {
+      const w = r.webResults[i];
+      L.push(`    ${i + 1}. [${w.tier}] ${w.title}`);
+      L.push(`       ${w.url}`);
+      L.push(`       ${w.snippet.slice(0, 100)}`);
+    }
   }
   if (r.rawAnalysis) L.push(`
 Raw analysis: ${r.rawAnalysis.slice(0, 200)}`);
@@ -1487,6 +1675,18 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             } catch (e) {
               log(`unknown_scan domain query err: ${String(e)}`);
             }
+            let webResults = [];
+            let docRefs = [];
+            try {
+              const searchQuery = `${args.prompt} ${tasks.map((t) => t.title).join(" ")}`.slice(0, 500);
+              const webResp = await searchContext(searchQuery, profile.frameworks, profile.keyDeps);
+              webResults = webResp.results;
+              docRefs = webResp.docRefs;
+              if (webResp.error) log(`unknown_scan web search: ${webResp.error}`);
+              log(`unknown_scan web search: ${webResults.length} results, ${docRefs.length} doc refs`);
+            } catch (e) {
+              log(`unknown_scan web search err: ${String(e).slice(0, 200)}`);
+            }
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) {
               const result2 = {
@@ -1529,9 +1729,11 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             }
             const throttle = decision === "THROTTLE" && cfg.lighterModel;
             const model = throttle ? cfg.lighterModel : cfg.generator;
-            const gapPrompt = buildGapPrompt(args.prompt, tasks, profile, domainNodes);
+            const gapPrompt = buildGapPrompt(args.prompt, tasks, profile, domainNodes, webResults, docRefs);
             const raw = await runModel(input.client, model, gapPrompt, ctx.directory, void 0, 15);
             const result = parseGapAnalysis(raw, profile, domainHits);
+            result.webResults = webResults;
+            result.docRefs = docRefs;
             try {
               for (const uk of result.unknownKnowns.slice(0, 5)) {
                 const kw = extractKeywords(uk.finding);

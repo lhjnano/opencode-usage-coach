@@ -18,6 +18,7 @@ import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, addDomainEdge, readNodes, readEdges } from "./domain.js";
 import type { DomainNode } from "./domain.js";
+import { searchContext as webSearch, type WebResult } from "./web-search.js";
 
 const PLUGIN_NAME = "opencode-usage-coach";
 const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
@@ -473,6 +474,8 @@ type UnknownScanResult = {
   taskRefinements: Array<{ taskId: number; action: string; detail: string }>;
   domainHits: number;
   domainMisses: number;
+  webResults?: WebResult[];
+  docRefs?: Array<{ name: string; url: string }>;
   rawAnalysis?: string;
 };
 
@@ -603,6 +606,8 @@ function buildGapPrompt(
   tasks: Array<{ id: number; title: string }>,
   profile: CodebaseProfile,
   domainNodes: any[],
+  webResults?: WebResult[],
+  docRefs?: Array<{ name: string; url: string }>,
 ): string {
   const taskList = tasks.map((t) => `${t.id}: ${t.title}`).join("\n");
   const profileStr = profile.skipped
@@ -620,6 +625,12 @@ function buildGapPrompt(
   const domainStr = domainNodes.length
     ? domainNodes.slice(0, 15).map((n) => `- ${n.name}: ${JSON.stringify(n.props).slice(0, 200)}`).join("\n")
     : "(empty — no prior knowledge stored)";
+  const webResultsStr = webResults && webResults.length
+    ? webResults.slice(0, 8).map((r, i) => `${i + 1}. [${r.tier}] ${r.title}\n   ${r.url}\n   ${r.snippet}`).join("\n")
+    : "(no web results — either network issue or no relevant findings)";
+  const docRefsStr = docRefs && docRefs.length
+    ? docRefs.map((d) => `- ${d.name}: ${d.url}`).join("\n")
+    : "(none)";
   return `You are a pre-flight gap analyst. Compare the user's request (the MAP) with the actual codebase (the TERRITORY) and classify every gap.
 
 USER REQUEST:
@@ -633,6 +644,12 @@ ${profileStr}
 
 EXISTING DOMAIN KNOWLEDGE (from local DB):
 ${domainStr}
+
+WEB SEARCH RESULTS (from official docs references, GitHub issues, and code search):
+${webResultsStr}
+
+OFFICIAL DOCUMENTATION REFERENCES:
+${docRefsStr}
 
 Classify into EXACTLY these 4 categories:
 
@@ -760,6 +777,19 @@ function formatReport(r: UnknownScanResult): string {
   if (r.taskRefinements.length) {
     L.push("\nTask Refinement Suggestions:");
     for (const t of r.taskRefinements) L.push(`  -> task ${t.taskId}: ${t.action} - ${t.detail}`);
+  }
+  if (r.webResults && r.webResults.length) {
+    L.push(`\nWEB SEARCH (${r.webResults.length} results):`);
+    if (r.docRefs && r.docRefs.length) {
+      L.push(`  Official docs: ${r.docRefs.map((d) => d.name).join(", ")}`);
+    }
+    L.push("  Top results:");
+    for (let i = 0; i < Math.min(r.webResults.length, 5); i++) {
+      const w = r.webResults[i];
+      L.push(`    ${i + 1}. [${w.tier}] ${w.title}`);
+      L.push(`       ${w.url}`);
+      L.push(`       ${w.snippet.slice(0, 100)}`);
+    }
   }
   if (r.rawAnalysis) L.push(`\nRaw analysis: ${r.rawAnalysis.slice(0, 200)}`);
   L.push("\n[usage-coach NEXT] unknowns reviewed:");
@@ -1421,6 +1451,18 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
               }
             } catch (e) { log(`unknown_scan domain query err: ${String(e)}`); }
 
+            // ── PHASE 2.5 — Web Search (3-tier: official docs → GitHub issues → code) ──
+            let webResults: WebResult[] = [];
+            let docRefs: Array<{ name: string; url: string }> = [];
+            try {
+              const searchQuery = `${args.prompt} ${tasks.map((t) => t.title).join(" ")}`.slice(0, 500);
+              const webResp = await webSearch(searchQuery, profile.frameworks, profile.keyDeps);
+              webResults = webResp.results;
+              docRefs = webResp.docRefs;
+              if (webResp.error) log(`unknown_scan web search: ${webResp.error}`);
+              log(`unknown_scan web search: ${webResults.length} results, ${docRefs.length} doc refs`);
+            } catch (e) { log(`unknown_scan web search err: ${String(e).slice(0, 200)}`); }
+
             // ── PHASE 3 — Gap Analysis (model-assisted, quota-aware) ──
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) {
@@ -1446,11 +1488,13 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             }
             const throttle = decision === "THROTTLE" && cfg.lighterModel;
             const model = throttle ? cfg.lighterModel! : cfg.generator;
-            const gapPrompt = buildGapPrompt(args.prompt, tasks, profile, domainNodes);
+            const gapPrompt = buildGapPrompt(args.prompt, tasks, profile, domainNodes, webResults, docRefs);
             const raw = await runModel(input.client, model, gapPrompt, ctx.directory, undefined, 15);
 
             // ── PHASE 3b — Parse model output ──
             const result = parseGapAnalysis(raw, profile, domainHits);
+            result.webResults = webResults;
+            result.docRefs = docRefs;
 
             // ── PHASE 4 — Domain DB Store (new findings) ──
             try {

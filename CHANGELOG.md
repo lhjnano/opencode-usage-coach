@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-12
+
+### Added
+- **3-tier web search in `unknown_scan`.** The investigation phase now fetches authoritative
+  references from the web before model gap analysis:
+  - **Tier 1 — Official docs**: Static framework→docs URL mapping + org-scoped GitHub issue
+    search (e.g., `org:cloudflare`). Activated when frameworks are detected from the codebase.
+  - **Tier 2 — GitHub issues**: General GitHub Issues Search API (`/search/issues`), always runs.
+  - **Tier 3 — GitHub code search**: `/search/code` (requires `GITHUB_TOKEN`/`GH_TOKEN`, auto-skipped if absent).
+  - Results are injected into `buildGapPrompt` and displayed in the scan report.
+  - No DuckDuckGo dependency — uses `fetch()` to GitHub REST API only.
+  - 8s total timeout, sequential tier execution (avoids GitHub secondary rate limits).
+  - Strictly additive: if all tiers fail, `unknown_scan` works exactly as before.
+
+### Fixed
+- **`mutateHarness` minimum timeout**: `Math.max(500, …)` → `Math.max(100, …)` so tests can
+  verify sub-500ms timeout behavior.
+
 ## [0.10.2] - 2026-07-11
 
 ### Fixed
