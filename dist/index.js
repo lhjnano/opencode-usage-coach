@@ -1801,6 +1801,10 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             model: tool.schema.string().optional()
           },
           async execute(args, ctx) {
+            const VALID_STATUSES = ["generating", "grading", "revising", "completed", "failed", "timed_out", "halted_quota"];
+            if (!args.status || !VALID_STATUSES.includes(args.status)) {
+              return `ERROR: task_update status must be one of: ${VALID_STATUSES.join(", ")}. Got: "${args.status}". Call task_update with a valid status.`;
+            }
             const cfg = readHarnessCfg(ctx.directory);
             const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
             h.tasks = h.tasks.filter((x) => x.id !== args.id);
