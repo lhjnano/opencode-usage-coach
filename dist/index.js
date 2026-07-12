@@ -196,6 +196,7 @@ var FRAMEWORK_DOCS = {
 };
 var DEFAULT_TIMEOUT_MS = 8e3;
 var TARGET_RESULT_COUNT = 5;
+var GH_QUERY_MAX = 256;
 function ghToken() {
   return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
 }
@@ -214,6 +215,9 @@ function errMessage(e) {
 function truncate(input, max) {
   const text = (input ?? "").replace(/[\r\n]+/g, " ").trim();
   return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+function sanitizeQuery(raw) {
+  return raw.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ").replace(/[#*_[\]()>|]/g, " ").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, GH_QUERY_MAX);
 }
 function effectiveFrameworks(frameworks, keyDeps) {
   const set = new Set((frameworks || []).filter(Boolean));
@@ -251,7 +255,7 @@ async function tier1OfficialDocs(query, fws, results, docRefs, seen, signal) {
     if (!entry?.githubOrg) continue;
     try {
       const q = `${query} org:${entry.githubOrg}`;
-      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=3`;
+      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(sanitizeQuery(q))}&per_page=3`;
       const data = await ghFetch(url, signal);
       for (const item of data.items ?? []) {
         pushResult(results, seen, {
@@ -272,7 +276,7 @@ async function tier1OfficialDocs(query, fws, results, docRefs, seen, signal) {
 async function tier2GitHubIssues(query, results, seen, signal) {
   const errors = [];
   try {
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&sort=relevance&per_page=5`;
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(sanitizeQuery(query))}&per_page=5`;
     const data = await ghFetch(url, signal);
     for (const item of data.items ?? []) {
       pushResult(results, seen, {
@@ -293,7 +297,7 @@ async function tier3GitHubCode(query, results, seen, signal) {
   const errors = [];
   if (!ghToken()) return errors;
   try {
-    const url = `https://api.github.com/search/code?q=${encodeURIComponent(query)}&per_page=3`;
+    const url = `https://api.github.com/search/code?q=${encodeURIComponent(sanitizeQuery(query))}&per_page=3`;
     const data = await ghFetch(url, signal);
     for (const item of data.items ?? []) {
       const repo = item.repository?.full_name;
@@ -1678,7 +1682,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             let webResults = [];
             let docRefs = [];
             try {
-              const searchQuery = `${args.prompt} ${tasks.map((t) => t.title).join(" ")}`.slice(0, 500);
+              const searchQuery = `${args.prompt} ${tasks.map((t) => t.title).join(" ")}`.slice(0, 256);
               const webResp = await searchContext(searchQuery, profile.frameworks, profile.keyDeps);
               webResults = webResp.results;
               docRefs = webResp.docRefs;

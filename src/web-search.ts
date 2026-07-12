@@ -40,6 +40,7 @@ export const FRAMEWORK_DOCS: Record<
 
 const DEFAULT_TIMEOUT_MS = 8000;
 const TARGET_RESULT_COUNT = 5;
+const GH_QUERY_MAX = 256; // GitHub Search API limit on the `q` parameter.
 
 function ghToken(): string | undefined {
   return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
@@ -62,6 +63,20 @@ function errMessage(e: unknown): string {
 function truncate(input: string | null | undefined, max: number): string {
   const text = (input ?? "").replace(/[\r\n]+/g, " ").trim();
   return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+/** Sanitize a raw query string for GitHub Search API compliance.
+ *  Strips newlines, markdown fences, code blocks, collapses whitespace,
+ *  and truncates to GH_QUERY_MAX chars (GitHub's hard limit on `q`). */
+function sanitizeQuery(raw: string): string {
+  return raw
+    .replace(/```[\s\S]*?```/g, " ")   // code blocks
+    .replace(/`[^`]*`/g, " ")           // inline code
+    .replace(/[#*_[\]()>|]/g, " ")     // markdown syntax chars
+    .replace(/[\r\n\t]+/g, " ")         // newlines / tabs
+    .replace(/\s+/g, " ")               // collapse whitespace
+    .trim()
+    .slice(0, GH_QUERY_MAX);
 }
 
 function effectiveFrameworks(frameworks: string[], keyDeps?: string[]): string[] {
@@ -111,7 +126,7 @@ async function tier1OfficialDocs(
     if (!entry?.githubOrg) continue;
     try {
       const q = `${query} org:${entry.githubOrg}`;
-      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=3`;
+      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(sanitizeQuery(q))}&per_page=3`;
       const data = await ghFetch<{
         items?: Array<{ title: string; html_url: string; body: string | null }>;
       }>(url, signal);
@@ -141,7 +156,7 @@ async function tier2GitHubIssues(
 ): Promise<string[]> {
   const errors: string[] = [];
   try {
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&sort=relevance&per_page=5`;
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(sanitizeQuery(query))}&per_page=5`;
     const data = await ghFetch<{
       items?: Array<{ title: string; html_url: string; body: string | null }>;
     }>(url, signal);
@@ -171,7 +186,7 @@ async function tier3GitHubCode(
   const errors: string[] = [];
   if (!ghToken()) return errors; // skip — code search requires authentication
   try {
-    const url = `https://api.github.com/search/code?q=${encodeURIComponent(query)}&per_page=3`;
+    const url = `https://api.github.com/search/code?q=${encodeURIComponent(sanitizeQuery(query))}&per_page=3`;
     const data = await ghFetch<{
       items?: Array<{
         name: string;

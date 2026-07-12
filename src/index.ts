@@ -1455,7 +1455,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             let webResults: WebResult[] = [];
             let docRefs: Array<{ name: string; url: string }> = [];
             try {
-              const searchQuery = `${args.prompt} ${tasks.map((t) => t.title).join(" ")}`.slice(0, 500);
+              const searchQuery = `${args.prompt} ${tasks.map((t) => t.title).join(" ")}`.slice(0, 256);
               const webResp = await webSearch(searchQuery, profile.frameworks, profile.keyDeps);
               webResults = webResp.results;
               docRefs = webResp.docRefs;
