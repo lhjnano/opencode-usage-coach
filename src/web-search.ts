@@ -66,15 +66,21 @@ function truncate(input: string | null | undefined, max: number): string {
 }
 
 /** Sanitize a raw query string for GitHub Search API compliance.
- *  Strips newlines, markdown fences, code blocks, collapses whitespace,
- *  and truncates to GH_QUERY_MAX chars (GitHub's hard limit on `q`). */
+ *  GitHub Search interprets `:` as qualifier separator, `>`/`<`/`=` as operators,
+ *  `-word` as negation, `"..."` as exact match, `NOT`/`AND`/`OR` as boolean.
+ *  Any of these in a free-text query can cause 422 Unprocessable Entity.
+ *  Solution: extract only keyword tokens (alphanumeric + CJK), drop everything else.
+ *  Per GitHub docs: https://docs.github.com/en/search-github/getting-started-with-searching-on-github/understanding-the-search-syntax
+ *  Returns empty string if nothing meaningful remains — caller should skip the search. */
 function sanitizeQuery(raw: string): string {
   return raw
-    .replace(/```[\s\S]*?```/g, " ")   // code blocks
+    .replace(/```[\s\S]*?```/g, " ")   // code blocks first
     .replace(/`[^`]*`/g, " ")           // inline code
-    .replace(/[#*_[\]()>|]/g, " ")     // markdown syntax chars
-    .replace(/[\r\n\t]+/g, " ")         // newlines / tabs
-    .replace(/\s+/g, " ")               // collapse whitespace
+    .replace(/https?:\/\/\S+/g, " ")    // URLs
+    // Keep only word characters, CJK, and spaces. Strip ALL GitHub qualifier syntax.
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\b(NOT|AND|OR)\b/gi, " ") // GitHub boolean operators
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, GH_QUERY_MAX);
 }
@@ -120,13 +126,17 @@ async function tier1OfficialDocs(
     if (entry) docRefs.push({ name: entry.name, url: entry.docs });
   }
   if (!query) return errors;
+  const cleanQuery = sanitizeQuery(query);
+  if (!cleanQuery) return errors;
   for (const fw of fws) {
     if (signal.aborted || results.length >= TARGET_RESULT_COUNT) break;
     const entry = FRAMEWORK_DOCS[fw];
     if (!entry?.githubOrg) continue;
     try {
-      const q = `${query} org:${entry.githubOrg}`;
-      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(sanitizeQuery(q))}&per_page=3`;
+      // org: is a GitHub qualifier WE control — don't sanitize it.
+      // Only sanitize the user's free-text query (which may contain colons, etc.).
+      const fullQ = `${cleanQuery} org:${entry.githubOrg}`;
+      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQ)}&per_page=3`;
       const data = await ghFetch<{
         items?: Array<{ title: string; html_url: string; body: string | null }>;
       }>(url, signal);
@@ -156,7 +166,9 @@ async function tier2GitHubIssues(
 ): Promise<string[]> {
   const errors: string[] = [];
   try {
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(sanitizeQuery(query))}&per_page=5`;
+    const q = sanitizeQuery(query);
+    if (!q) return errors;
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=5`;
     const data = await ghFetch<{
       items?: Array<{ title: string; html_url: string; body: string | null }>;
     }>(url, signal);
@@ -186,7 +198,9 @@ async function tier3GitHubCode(
   const errors: string[] = [];
   if (!ghToken()) return errors; // skip — code search requires authentication
   try {
-    const url = `https://api.github.com/search/code?q=${encodeURIComponent(sanitizeQuery(query))}&per_page=3`;
+    const q = sanitizeQuery(query);
+    if (!q) return errors;
+    const url = `https://api.github.com/search/code?q=${encodeURIComponent(q)}&per_page=3`;
     const data = await ghFetch<{
       items?: Array<{
         name: string;

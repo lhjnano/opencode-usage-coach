@@ -217,7 +217,7 @@ function truncate(input, max) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 function sanitizeQuery(raw) {
-  return raw.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ").replace(/[#*_[\]()>|]/g, " ").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, GH_QUERY_MAX);
+  return raw.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ").replace(/https?:\/\/\S+/g, " ").replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\b(NOT|AND|OR)\b/gi, " ").replace(/\s+/g, " ").trim().slice(0, GH_QUERY_MAX);
 }
 function effectiveFrameworks(frameworks, keyDeps) {
   const set = new Set((frameworks || []).filter(Boolean));
@@ -249,13 +249,15 @@ async function tier1OfficialDocs(query, fws, results, docRefs, seen, signal) {
     if (entry) docRefs.push({ name: entry.name, url: entry.docs });
   }
   if (!query) return errors;
+  const cleanQuery = sanitizeQuery(query);
+  if (!cleanQuery) return errors;
   for (const fw of fws) {
     if (signal.aborted || results.length >= TARGET_RESULT_COUNT) break;
     const entry = FRAMEWORK_DOCS[fw];
     if (!entry?.githubOrg) continue;
     try {
-      const q = `${query} org:${entry.githubOrg}`;
-      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(sanitizeQuery(q))}&per_page=3`;
+      const fullQ = `${cleanQuery} org:${entry.githubOrg}`;
+      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQ)}&per_page=3`;
       const data = await ghFetch(url, signal);
       for (const item of data.items ?? []) {
         pushResult(results, seen, {
@@ -276,7 +278,9 @@ async function tier1OfficialDocs(query, fws, results, docRefs, seen, signal) {
 async function tier2GitHubIssues(query, results, seen, signal) {
   const errors = [];
   try {
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(sanitizeQuery(query))}&per_page=5`;
+    const q = sanitizeQuery(query);
+    if (!q) return errors;
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=5`;
     const data = await ghFetch(url, signal);
     for (const item of data.items ?? []) {
       pushResult(results, seen, {
@@ -297,7 +301,9 @@ async function tier3GitHubCode(query, results, seen, signal) {
   const errors = [];
   if (!ghToken()) return errors;
   try {
-    const url = `https://api.github.com/search/code?q=${encodeURIComponent(sanitizeQuery(query))}&per_page=3`;
+    const q = sanitizeQuery(query);
+    if (!q) return errors;
+    const url = `https://api.github.com/search/code?q=${encodeURIComponent(q)}&per_page=3`;
     const data = await ghFetch(url, signal);
     for (const item of data.items ?? []) {
       const repo = item.repository?.full_name;
@@ -1613,6 +1619,7 @@ PATH A \u2014 INDEPENDENT (parallel via generate_batch):
   4. for each i: PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or task_update(i, title, "failed", "FAIL")
 
 PATH B \u2014 DEPENDENT (sequential):
+  Optional: task_update(1..N, title, "pending")  \u2190 pre-register all tasks first
   for i in 1..${args.total}:
     1. task_update(i, title, "generating")
     2. generate({prompt:"Task: <title>. Perform it."})  -> work + NEXT
@@ -1795,25 +1802,23 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           args: {
             id: tool.schema.number(),
             title: tool.schema.string(),
-            status: tool.schema.string().describe("generating | grading | revising | completed | failed | timed_out"),
+            status: tool.schema.string().describe("pending | generating | grading | revising | completed | failed | timed_out"),
             revisions: tool.schema.number().optional(),
             score: tool.schema.string().optional().describe("PASS | FAIL"),
             model: tool.schema.string().optional()
           },
           async execute(args, ctx) {
-            const VALID_STATUSES = ["generating", "grading", "revising", "completed", "failed", "timed_out", "halted_quota"];
-            if (!args.status || !VALID_STATUSES.includes(args.status)) {
-              return `ERROR: task_update status must be one of: ${VALID_STATUSES.join(", ")}. Got: "${args.status}". Call task_update with a valid status.`;
-            }
+            const VALID_STATUSES = ["pending", "generating", "grading", "revising", "completed", "failed", "timed_out", "halted_quota"];
+            const status = args.status && VALID_STATUSES.includes(args.status) ? args.status : "generating";
             const cfg = readHarnessCfg(ctx.directory);
             const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
             h.tasks = h.tasks.filter((x) => x.id !== args.id);
             const model = args.model || cfg.generator || "";
             if (!model) return `ERROR: task ${args.id} has no model and no generator configured. Set "generator" in harness.config.json.`;
-            h.tasks.push({ id: args.id, title: args.title, status: args.status, model, revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
+            h.tasks.push({ id: args.id, title: args.title, status, model, revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: (/* @__PURE__ */ new Date()).toISOString() });
             if (args.id > h.current) h.current = args.id;
             writeHarness(ctx.sessionID, h);
-            return `task ${args.id} -> ${args.status}${args.score ? ` (${args.score})` : ""}`;
+            return `task ${args.id} -> ${status}${args.score ? ` (${args.score})` : ""}`;
           }
         }),
         harness_done: tool({

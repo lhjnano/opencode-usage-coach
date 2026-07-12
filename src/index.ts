@@ -1391,6 +1391,7 @@ PATH A — INDEPENDENT (parallel via generate_batch):
   4. for each i: PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or task_update(i, title, "failed", "FAIL")
 
 PATH B — DEPENDENT (sequential):
+  Optional: task_update(1..N, title, "pending")  ← pre-register all tasks first
   for i in 1..${args.total}:
     1. task_update(i, title, "generating")
     2. generate({prompt:"Task: <title>. Perform it."})  -> work + NEXT
@@ -1556,26 +1557,26 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           args: {
             id: tool.schema.number(),
             title: tool.schema.string(),
-            status: tool.schema.string().describe("generating | grading | revising | completed | failed | timed_out"),
+            status: tool.schema.string().describe("pending | generating | grading | revising | completed | failed | timed_out"),
             revisions: tool.schema.number().optional(),
             score: tool.schema.string().optional().describe("PASS | FAIL"),
             model: tool.schema.string().optional(),
           },
           async execute(args: { id: number; title: string; status: string; revisions?: number; score?: string; model?: string }, ctx: any) {
-            const VALID_STATUSES = ["generating", "grading", "revising", "completed", "failed", "timed_out", "halted_quota"];
-            if (!args.status || !VALID_STATUSES.includes(args.status)) {
-              return `ERROR: task_update status must be one of: ${VALID_STATUSES.join(", ")}. Got: "${args.status}". Call task_update with a valid status.`;
-            }
+            const VALID_STATUSES = ["pending", "generating", "grading", "revising", "completed", "failed", "timed_out", "halted_quota"];
+            // Default to "generating" if status is missing/invalid — keeps the harness moving
+            // instead of blocking with an error that the model has to retry.
+            const status = args.status && VALID_STATUSES.includes(args.status) ? args.status : "generating";
             const cfg = readHarnessCfg(ctx.directory);
             const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
             h.tasks = h.tasks.filter((x: any) => x.id !== args.id);
             // Model is required for quota tracking. Auto-fill from config.generator if not provided.
             const model = args.model || cfg.generator || "";
             if (!model) return `ERROR: task ${args.id} has no model and no generator configured. Set "generator" in harness.config.json.`;
-            h.tasks.push({ id: args.id, title: args.title, status: args.status, model, revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: new Date().toISOString() });
+            h.tasks.push({ id: args.id, title: args.title, status, model, revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: new Date().toISOString() });
             if (args.id > h.current) h.current = args.id;
             writeHarness(ctx.sessionID, h);
-            return `task ${args.id} -> ${args.status}${args.score ? ` (${args.score})` : ""}`;
+            return `task ${args.id} -> ${status}${args.score ? ` (${args.score})` : ""}`;
           },
         }),
         harness_done: tool({
