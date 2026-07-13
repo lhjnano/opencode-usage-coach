@@ -48,6 +48,9 @@ export default tseslint.config(
       "no-unused-vars": "off", // typescript-eslint 버전으로 위임
       "prefer-const": "error",
       eqeqeq: ["warn", "smart"],
+      // console.* → TUI에 stderr/stdout이 섞여 나오는 것을 방지.
+      // 소스 코드에서는 파일 로거(wsLog/log)를 사용해야 함.
+      "no-console": "error",
     },
   },
 

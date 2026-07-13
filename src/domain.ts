@@ -118,8 +118,6 @@ export function writeEdges(edges: DomainEdge[]): void {
 
 function readProjectNodes(): DomainNode[] { return readNdjson<DomainNode>(nodesFile()); }
 function readSharedNodes(): DomainNode[] { return readNdjson<DomainNode>(sharedNodesFile()); }
-function readProjectEdges(): DomainEdge[] { return readNdjson<DomainEdge>(edgesFile()); }
-function readSharedEdges(): DomainEdge[] { return readNdjson<DomainEdge>(sharedEdgesFile()); }
 
 // Rewrite the whole nodes file (used by touch + eviction). Best-effort, never throws.
 // Append-only is the happy path; these are the only places that rewrite, and they run rarely.
