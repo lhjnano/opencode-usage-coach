@@ -3,18 +3,26 @@ import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, appendFileSyn
 import { spawn, spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { homedir } from "os";
-import { join as join2, resolve, dirname } from "path";
+import { join as join2, resolve, dirname as dirname2 } from "path";
 import { tool } from "@opencode-ai/plugin";
 
 // src/domain.ts
 import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "fs";
-import { join } from "path";
+import { join, dirname, basename } from "path";
 var BASE_DIR = "";
+var SHARED_DIR = "";
 function initDomain(stateDir) {
   BASE_DIR = stateDir;
+  if (basename(dirname(stateDir)) === "projects") {
+    SHARED_DIR = join(dirname(dirname(stateDir)), "shared");
+  } else {
+    SHARED_DIR = join(stateDir, "_shared");
+  }
 }
 var nodesFile = () => join(BASE_DIR, "nodes.ndjson");
 var edgesFile = () => join(BASE_DIR, "edges.ndjson");
+var sharedNodesFile = () => join(SHARED_DIR, "nodes.ndjson");
+var sharedEdgesFile = () => join(SHARED_DIR, "edges.ndjson");
 function readNdjson(path) {
   try {
     if (!existsSync(path)) return [];
@@ -24,22 +32,13 @@ function readNdjson(path) {
   }
 }
 function readNodes() {
-  return readNdjson(nodesFile());
+  return [...readNdjson(nodesFile()), ...readNdjson(sharedNodesFile())];
 }
 function readEdges() {
-  return readNdjson(edgesFile());
+  return [...readNdjson(edgesFile()), ...readNdjson(sharedEdgesFile())];
 }
 function uid(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-function addDomainNode(node) {
-  const full = { ...node, id: uid("node"), ts: (/* @__PURE__ */ new Date()).toISOString() };
-  try {
-    mkdirSync(BASE_DIR, { recursive: true });
-    appendFileSync(nodesFile(), JSON.stringify(full) + "\n");
-  } catch {
-  }
-  return full.id;
 }
 function addDomainEdge(edge) {
   const full = { ...edge, ts: (/* @__PURE__ */ new Date()).toISOString() };
@@ -48,6 +47,9 @@ function addDomainEdge(edge) {
     appendFileSync(edgesFile(), JSON.stringify(full) + "\n");
   } catch {
   }
+}
+function readProjectNodes() {
+  return readNdjson(nodesFile());
 }
 function writeNodes(nodes) {
   try {
@@ -72,7 +74,7 @@ function queryDomain(keywords) {
 function touchNodes(ids) {
   if (ids.size === 0) return;
   try {
-    const nodes = readNodes();
+    const nodes = readProjectNodes();
     let changed = false;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     for (const n of nodes) {
@@ -88,7 +90,7 @@ function touchNodes(ids) {
 }
 function evictStale(maxAgeDays = 30, maxNodes = 1e3) {
   try {
-    const nodes = readNodes();
+    const nodes = readProjectNodes();
     if (nodes.length === 0) return { removed: 0, kept: 0 };
     const now = Date.now();
     const ageMs = maxAgeDays * 864e5;
@@ -167,15 +169,54 @@ function queryDomainGraph(keywords, maxDepth = 2, opts = {}) {
 }
 function saveInvestigationResult(keywords, result, source, confidence = 0.7) {
   try {
-    return addDomainNode({
+    const nodeId = uid("node");
+    const full = {
+      id: nodeId,
       type: "fact",
       name: keywords.join(" "),
-      props: { result },
+      props: { result, keywords: [...new Set(keywords)] },
       source: source || "investigation",
-      confidence
-    });
+      confidence,
+      ts: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    try {
+      mkdirSync(SHARED_DIR, { recursive: true });
+      appendFileSync(sharedNodesFile(), JSON.stringify(full) + "\n");
+    } catch {
+    }
+    autoLinkKeywords(nodeId, keywords);
+    return nodeId;
   } catch {
     return "";
+  }
+}
+function autoLinkKeywords(nodeId, keywords, minOverlap = 2, maxLinks = 8) {
+  if (keywords.length < minOverlap) return;
+  try {
+    const candidates = queryDomain(keywords);
+    let linked = 0;
+    for (const node of candidates.nodes) {
+      if (node.id === nodeId) continue;
+      const nodeKw = Array.isArray(node.props?.keywords) ? node.props.keywords : (node.name || "").toLowerCase().split(/[^a-z0-9_-]+/).filter((w) => w.length >= 3);
+      const overlap = keywords.filter((k) => nodeKw.includes(k));
+      if (overlap.length >= minOverlap) {
+        const edge = {
+          from: nodeId,
+          to: node.id,
+          rel: "related-to",
+          note: `auto: ${overlap.length} shared (${overlap.slice(0, 5).join(",")})`,
+          ts: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        try {
+          mkdirSync(SHARED_DIR, { recursive: true });
+          appendFileSync(sharedEdgesFile(), JSON.stringify(edge) + "\n");
+        } catch {
+        }
+        linked++;
+        if (linked >= maxLinks) break;
+      }
+    }
+  } catch {
   }
 }
 
@@ -385,7 +426,7 @@ var DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUE
 var PIPE_LOG = join2(homedir(), ".cache", "opencode-usage-coach", "pipeline.log");
 function pipeLog(msg) {
   try {
-    mkdirSync2(dirname(PIPE_LOG), { recursive: true });
+    mkdirSync2(dirname2(PIPE_LOG), { recursive: true });
     appendFileSync2(PIPE_LOG, `[SERVER] ${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
 `);
   } catch {
@@ -537,15 +578,137 @@ function readImplNotesByGraph(keywords, limit = 5) {
 }
 function extractKeywords(text) {
   try {
-    const STOP = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "into", "your", "you", "are", "was", "but", "not", "all", "any", "use", "task", "prompt"]);
+    const STOP = /* @__PURE__ */ new Set([
+      // articles / prepositions / conjunctions
+      "the",
+      "and",
+      "for",
+      "with",
+      "that",
+      "this",
+      "from",
+      "into",
+      "your",
+      "you",
+      "are",
+      "was",
+      "but",
+      "not",
+      "all",
+      "any",
+      "use",
+      "task",
+      "prompt",
+      // generic verbs
+      "apply",
+      "add",
+      "make",
+      "set",
+      "get",
+      "run",
+      "try",
+      "put",
+      "let",
+      "new",
+      "will",
+      "can",
+      "has",
+      "had",
+      "have",
+      "been",
+      "were",
+      "they",
+      "them",
+      "when",
+      "then",
+      "than",
+      "also",
+      "just",
+      "like",
+      "what",
+      "which",
+      "how",
+      "should",
+      "would",
+      "could",
+      "must",
+      "does",
+      "doing",
+      "done",
+      "via",
+      // generic nouns / adjectives
+      "some",
+      "more",
+      "most",
+      "such",
+      "each",
+      "other",
+      "very",
+      "much",
+      "here",
+      "there",
+      "where",
+      "while",
+      "about",
+      "after",
+      "before",
+      "main",
+      "call",
+      "file",
+      "code",
+      "data",
+      "line",
+      "name",
+      "type",
+      "true",
+      "false",
+      "null",
+      "void",
+      "return",
+      "function",
+      "const",
+      "note",
+      "notes",
+      "result",
+      "output",
+      "input",
+      "detail",
+      "reason",
+      "reasons",
+      "improve",
+      "fix",
+      "fixed",
+      "error",
+      "issue",
+      "thing",
+      "things",
+      "stuff",
+      "case",
+      "cases",
+      "way",
+      "ways",
+      "first",
+      "second",
+      "third",
+      "last",
+      "next",
+      "prev",
+      "previous",
+      "following",
+      "above",
+      "below",
+      "since",
+      "until",
+      "without"
+    ]);
     const seen = /* @__PURE__ */ new Set();
     const out = [];
-    for (const raw of (text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+    for (const raw of (text ?? "").toLowerCase().split(/[^a-z0-9_-]+/)) {
       const t = raw.trim();
       if (t.length < 3 || STOP.has(t) || seen.has(t)) continue;
       seen.add(t);
       out.push(t);
-      if (out.length >= 16) break;
+      if (out.length >= 8) break;
     }
     return out;
   } catch {
@@ -567,7 +730,7 @@ function readHarness(sessionID) {
 function writeHarness(sessionID, h) {
   try {
     const f = harnessFile(sessionID);
-    mkdirSync2(dirname(f), { recursive: true });
+    mkdirSync2(dirname2(f), { recursive: true });
     h.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     writeFileSync2(f, JSON.stringify(h, null, 2));
   } catch {
@@ -604,7 +767,7 @@ function readInterview(sessionID) {
 function writeInterview(sessionID, s) {
   try {
     const f = interviewFile(sessionID);
-    mkdirSync2(dirname(f), { recursive: true });
+    mkdirSync2(dirname2(f), { recursive: true });
     s.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     writeFileSync2(f, JSON.stringify(s, null, 2));
   } catch {

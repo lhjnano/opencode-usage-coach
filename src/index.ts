@@ -220,15 +220,34 @@ function readImplNotesByGraph(keywords: string[], limit = 5): string {
 // non-alphanumeric, drop short/common tokens. Defensive — never throws.
 function extractKeywords(text: string): string[] {
   try {
-    const STOP = new Set(["the", "and", "for", "with", "that", "this", "from", "into", "your", "you", "are", "was", "but", "not", "all", "any", "use", "task", "prompt"]);
+    const STOP = new Set([
+      // articles / prepositions / conjunctions
+      "the", "and", "for", "with", "that", "this", "from", "into", "your", "you",
+      "are", "was", "but", "not", "all", "any", "use", "task", "prompt",
+      // generic verbs
+      "apply", "add", "make", "set", "get", "run", "try", "put", "let", "new",
+      "will", "can", "has", "had", "have", "been", "were", "they", "them",
+      "when", "then", "than", "also", "just", "like", "what", "which", "how",
+      "should", "would", "could", "must", "does", "doing", "done", "via",
+      // generic nouns / adjectives
+      "some", "more", "most", "such", "each", "other", "very", "much",
+      "here", "there", "where", "while", "about", "after", "before",
+      "main", "call", "file", "code", "data", "line", "name", "type",
+      "true", "false", "null", "void", "return", "function", "const",
+      "note", "notes", "result", "output", "input", "detail",
+      "reason", "reasons", "improve", "fix", "fixed", "error", "issue",
+      "thing", "things", "stuff", "case", "cases", "way", "ways",
+      "first", "second", "third", "last", "next", "prev", "previous",
+      "following", "above", "below", "since", "until", "without",
+    ]);
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const raw of (text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+    for (const raw of (text ?? "").toLowerCase().split(/[^a-z0-9_-]+/)) {
       const t = raw.trim();
       if (t.length < 3 || STOP.has(t) || seen.has(t)) continue;
       seen.add(t);
       out.push(t);
-      if (out.length >= 16) break;
+      if (out.length >= 8) break;
     }
     return out;
   } catch { return []; }

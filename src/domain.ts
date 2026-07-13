@@ -5,7 +5,7 @@
 //     the learning loop (investigate) and generate injections need.
 
 import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 
 export type Relation =
   | "returns" | "is-a" | "part-of" | "depends-on" | "contradicts"
@@ -42,11 +42,26 @@ export type DomainEdge = {
 };
 
 let BASE_DIR = "";
+let SHARED_DIR = "";
 
-export function initDomain(stateDir: string): void { BASE_DIR = stateDir; }
+export function initDomain(stateDir: string): void {
+  BASE_DIR = stateDir;
+  // SHARED_DIR: if stateDir is .../projects/<hash>/, use .../shared/ (cross-project layer).
+  // Otherwise (tests, custom UC_STATE_DIR), fall back to stateDir/_shared/ for isolation.
+  if (basename(dirname(stateDir)) === "projects") {
+    SHARED_DIR = join(dirname(dirname(stateDir)), "shared");
+  } else {
+    SHARED_DIR = join(stateDir, "_shared");
+  }
+}
+
+// Shared layer exports — for testing and cross-project queries.
+export function getSharedDir(): string { return SHARED_DIR; }
 
 const nodesFile = (): string => join(BASE_DIR, "nodes.ndjson");
 const edgesFile = (): string => join(BASE_DIR, "edges.ndjson");
+const sharedNodesFile = (): string => join(SHARED_DIR, "nodes.ndjson");
+const sharedEdgesFile = (): string => join(SHARED_DIR, "edges.ndjson");
 
 function readNdjson<T>(path: string): T[] {
   try {
@@ -58,8 +73,13 @@ function readNdjson<T>(path: string): T[] {
   } catch { return []; }
 }
 
-export function readNodes(): DomainNode[] { return readNdjson<DomainNode>(nodesFile()); }
-export function readEdges(): DomainEdge[] { return readNdjson<DomainEdge>(edgesFile()); }
+// Read from BOTH layers: project-specific (BASE_DIR) + shared cross-project (SHARED_DIR).
+export function readNodes(): DomainNode[] {
+  return [...readNdjson<DomainNode>(nodesFile()), ...readNdjson<DomainNode>(sharedNodesFile())];
+}
+export function readEdges(): DomainEdge[] {
+  return [...readNdjson<DomainEdge>(edgesFile()), ...readNdjson<DomainEdge>(sharedEdgesFile())];
+}
 
 function uid(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -89,10 +109,25 @@ export function writeEdges(edges: DomainEdge[]): void {
   } catch { /* */ }
 }
 
+// ── Layer-aware reads ──────────────────────────────────────────────────────
+// "project" = BASE_DIR (this project only). "shared" = SHARED_DIR (cross-project).
+// Public readNodes/readEdges return BOTH layers merged. Internal helpers operate
+// on a single layer to avoid the duplication bug in touchNodes/evictStale (which
+// read all + rewrite one layer — without layer-awareness they'd copy shared nodes
+// into the project file).
+
+function readProjectNodes(): DomainNode[] { return readNdjson<DomainNode>(nodesFile()); }
+function readSharedNodes(): DomainNode[] { return readNdjson<DomainNode>(sharedNodesFile()); }
+function readProjectEdges(): DomainEdge[] { return readNdjson<DomainEdge>(edgesFile()); }
+function readSharedEdges(): DomainEdge[] { return readNdjson<DomainEdge>(sharedEdgesFile()); }
+
 // Rewrite the whole nodes file (used by touch + eviction). Best-effort, never throws.
 // Append-only is the happy path; these are the only places that rewrite, and they run rarely.
 function writeNodes(nodes: DomainNode[]): void {
   try { mkdirSync(BASE_DIR, { recursive: true }); const lines = nodes.map((n) => JSON.stringify(n)); writeFileSync(nodesFile(), lines.length ? lines.join("\n") + "\n" : ""); } catch { /* */ }
+}
+function writeSharedNodes(nodes: DomainNode[]): void {
+  try { mkdirSync(SHARED_DIR, { recursive: true }); const lines = nodes.map((n) => JSON.stringify(n)); writeFileSync(sharedNodesFile(), lines.length ? lines.join("\n") + "\n" : ""); } catch { /* */ }
 }
 
 // Keyword match against node name + props; include every edge touching a matched node.
@@ -112,10 +147,12 @@ export function queryDomain(keywords: string[]): { nodes: DomainNode[]; edges: D
 
 // Worm — update lastAccessed + accessCount for the given node ids (rewrite). Low-frequency:
 // only the matched subset changes, and only when something matched.
+// IMPORTANT: Only touches project-layer (BASE_DIR) nodes — shared-layer nodes are
+// read-only (no access tracking) to avoid the cross-layer duplication bug.
 export function touchNodes(ids: Set<string>): void {
   if (ids.size === 0) return;
   try {
-    const nodes = readNodes();
+    const nodes = readProjectNodes();
     let changed = false;
     const now = new Date().toISOString();
     for (const n of nodes) {
@@ -132,9 +169,11 @@ export function touchNodes(ids: Set<string>): void {
 // Worm (GC): drop nodes not accessed within maxAgeDays, then cap the count at maxNodes
 // (keeping the most-recently-accessed). Nodes fall back to `ts` when never queried.
 // Returns how many were removed. Safe to call frequently — no-op when nothing is stale.
+// IMPORTANT: Only evicts from the project layer (BASE_DIR). Shared-layer eviction is
+// handled separately to avoid cross-layer contamination.
 export function evictStale(maxAgeDays = 30, maxNodes = 1000): { removed: number; kept: number } {
   try {
-    const nodes = readNodes();
+    const nodes = readProjectNodes();
     if (nodes.length === 0) return { removed: 0, kept: 0 };
     const now = Date.now();
     const ageMs = maxAgeDays * 86_400_000;
@@ -148,6 +187,27 @@ export function evictStale(maxAgeDays = 30, maxNodes = 1000): { removed: number;
     }
     const removed = nodes.length - kept.length;
     if (removed > 0) writeNodes(kept);
+    return { removed, kept: kept.length };
+  } catch { return { removed: 0, kept: 0 }; }
+}
+
+/** Evict stale nodes from the shared cross-project layer. Same algorithm as
+ *  evictStale but operates on SHARED_DIR only. Call this periodically to prevent
+ *  the shared layer from growing unbounded. */
+export function evictSharedStale(maxAgeDays = 60, maxNodes = 2000): { removed: number; kept: number } {
+  try {
+    const nodes = readSharedNodes();
+    if (nodes.length === 0) return { removed: 0, kept: 0 };
+    const now = Date.now();
+    const ageMs = maxAgeDays * 86_400_000;
+    const lastTs = (n: DomainNode) => new Date(n.lastAccessed ?? n.ts).getTime();
+    let kept = nodes.filter((n) => now - lastTs(n) < ageMs);
+    if (kept.length > maxNodes) {
+      kept.sort((a, b) => lastTs(b) - lastTs(a));
+      kept = kept.slice(0, maxNodes);
+    }
+    const removed = nodes.length - kept.length;
+    if (removed > 0) writeSharedNodes(kept);
     return { removed, kept: kept.length };
   } catch { return { removed: 0, kept: 0 }; }
 }
@@ -255,14 +315,54 @@ export function queryDomainGraph(
 
 export function saveInvestigationResult(keywords: string[], result: string, source?: string, confidence = 0.7): string {
   try {
-    return addDomainNode({
+    // Write to SHARED layer — investigation findings are cross-project knowledge.
+    const nodeId = uid("node");
+    const full: DomainNode = {
+      id: nodeId,
       type: "fact",
       name: keywords.join(" "),
-      props: { result },
+      props: { result, keywords: [...new Set(keywords)] },
       source: source || "investigation",
       confidence,
-    });
+      ts: new Date().toISOString(),
+    };
+    try { mkdirSync(SHARED_DIR, { recursive: true }); appendFileSync(sharedNodesFile(), JSON.stringify(full) + "\n"); } catch { /* */ }
+
+    // Auto-link: find existing nodes (both layers) with overlapping keywords.
+    // Creates related-to edges that form the knowledge mesh automatically.
+    autoLinkKeywords(nodeId, keywords);
+
+    return nodeId;
   } catch {
     return "";
   }
+}
+
+/** Auto-form mesh edges: find nodes whose keywords overlap with ours by >= minOverlap,
+ *  and create related-to edges. Caps at maxLinks to avoid hub explosion. */
+function autoLinkKeywords(nodeId: string, keywords: string[], minOverlap = 2, maxLinks = 8): void {
+  if (keywords.length < minOverlap) return;
+  try {
+    const candidates = queryDomain(keywords);
+    let linked = 0;
+    for (const node of candidates.nodes) {
+      if (node.id === nodeId) continue;
+      // Extract this node's keywords from props or name.
+      const nodeKw: string[] = Array.isArray((node.props as any)?.keywords)
+        ? (node.props as any).keywords
+        : (node.name || "").toLowerCase().split(/[^a-z0-9_-]+/).filter((w: string) => w.length >= 3);
+      // Count exact keyword matches.
+      const overlap = keywords.filter((k) => nodeKw.includes(k));
+      if (overlap.length >= minOverlap) {
+        const edge: DomainEdge = {
+          from: nodeId, to: node.id, rel: "related-to",
+          note: `auto: ${overlap.length} shared (${overlap.slice(0, 5).join(",")})`,
+          ts: new Date().toISOString(),
+        };
+        try { mkdirSync(SHARED_DIR, { recursive: true }); appendFileSync(sharedEdgesFile(), JSON.stringify(edge) + "\n"); } catch { /* */ }
+        linked++;
+        if (linked >= maxLinks) break;
+      }
+    }
+  } catch { /* */ }
 }
