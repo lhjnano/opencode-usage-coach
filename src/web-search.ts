@@ -98,8 +98,37 @@ function effectiveFrameworks(frameworks: string[], keyDeps?: string[]): string[]
 async function ghFetch<T>(url: string, signal: AbortSignal): Promise<T> {
   const res = await fetch(url, { headers: ghHeaders(), signal });
   if (!res.ok) {
-    const tag = res.status === 403 || res.status === 429 ? " (rate limit)" : "";
-    throw new Error(`HTTP ${res.status}${tag}`);
+    // Read GitHub's error body — it contains the exact validation failure.
+    let ghError: any = null;
+    let ghErrorText = "";
+    try {
+      ghErrorText = await res.text();
+      ghError = JSON.parse(ghErrorText);
+    } catch { /* not JSON */ }
+
+    // Build a complete diagnostic for debugging 422/403/etc.
+    const tag = res.status === 403 || res.status === 429 ? " (rate limit)" :
+                res.status === 422 ? " (validation failed)" : "";
+    const errs = ghError?.errors;
+    const errMsg = ghError?.message ?? ghErrorText.slice(0, 300);
+    const detail = errs
+      ? errs.map((e: any) => typeof e === "string" ? e : `${e?.field ?? "?"}: ${e?.message ?? e?.code ?? JSON.stringify(e)}`).join("; ")
+      : "";
+
+    console.error(JSON.stringify({
+      level: "error",
+      module: "web-search",
+      event: "gh-fetch-error",
+      status: res.status,
+      tag,
+      url,
+      ghMessage: errMsg,
+      ghErrors: detail,
+      rateLimitRemaining: res.headers.get("x-ratelimit-remaining"),
+      rateLimitReset: res.headers.get("x-ratelimit-reset"),
+    }));
+
+    throw new Error(`HTTP ${res.status}${tag}: ${errMsg}${detail ? ` | ${detail}` : ""}`);
   }
   return (await res.json()) as T;
 }

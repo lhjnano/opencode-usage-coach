@@ -231,8 +231,30 @@ function effectiveFrameworks(frameworks, keyDeps) {
 async function ghFetch(url, signal) {
   const res = await fetch(url, { headers: ghHeaders(), signal });
   if (!res.ok) {
-    const tag = res.status === 403 || res.status === 429 ? " (rate limit)" : "";
-    throw new Error(`HTTP ${res.status}${tag}`);
+    let ghError = null;
+    let ghErrorText = "";
+    try {
+      ghErrorText = await res.text();
+      ghError = JSON.parse(ghErrorText);
+    } catch {
+    }
+    const tag = res.status === 403 || res.status === 429 ? " (rate limit)" : res.status === 422 ? " (validation failed)" : "";
+    const errs = ghError?.errors;
+    const errMsg = ghError?.message ?? ghErrorText.slice(0, 300);
+    const detail = errs ? errs.map((e) => typeof e === "string" ? e : `${e?.field ?? "?"}: ${e?.message ?? e?.code ?? JSON.stringify(e)}`).join("; ") : "";
+    console.error(JSON.stringify({
+      level: "error",
+      module: "web-search",
+      event: "gh-fetch-error",
+      status: res.status,
+      tag,
+      url,
+      ghMessage: errMsg,
+      ghErrors: detail,
+      rateLimitRemaining: res.headers.get("x-ratelimit-remaining"),
+      rateLimitReset: res.headers.get("x-ratelimit-reset")
+    }));
+    throw new Error(`HTTP ${res.status}${tag}: ${errMsg}${detail ? ` | ${detail}` : ""}`);
   }
   return await res.json();
 }
