@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-07-13
+
+### Fixed
+- **web-search 에러가 TUI에 유출되는 문제.** `console.error` 6곳을 파일 로거(`wsLog`)로 교체.
+  에러가 `~/.cache/opencode-usage-coach/web-search.log`에만 기록되고 TUI에 나타나지 않음.
+- **GitHub Search API 256자 초과 에러.** Tier 1에서 `org:orgname` qualifier를 추가할 때
+  전체 쿼리가 GitHub의 256자 제한을 초과하는 문제 수정. org 길이만큼 미리 잘라내도록 변경.
+- ESLint `no-console: error` 규칙 추가 — `src/`에서 `console.*` 사용 시 CI 에러. 재발 방지.
+- 사용하지 않는 `readProjectEdges`/`readSharedEdges` 함수 제거.
+
+## [0.12.0] - 2026-07-13
+
+### Added
+- **도메인 DB 메쉬 자동 형성.** `saveInvestigationResult`가 키워드 2개 이상 겹치는 기존
+  노드와 `related-to` 엣지를 자동으로 생성. 최대 8개 링크/노드로 허브 폭발 방지.
+- **크로스 프로젝트 공유 지식 레이어.** 조사 결과가 `~/.cache/opencode-usage-coach/shared/`에
+  저장되어 여러 프로젝트에서 공유됨. `readNodes`/`readEdges`가 프로젝트 + 공유 레이어를 모두 읽음.
+- `evictSharedStale()` — 공유 레이어 전용 GC 함수.
+- `getSharedDir()` export — 공유 디렉토리 경로 확인용.
+
+### Changed
+- **`extractKeywords` 개선.** 불용어 80개 확장, 키워드 상한 16→8로 축소. 기술적/식별성 있는
+  용어만 남기도록 필터링 강화. 노드 이름이 문장 덩어리가 되는 문제 해결.
+- `saveInvestigationResult`가 공유 레이어에 저장 (기존: 프로젝트 레이어).
+- `touchNodes`/`evictStale`이 프로젝트 레이어만 수정 (공유 노드가 프로젝트에 복제되는 버그 방지).
+
+### Tests
+- `test/domain-mesh.test.ts` 추가 — 9개 테스트 (공유 레이어, 자동 링크, 레이어 격리, 키워드 저장).
+- 총 273 tests, 0 failures.
+
 ## [0.11.0] - 2026-07-12
 
 ### Added

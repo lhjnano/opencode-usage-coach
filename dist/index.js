@@ -1,9 +1,9 @@
 // src/index.ts
-import { mkdirSync as mkdirSync2, writeFileSync as writeFileSync2, appendFileSync as appendFileSync2, readFileSync as readFileSync2, existsSync as existsSync2 } from "fs";
+import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, appendFileSync as appendFileSync3, readFileSync as readFileSync2, existsSync as existsSync2 } from "fs";
 import { spawn, spawnSync } from "child_process";
 import { createHash } from "crypto";
-import { homedir } from "os";
-import { join as join2, resolve, dirname as dirname2 } from "path";
+import { homedir as homedir2 } from "os";
+import { join as join3, resolve, dirname as dirname2 } from "path";
 import { tool } from "@opencode-ai/plugin";
 
 // src/domain.ts
@@ -221,6 +221,18 @@ function autoLinkKeywords(nodeId, keywords, minOverlap = 2, maxLinks = 8) {
 }
 
 // src/web-search.ts
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2 } from "fs";
+import { join as join2 } from "path";
+import { homedir } from "os";
+var WS_LOG_FILE = process.env.UC_STATE_DIR ? join2(process.env.UC_STATE_DIR, "web-search.log") : join2(homedir(), ".cache", "opencode-usage-coach", "web-search.log");
+function wsLog(msg) {
+  try {
+    mkdirSync2(join2(WS_LOG_FILE, ".."), { recursive: true });
+    appendFileSync2(WS_LOG_FILE, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+`);
+  } catch {
+  }
+}
 var FRAMEWORK_DOCS = {
   "react": { name: "React", docs: "https://react.dev", githubOrg: "facebook" },
   "solid-js": { name: "Solid.js", docs: "https://solidjs.com", githubOrg: "solidjs" },
@@ -283,7 +295,7 @@ async function ghFetch(url, signal) {
     const errs = ghError?.errors;
     const errMsg = ghError?.message ?? ghErrorText.slice(0, 300);
     const detail = errs ? errs.map((e) => typeof e === "string" ? e : `${e?.field ?? "?"}: ${e?.message ?? e?.code ?? JSON.stringify(e)}`).join("; ") : "";
-    console.error(JSON.stringify({
+    wsLog(JSON.stringify({
       level: "error",
       module: "web-search",
       event: "gh-fetch-error",
@@ -319,7 +331,9 @@ async function tier1OfficialDocs(query, fws, results, docRefs, seen, signal) {
     const entry = FRAMEWORK_DOCS[fw];
     if (!entry?.githubOrg) continue;
     try {
-      const fullQ = `${cleanQuery} org:${entry.githubOrg}`;
+      const orgPart = ` org:${entry.githubOrg}`;
+      const truncated = cleanQuery.slice(0, GH_QUERY_MAX - orgPart.length);
+      const fullQ = `${truncated}${orgPart}`;
       const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQ)}&per_page=3`;
       const data = await ghFetch(url, signal);
       for (const item of data.items ?? []) {
@@ -332,7 +346,7 @@ async function tier1OfficialDocs(query, fws, results, docRefs, seen, signal) {
       }
     } catch (e) {
       const m = errMessage(e);
-      console.error(`[web-search] tier1 ${fw}: ${m}`);
+      wsLog(`[web-search] tier1 ${fw}: ${m}`);
       errors.push(`tier1:${fw}:${m.slice(0, 80)}`);
     }
   }
@@ -355,7 +369,7 @@ async function tier2GitHubIssues(query, results, seen, signal) {
     }
   } catch (e) {
     const m = errMessage(e);
-    console.error(`[web-search] tier2: ${m}`);
+    wsLog(`[web-search] tier2: ${m}`);
     errors.push(`tier2:${m.slice(0, 80)}`);
   }
   return errors;
@@ -379,7 +393,7 @@ async function tier3GitHubCode(query, results, seen, signal) {
     }
   } catch (e) {
     const m = errMessage(e);
-    console.error(`[web-search] tier3: ${m}`);
+    wsLog(`[web-search] tier3: ${m}`);
     errors.push(`tier3:${m.slice(0, 80)}`);
   }
   return errors;
@@ -405,7 +419,7 @@ async function searchContext(query, frameworks, keyDeps, timeoutMs) {
     }
   } catch (e) {
     const m = errMessage(e);
-    console.error(`[web-search] unexpected error: ${m}`);
+    wsLog(`[web-search] unexpected error: ${m}`);
     errors.push(`unexpected:${m.slice(0, 80)}`);
   } finally {
     clearTimeout(timer);
@@ -423,49 +437,49 @@ var DEFAULT_MAX_STEPS = Number(process.env.UC_MAX_STEPS ?? 30) || 30;
 var WATCHDOG_POLL_MS = Math.max(1e3, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3e3) || 3e3);
 var WALL_TIMEOUT_MS = Math.max(1, Number(process.env.UC_WALL_TIMEOUT_MIN ?? 30) || 30) * 60 * 1e3;
 var DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUESTIONS ?? 7)) || 7);
-var PIPE_LOG = join2(homedir(), ".cache", "opencode-usage-coach", "pipeline.log");
+var PIPE_LOG = join3(homedir2(), ".cache", "opencode-usage-coach", "pipeline.log");
 function pipeLog(msg) {
   try {
-    mkdirSync2(dirname2(PIPE_LOG), { recursive: true });
-    appendFileSync2(PIPE_LOG, `[SERVER] ${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+    mkdirSync3(dirname2(PIPE_LOG), { recursive: true });
+    appendFileSync3(PIPE_LOG, `[SERVER] ${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
 `);
   } catch {
   }
 }
 pipeLog(`MODULE LOADED | node=${process.version} | pid=${process.pid}`);
-var STATE_DIR = join2(homedir(), ".cache", "opencode-usage-coach");
-var STATE_FILE = join2(STATE_DIR, "state.json");
-var LOG_FILE = join2(STATE_DIR, "coach.log");
+var STATE_DIR = join3(homedir2(), ".cache", "opencode-usage-coach");
+var STATE_FILE = join3(STATE_DIR, "state.json");
+var LOG_FILE = join3(STATE_DIR, "coach.log");
 function projectStateDir(dir) {
   const abs = resolve(dir || ".");
   const h = createHash("sha1").update(abs).digest("hex").slice(0, 12);
-  return join2(homedir(), ".cache", "opencode-usage-coach", "projects", h);
+  return join3(homedir2(), ".cache", "opencode-usage-coach", "projects", h);
 }
 function setStateDir(dir) {
   STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(dir);
-  STATE_FILE = join2(STATE_DIR, "state.json");
-  LOG_FILE = join2(STATE_DIR, "coach.log");
+  STATE_FILE = join3(STATE_DIR, "state.json");
+  LOG_FILE = join3(STATE_DIR, "coach.log");
 }
 var NOOP_HOOKS = {};
 function log(msg) {
   try {
-    appendFileSync2(LOG_FILE, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+    appendFileSync3(LOG_FILE, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
 `);
   } catch {
   }
 }
 function writeState(c) {
   try {
-    mkdirSync2(STATE_DIR, { recursive: true });
+    mkdirSync3(STATE_DIR, { recursive: true });
     writeFileSync2(STATE_FILE, JSON.stringify({ ...c, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }));
   } catch {
   }
 }
 function rulesFile() {
-  return join2(STATE_DIR, "rules.md");
+  return join3(STATE_DIR, "rules.md");
 }
 function failuresFile() {
-  return join2(STATE_DIR, "failures.ndjson");
+  return join3(STATE_DIR, "failures.ndjson");
 }
 function readRules() {
   try {
@@ -477,7 +491,7 @@ function readRules() {
   }
 }
 function implNotesFile() {
-  return join2(STATE_DIR, "impl-notes.md");
+  return join3(STATE_DIR, "impl-notes.md");
 }
 var IMPL_NOTE_INSTRUCTION = `
 ## Implementation Notes (important!)
@@ -524,8 +538,8 @@ ${notes}
 Source: generate task "${shortTask}"
 
 `;
-    mkdirSync2(STATE_DIR, { recursive: true });
-    appendFileSync2(implNotesFile(), entry);
+    mkdirSync3(STATE_DIR, { recursive: true });
+    appendFileSync3(implNotesFile(), entry);
   } catch (e) {
     log(`appendImplNotes err: ${String(e)}`);
   }
@@ -716,7 +730,7 @@ function extractKeywords(text) {
   }
 }
 function harnessFile(sessionID) {
-  return join2(STATE_DIR, sessionID || "_default", "harness.json");
+  return join3(STATE_DIR, sessionID || "_default", "harness.json");
 }
 function readHarness(sessionID) {
   try {
@@ -730,7 +744,7 @@ function readHarness(sessionID) {
 function writeHarness(sessionID, h) {
   try {
     const f = harnessFile(sessionID);
-    mkdirSync2(dirname2(f), { recursive: true });
+    mkdirSync3(dirname2(f), { recursive: true });
     h.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     writeFileSync2(f, JSON.stringify(h, null, 2));
   } catch {
@@ -753,7 +767,7 @@ function mutateHarness(sessionID, fn) {
   return next;
 }
 function interviewFile(sessionID) {
-  return join2(STATE_DIR, sessionID || "_default", "interview.json");
+  return join3(STATE_DIR, sessionID || "_default", "interview.json");
 }
 function readInterview(sessionID) {
   try {
@@ -767,7 +781,7 @@ function readInterview(sessionID) {
 function writeInterview(sessionID, s) {
   try {
     const f = interviewFile(sessionID);
-    mkdirSync2(dirname2(f), { recursive: true });
+    mkdirSync3(dirname2(f), { recursive: true });
     s.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     writeFileSync2(f, JSON.stringify(s, null, 2));
   } catch {
@@ -965,7 +979,7 @@ function parseFileList(rawList, baseDir) {
     let testPattern;
     let testFramework;
     for (const mf of manifestFiles) {
-      const full = join2(baseDir, mf);
+      const full = join3(baseDir, mf);
       if (existsSync2(full)) {
         try {
           const content = JSON.parse(readFileSync2(full, "utf8"));
@@ -1295,15 +1309,15 @@ function readHarnessCfg(dir) {
     return {};
   };
   return {
-    ...tryRead(join2(homedir(), ".config", "opencode-usage-coach", "harness.config.json")),
-    ...tryRead(join2(dir, "harness.config.json"))
+    ...tryRead(join3(homedir2(), ".config", "opencode-usage-coach", "harness.config.json")),
+    ...tryRead(join3(dir, "harness.config.json"))
   };
 }
 function writeHarnessCfg(updates) {
-  const configDir = join2(homedir(), ".config", "opencode-usage-coach");
-  const configPath = join2(configDir, "harness.config.json");
+  const configDir = join3(homedir2(), ".config", "opencode-usage-coach");
+  const configPath = join3(configDir, "harness.config.json");
   try {
-    mkdirSync2(configDir, { recursive: true });
+    mkdirSync3(configDir, { recursive: true });
     const existing = (() => {
       try {
         return JSON.parse(readFileSync2(configPath, "utf8"));
@@ -2031,8 +2045,8 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           async execute(args, _ctx) {
             const rec = { ts: (/* @__PURE__ */ new Date()).toISOString(), task: args.task, prompt: args.prompt, gradeResult: args.gradeResult, model: args.model, revisions: args.revisions };
             try {
-              mkdirSync2(STATE_DIR, { recursive: true });
-              appendFileSync2(failuresFile(), JSON.stringify(rec) + "\n");
+              mkdirSync3(STATE_DIR, { recursive: true });
+              appendFileSync3(failuresFile(), JSON.stringify(rec) + "\n");
             } catch (e) {
               log(`record_failure err: ${String(e)}`);
             }
@@ -2157,8 +2171,8 @@ Keep it concrete and actionable.`;
             const rule = out;
             try {
               const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-              mkdirSync2(STATE_DIR, { recursive: true });
-              appendFileSync2(rulesFile(), `## Rule (${date})
+              mkdirSync3(STATE_DIR, { recursive: true });
+              appendFileSync3(rulesFile(), `## Rule (${date})
 ${rule}
 Origin: ${args.task}
 

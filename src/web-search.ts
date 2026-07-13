@@ -4,8 +4,20 @@
 //   - Tier 2: general GitHub issue search (q + sort=relevance, per_page=5).
 //   - Tier 3: GitHub code search (per_page=3) — requires GITHUB_TOKEN / GH_TOKEN, skipped if absent.
 // Defensive design: never throws — always returns a WebSearchResponse. Each tier is wrapped
-// in try/catch; failures are logged via console.error and execution continues to the next tier.
-// Tiers run SEQUENTIALLY (GitHub secondary rate limits trigger on bursts); stops once 5+ results.
+// in try/catch; failures are logged to ~/.cache/opencode-usage-coach/web-search.log (NOT
+// console.error, which leaks into the TUI). Tiers run SEQUENTIALLY; stops once 5+ results.
+
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+const WS_LOG_FILE = process.env.UC_STATE_DIR
+  ? join(process.env.UC_STATE_DIR, "web-search.log")
+  : join(homedir(), ".cache", "opencode-usage-coach", "web-search.log");
+
+function wsLog(msg: string): void {
+  try { mkdirSync(join(WS_LOG_FILE, ".."), { recursive: true }); appendFileSync(WS_LOG_FILE, `${new Date().toISOString()} ${msg}\n`); } catch { /* */ }
+}
 
 export interface WebResult {
   tier: "official-docs" | "github-issues" | "github-code";
@@ -115,7 +127,7 @@ async function ghFetch<T>(url: string, signal: AbortSignal): Promise<T> {
       ? errs.map((e: any) => typeof e === "string" ? e : `${e?.field ?? "?"}: ${e?.message ?? e?.code ?? JSON.stringify(e)}`).join("; ")
       : "";
 
-    console.error(JSON.stringify({
+    wsLog(JSON.stringify({
       level: "error",
       module: "web-search",
       event: "gh-fetch-error",
@@ -164,7 +176,10 @@ async function tier1OfficialDocs(
     try {
       // org: is a GitHub qualifier WE control — don't sanitize it.
       // Only sanitize the user's free-text query (which may contain colons, etc.).
-      const fullQ = `${cleanQuery} org:${entry.githubOrg}`;
+      // Truncate cleanQuery to leave room for ` org:orgname` within GH_QUERY_MAX.
+      const orgPart = ` org:${entry.githubOrg}`;
+      const truncated = cleanQuery.slice(0, GH_QUERY_MAX - orgPart.length);
+      const fullQ = `${truncated}${orgPart}`;
       const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQ)}&per_page=3`;
       const data = await ghFetch<{
         items?: Array<{ title: string; html_url: string; body: string | null }>;
@@ -179,7 +194,7 @@ async function tier1OfficialDocs(
       }
     } catch (e) {
       const m = errMessage(e);
-      console.error(`[web-search] tier1 ${fw}: ${m}`);
+      wsLog(`[web-search] tier1 ${fw}: ${m}`);
       errors.push(`tier1:${fw}:${m.slice(0, 80)}`);
     }
   }
@@ -211,7 +226,7 @@ async function tier2GitHubIssues(
     }
   } catch (e) {
     const m = errMessage(e);
-    console.error(`[web-search] tier2: ${m}`);
+      wsLog(`[web-search] tier2: ${m}`);
     errors.push(`tier2:${m.slice(0, 80)}`);
   }
   return errors;
@@ -249,7 +264,7 @@ async function tier3GitHubCode(
     }
   } catch (e) {
     const m = errMessage(e);
-    console.error(`[web-search] tier3: ${m}`);
+      wsLog(`[web-search] tier3: ${m}`);
     errors.push(`tier3:${m.slice(0, 80)}`);
   }
   return errors;
@@ -285,7 +300,7 @@ export async function searchContext(
     }
   } catch (e) {
     const m = errMessage(e);
-    console.error(`[web-search] unexpected error: ${m}`);
+    wsLog(`[web-search] unexpected error: ${m}`);
     errors.push(`unexpected:${m.slice(0, 80)}`);
   } finally {
     clearTimeout(timer);
