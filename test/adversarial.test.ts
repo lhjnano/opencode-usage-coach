@@ -70,12 +70,12 @@ test("parseQuotaResponse: valid JSON but no 'usage' key → null", () => {
   assert.equal(parseQuotaResponse('[{"foo":"bar"}]'), null);
 });
 
-test("parseQuotaResponse: usage present but missing primary/secondary/tertiary → defaults to {usedPercent:0}", () => {
+test("parseQuotaResponse: usage present but missing primary/secondary/tertiary → all windows null", () => {
   const result = parseQuotaResponse('[{"usage":{}}]');
   assert.ok(result, "should return a Quota, not null");
-  assert.equal(result!.weekly.usedPercent, 0);
-  assert.equal(result!.monthly.usedPercent, 0);
-  assert.equal(result!.fiveHour.usedPercent, 0);
+  assert.equal(result!.weekly, null);
+  assert.equal(result!.monthly, null);
+  assert.equal(result!.fiveHour, null);
 });
 
 test("parseQuotaResponse: malformed JSON (truncated) → null", () => {
@@ -141,6 +141,87 @@ test("parseQuotaResponse: valid JSON but first element is not an object → null
   assert.equal(parseQuotaResponse('["string"]'), null);
 });
 
+// Dynamic window mapping — real-world plan structures
+
+test("parseQuotaResponse: 2-window plan (5h in primary, monthly in secondary, tertiary null)", () => {
+  // Real data from z.ai key with no weekly limit
+  const raw = JSON.stringify([{
+    provider: "zai", source: "api",
+    usage: {
+      identity: { providerID: "zai" },
+      primary: { resetDescription: "5 hours window", resetsAt: "2026-07-15T12:26:11Z", usedPercent: 41, windowMinutes: 300 },
+      secondary: { resetDescription: "Monthly", resetsAt: "2026-07-24T09:00:02Z", usedPercent: 0 },
+      tertiary: null,
+    },
+  }]);
+  const result = parseQuotaResponse(raw);
+  assert.ok(result, "should parse");
+  assert.equal(result!.fiveHour?.usedPercent, 41, "5h window should be mapped from primary");
+  assert.equal(result!.monthly?.usedPercent, 0, "monthly should be mapped from secondary");
+  assert.equal(result!.weekly, null, "weekly should be null (no weekly window)");
+});
+
+test("parseQuotaResponse: 3-window plan (weekly primary, monthly secondary, 5h tertiary)", () => {
+  // Real data from z.ai key with all three windows
+  const raw = JSON.stringify([{
+    provider: "zai", source: "api",
+    usage: {
+      identity: { providerID: "zai" },
+      primary: { usedPercent: 92, resetDescription: "1 week window", windowMinutes: 10080 },
+      secondary: { usedPercent: 0, resetDescription: "Monthly" },
+      tertiary: { usedPercent: 41, resetDescription: "5 hours window", windowMinutes: 300 },
+    },
+  }]);
+  const result = parseQuotaResponse(raw);
+  assert.ok(result);
+  assert.equal(result!.weekly?.usedPercent, 92, "weekly from primary");
+  assert.equal(result!.monthly?.usedPercent, 0, "monthly from secondary");
+  assert.equal(result!.fiveHour?.usedPercent, 41, "5h from tertiary");
+});
+
+test("parseQuotaResponse: 1-window plan (only weekly, no 5h or monthly)", () => {
+  // e.g. Codex after removing 5h limit
+  const raw = JSON.stringify([{
+    provider: "codex", source: "api",
+    usage: {
+      identity: { providerID: "codex" },
+      primary: { usedPercent: 60, resetDescription: "1 week window", windowMinutes: 10080 },
+      secondary: null,
+      tertiary: null,
+    },
+  }]);
+  const result = parseQuotaResponse(raw);
+  assert.ok(result);
+  assert.equal(result!.weekly?.usedPercent, 60);
+  assert.equal(result!.monthly, null);
+  assert.equal(result!.fiveHour, null);
+});
+
+test("coach: 2-window plan (only 5h + monthly, no weekly) → weekly=-1 sentinel, 5h threshold works", () => {
+  const q: Quota = {
+    weekly: null,
+    monthly: { usedPercent: 0 },
+    fiveHour: { usedPercent: 85 },
+  };
+  const c = coach(q, "lighter");
+  assert.equal(c.weekly, -1, "weekly should be -1 (doesn't exist)");
+  assert.equal(c.fiveHour, 85);
+  assert.equal(c.decision, "THROTTLE", "5h at 85% should trigger THROTTLE even without weekly");
+});
+
+test("coach: 2-window plan STOP at 5h threshold (no weekly to save it)", () => {
+  const q: Quota = {
+    weekly: null,
+    monthly: null,
+    fiveHour: { usedPercent: 95 },
+  };
+  const c = coach(q, "lighter");
+  assert.equal(c.decision, "STOP", "5h at 95% should STOP even without weekly");
+  assert.equal(c.weekly, -1);
+  assert.ok(c.advice.includes("5h"), "advice should mention 5h");
+  assert.ok(!c.advice.includes("weekly"), "advice should NOT mention weekly");
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 2. coach() adversarial tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -154,17 +235,17 @@ test("coach(null, 'lighter') → GO with weekly -2 (fetch failed sentinel)", () 
   assert.ok(c.advice.includes("quota unavailable"));
 });
 
-test("coach: partial quota (only weekly set, monthly/fiveHour undefined) → uses 0 defaults", () => {
+test("coach: partial quota (only weekly set, monthly/fiveHour null) → uses -1 sentinel", () => {
   const q: Quota = {
     weekly: { usedPercent: 50 },
-    monthly: undefined as unknown as Quota["monthly"],
-    fiveHour: undefined as unknown as Quota["fiveHour"],
+    monthly: null,
+    fiveHour: null,
   };
   const c = coach(q, "lighter");
   assert.equal(c.decision, "GO");
   assert.equal(c.weekly, 50);
-  assert.equal(c.monthly, 0);
-  assert.equal(c.fiveHour, 0);
+  assert.equal(c.monthly, -1);
+  assert.equal(c.fiveHour, -1);
 });
 
 test("coach: exact STOP_5H boundary (h5=92) → STOP", () => {

@@ -502,8 +502,8 @@ function formatStatus(r: StatusResult): string {
   const model = q.model ? ` ${q.model.split("/").pop()}` : "";
   lines.push(`usage-coach [${tag}]${model}`);
   if (!q.isFree) {
-    lines.push(` 5h ${bar(q.fiveHour)} ${q.fiveHour}%`);
-    lines.push(` 1w ${bar(q.weekly)} ${q.weekly}%`);
+    if (q.fiveHour >= 0) lines.push(` 5h ${bar(q.fiveHour)} ${q.fiveHour}%`);
+    if (q.weekly >= 0) lines.push(` 1w ${bar(q.weekly)} ${q.weekly}%`);
   }
   if (q.advice) lines.push(` ${q.advice}`);
   if (r.harness?.active) {

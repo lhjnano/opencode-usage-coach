@@ -5,6 +5,24 @@
 // (Same verified pattern used by opencode-subagent-statusline.)
 import { solidPlugin } from "esbuild-plugin-solid";
 import { defineConfig } from "tsup";
+import { readFileSync, writeFileSync } from "fs";
+
+// opencode calls ALL named exports as plugin factory functions.
+// We must strip everything except `server` (and `default`) from the dist output,
+// otherwise utility functions (coach, buildGapPrompt, etc.) get called with the wrong
+// input and crash.
+function stripNamedExports() {
+  const path = "dist/index.js";
+  let c = readFileSync(path, "utf8");
+  // Replace the first `export { ... };` block (named exports) with server/default only.
+  c = c.replace(
+    /export \{[^}]+\};/,
+    "export { UsageCoachPlugin as server, UsageCoachPlugin as default };",
+  );
+  // Remove `export type { ... };` if present.
+  c = c.replace(/export type \{[^}]+\};/g, "");
+  writeFileSync(path, c);
+}
 
 export default defineConfig([
   {
@@ -17,6 +35,7 @@ export default defineConfig([
     clean: true,
     outDir: "dist",
     external: ["@opencode-ai/plugin"],
+    onSuccess: stripNamedExports,
   },
   {
     // CLI module: standalone entry for `usage-coach` bin. No external deps.

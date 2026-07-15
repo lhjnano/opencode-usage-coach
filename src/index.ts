@@ -59,8 +59,8 @@ function setStateDir(dir: string) {
   LOG_FILE = join(STATE_DIR, "coach.log");
 }
 
-type QuotaWindow = { resetDescription?: string; usedPercent: number; resetsAt?: string };
-type Quota = { weekly: QuotaWindow; monthly: QuotaWindow; fiveHour: QuotaWindow };
+type QuotaWindow = { resetDescription?: string; usedPercent?: number; resetsAt?: string; windowMinutes?: number };
+type Quota = { weekly: QuotaWindow | null; monthly: QuotaWindow | null; fiveHour: QuotaWindow | null };
 type Decision = "GO" | "THROTTLE" | "STOP";
 type Coaching = { decision: Decision; advice: string; weekly: number; monthly: number; fiveHour: number; model?: string; provider?: string; isFree?: boolean };
 
@@ -1112,13 +1112,13 @@ async function fetchEnabledProviders(): Promise<string[]> {
 }
 
 /** per-provider coaching advice: big vs small task guidance based on 5h + weekly capacity. */
-function providerAdvice(h5: number, wk: number): string {
+function providerAdvice(h5: number | null, wk: number | null): string {
   const S5H = STOP_5H, SWK = STOP_WK, T5H = THR_5H, TWK = THR_WK;
-  if (h5 >= S5H || wk >= SWK) return "STOP — finish current only";
-  if (h5 >= T5H && wk >= TWK) return "small tasks only — big ones will hit both limits";
-  if (h5 >= T5H) return "small tasks only — 5h window nearly full, big tasks after reset";
-  if (wk >= TWK) return "small tasks only — big ones will strain late-week";
-  if (h5 >= 50 || wk >= 50) return "moderate tasks OK — save big ones for headroom";
+  if ((h5 !== null && h5 >= S5H) || (wk !== null && wk >= SWK)) return "STOP — finish current only";
+  if (h5 !== null && wk !== null && h5 >= T5H && wk >= TWK) return "small tasks only — big ones will hit both limits";
+  if (h5 !== null && h5 >= T5H) return "small tasks only — 5h window nearly full, big tasks after reset";
+  if (wk !== null && wk >= TWK) return "small tasks only — big ones will strain late-week";
+  if ((h5 !== null && h5 >= 50) || (wk !== null && wk >= 50)) return "moderate tasks OK — save big ones for headroom";
   return "big tasks OK — short & long limits comfortable";
 }
 
@@ -1128,15 +1128,15 @@ async function fetchProvidersCoach(): Promise<ProviderCoach[]> {
   const results = await Promise.all(ids.map(async (id) => {
     try {
       const out = await captureStdout(["usage", "--provider", id, "--json"]);
-      const u = (JSON.parse(out)[0]?.usage) as any;
-      if (!u) return null;
-      const h5 = Math.round(u.tertiary?.usedPercent ?? 0);
-      const wk = Math.round(u.primary?.usedPercent ?? 0);
+      const q = parseQuotaResponse(out);
+      if (!q) return null;
+      const h5 = q.fiveHour ? Math.round(q.fiveHour.usedPercent ?? 0) : null;
+      const wk = q.weekly ? Math.round(q.weekly.usedPercent ?? 0) : null;
       return {
         id, name: id,
-        fiveHour: h5, weekly: wk,
-        fiveHourReset: humanRemaining(u.tertiary?.resetsAt),
-        weeklyReset: humanRemaining(u.primary?.resetsAt),
+        fiveHour: h5 ?? -1, weekly: wk ?? -1,
+        fiveHourReset: q.fiveHour ? humanRemaining(q.fiveHour.resetsAt) : "",
+        weeklyReset: q.weekly ? humanRemaining(q.weekly.resetsAt) : "",
         advice: providerAdvice(h5, wk),
       } as ProviderCoach;
     } catch { return null; }
@@ -1144,18 +1144,49 @@ async function fetchProvidersCoach(): Promise<ProviderCoach[]> {
   return results.filter(Boolean) as ProviderCoach[];
 }
 
-/** Parse raw codexbar --json output into a Quota object. Pure function — no I/O. */
+/** Parse raw codexbar --json output into a Quota object. Pure function — no I/O.
+ *  Classifies windows by windowMinutes/resetDescription, falling back to slot
+ *  position (primary/secondary/tertiary) for legacy data without those fields. */
 export function parseQuotaResponse(rawText: string): Quota | null {
   try {
     const text = (rawText || "").trim();
     if (!text || text === "[]") return null;
     const u = (JSON.parse(text)[0]?.usage) as { primary?: QuotaWindow; secondary?: QuotaWindow; tertiary?: QuotaWindow } | undefined;
     if (!u) return null;
-    return {
-      weekly: u.primary ?? { usedPercent: 0 },
-      monthly: u.secondary ?? { usedPercent: 0 },
-      fiveHour: u.tertiary ?? { usedPercent: 0 },
-    };
+
+    const result: Quota = { weekly: null, monthly: null, fiveHour: null };
+    const entries = [
+      { key: "primary", slot: u.primary },
+      { key: "secondary", slot: u.secondary },
+      { key: "tertiary", slot: u.tertiary },
+    ].filter((e) => e.slot != null);
+
+    for (const { key, slot } of entries) {
+      const mins = slot!.windowMinutes ?? 0;
+      const desc = String(slot!.resetDescription ?? "").toLowerCase();
+
+      if (mins === 300 || desc.includes("5 hour") || desc.includes("5h")) {
+        result.fiveHour = slot;
+      } else if (mins === 10080 || desc.includes("week")) {
+        result.weekly = slot;
+      } else if (desc.includes("month")) {
+        result.monthly = slot;
+      } else if (mins > 0 && mins <= 360) {
+        result.fiveHour = slot;
+      } else if (mins > 360 && mins <= 14400) {
+        result.weekly = slot;
+      } else if (mins > 14400) {
+        result.monthly = slot;
+      } else if (key === "primary") {
+        result.weekly = slot;
+      } else if (key === "secondary") {
+        result.monthly = slot;
+      } else if (key === "tertiary") {
+        result.fiveHour = slot;
+      }
+    }
+
+    return result;
   } catch { return null; }
 }
 
@@ -1198,17 +1229,31 @@ export async function fetchQuotaWithRetry(provider: string, maxRetries = 3): Pro
 
 function coach(q: Quota | null, lighter: string): Coaching {
   if (!q) return { decision: "GO", advice: "quota unavailable — retrying. proceeding cautiously.", weekly: -2, monthly: -2, fiveHour: -2 };
-  const wk = Math.round(q.weekly?.usedPercent ?? 0), mo = Math.round(q.monthly?.usedPercent ?? 0), h5 = Math.round(q.fiveHour?.usedPercent ?? 0);
-  if (Number.isNaN(wk) || Number.isNaN(mo) || Number.isNaN(h5)) return { decision: "THROTTLE", advice: "invalid quota data — proceeding with caution. switch to lighter model if available.", weekly: Number.isNaN(wk) ? 0 : wk, monthly: Number.isNaN(mo) ? 0 : mo, fiveHour: Number.isNaN(h5) ? 0 : h5 };
-  const wkR = humanRemaining(q.weekly?.resetsAt), h5R = humanRemaining(q.fiveHour?.resetsAt);
-  const stop = (r: string): Coaching => ({ decision: "STOP", advice: `STOP recommend — ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk, monthly: mo, fiveHour: h5 });
-  const thr = (r: string): Coaching => ({ decision: "THROTTLE", advice: `Throttle recommend — ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk, monthly: mo, fiveHour: h5 });
-  if (h5 >= STOP_5H) return stop(`5h window ${h5}% (${h5R})`);
-  if (wk >= STOP_WK) return stop(`weekly ${wk}% (${wkR})`);
-  if (mo >= STOP_MO) return stop(`monthly ${mo}%`);
-  if (h5 >= THR_5H) return thr(`5h window ${h5}% (${h5R})`);
-  if (wk >= THR_WK) return thr(`weekly ${wk}% (${wkR})`);
-  return { decision: "GO", advice: `Comfortable — weekly ${wk}% · 5h ${h5}% · monthly ${mo}%. proceed. 5h window ${h5R}.`, weekly: wk, monthly: mo, fiveHour: h5 };
+  const wk = q.weekly ? Math.round(q.weekly.usedPercent ?? 0) : null;
+  const mo = q.monthly ? Math.round(q.monthly.usedPercent ?? 0) : null;
+  const h5 = q.fiveHour ? Math.round(q.fiveHour.usedPercent ?? 0) : null;
+  if ((wk !== null && Number.isNaN(wk)) || (mo !== null && Number.isNaN(mo)) || (h5 !== null && Number.isNaN(h5))) {
+    const sWk = wk !== null && !Number.isNaN(wk) ? wk : 0;
+    const sMo = mo !== null && !Number.isNaN(mo) ? mo : 0;
+    const sH5 = h5 !== null && !Number.isNaN(h5) ? h5 : 0;
+    return { decision: "THROTTLE", advice: "invalid quota data — proceeding with caution. switch to lighter model if available.", weekly: sWk, monthly: sMo, fiveHour: sH5 };
+  }
+  const wkR = q.weekly ? humanRemaining(q.weekly.resetsAt) : "";
+  const h5R = q.fiveHour ? humanRemaining(q.fiveHour.resetsAt) : "";
+  const stop = (r: string): Coaching => ({ decision: "STOP", advice: `STOP recommend — ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
+  const thr = (r: string): Coaching => ({ decision: "THROTTLE", advice: `Throttle recommend — ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
+  if (h5 !== null && h5 >= STOP_5H) return stop(`5h window ${h5}% (${h5R})`);
+  if (wk !== null && wk >= STOP_WK) return stop(`weekly ${wk}% (${wkR})`);
+  if (mo !== null && mo >= STOP_MO) return stop(`monthly ${mo}%`);
+  if (h5 !== null && h5 >= THR_5H) return thr(`5h window ${h5}% (${h5R})`);
+  if (wk !== null && wk >= THR_WK) return thr(`weekly ${wk}% (${wkR})`);
+  const parts: string[] = [];
+  if (wk !== null) parts.push(`weekly ${wk}%`);
+  if (h5 !== null) parts.push(`5h ${h5}%`);
+  if (mo !== null) parts.push(`monthly ${mo}%`);
+  const summary = parts.length > 0 ? parts.join(" · ") : "no quota limits detected";
+  const resetInfo = h5R ? ` 5h window ${h5R}.` : wkR ? ` weekly ${wkR}.` : "";
+  return { decision: "GO", advice: `Comfortable — ${summary}. proceed.${resetInfo}`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 };
 }
 
 // Resolve the current session's agent name + model + provider via the SDK client.
@@ -1333,11 +1378,14 @@ export default async function UsageCoachPlugin(input: {
             // also fetch per-provider coach view (best-effort, non-blocking on failure)
             let providers: ProviderCoach[] = [];
             try { providers = await fetchProvidersCoach(); } catch { /* */ }
-            // If fetchQuota failed (top-level weekly < 0) but providers have real data,
+            // If primary fetch failed (all windows < 0) but providers have real data,
             // restore the top-level from providers[0] so the TUI/advice show real numbers.
-            if (providers.length > 0 && last.weekly < 0) {
+            if (providers.length > 0 && last.weekly < 0 && last.fiveHour < 0) {
               const p0 = providers[0];
-              last = { ...last, weekly: p0.weekly, fiveHour: p0.fiveHour, monthly: p0.weekly >= 0 ? 0 : -1, advice: p0.advice, decision: p0.weekly >= STOP_WK ? "STOP" : p0.weekly >= THR_WK ? "THROTTLE" : "GO" };
+              const newWeekly = p0.weekly >= 0 ? p0.weekly : last.weekly;
+              const newFiveHour = p0.fiveHour >= 0 ? p0.fiveHour : last.fiveHour;
+              const newDecision = (newWeekly >= STOP_WK || newFiveHour >= STOP_5H) ? "STOP" : (newWeekly >= THR_WK || newFiveHour >= THR_5H) ? "THROTTLE" : "GO";
+              last = { ...last, weekly: newWeekly, fiveHour: newFiveHour, advice: p0.advice, decision: newDecision };
             }
             writeState({ ...last, providers, model: currentModel, provider: currentProvider, isFree: false, agent: currentAgent, updatedAt: new Date().toISOString() } as any);
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
@@ -1397,7 +1445,13 @@ export default async function UsageCoachPlugin(input: {
           let instruction = "";
           if (c.decision === "STOP") instruction = `[${PLUGIN_NAME}] QUOTA limit exceeded. ${c.advice} Stop making further tool calls, finish the in-progress work, then report the quota status to the user.`;
           else if (c.decision === "THROTTLE") instruction = `[${PLUGIN_NAME}] ${c.advice} Hold off on long/heavy tasks.`;
-          else if (c.weekly >= 0) instruction = `[${PLUGIN_NAME}] quota ok — weekly ${c.weekly}% · 5h ${c.fiveHour}% · monthly ${c.monthly}%.`;
+          else if (c.weekly >= 0 || c.fiveHour >= 0) {
+            const parts: string[] = [];
+            if (c.weekly >= 0) parts.push(`weekly ${c.weekly}%`);
+            if (c.fiveHour >= 0) parts.push(`5h ${c.fiveHour}%`);
+            if (c.monthly >= 0) parts.push(`monthly ${c.monthly}%`);
+            instruction = `[${PLUGIN_NAME}] quota ok — ${parts.join(" · ")}.`;
+          }
           if (instruction) output.system.push(instruction);
         } catch (e) { log(`system.transform err: ${String(e)}`); }
       },

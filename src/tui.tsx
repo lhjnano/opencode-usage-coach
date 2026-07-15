@@ -155,12 +155,12 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
         }
       if (s.providers && s.providers.length > 0) {
         for (const p of s.providers) {
-          nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(p.fiveHour)}</text><text style={st("text")}>{barEmpty(p.fiveHour)}</text><text> {p.fiveHour}%  {p.fiveHourReset}</text></box>);
-          nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(p.weekly)}</text><text style={st("text")}>{barEmpty(p.weekly)}</text><text> {p.weekly}%  {p.weeklyReset}</text></box>);
+          if (p.fiveHour >= 0) nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(p.fiveHour)}</text><text style={st("text")}>{barEmpty(p.fiveHour)}</text><text> {p.fiveHour}%  {p.fiveHourReset}</text></box>);
+          if (p.weekly >= 0) nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(p.weekly)}</text><text style={st("text")}>{barEmpty(p.weekly)}</text><text> {p.weekly}%  {p.weeklyReset}</text></box>);
         }
       } else {
-        nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> {s.fiveHour}%</text></box>);
-        nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> {s.weekly}%</text></box>);
+        if (s.fiveHour >= 0) nodes.push(<box flexDirection="row"><text> 5h </text><text style={st("text")}>{barFill(s.fiveHour)}</text><text style={st("text")}>{barEmpty(s.fiveHour)}</text><text> {s.fiveHour}%</text></box>);
+        if (s.weekly >= 0) nodes.push(<box flexDirection="row"><text> 1w </text><text style={st("text")}>{barFill(s.weekly)}</text><text style={st("text")}>{barEmpty(s.weekly)}</text><text> {s.weekly}%</text></box>);
       }
       }
     } else {

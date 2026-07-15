@@ -324,7 +324,7 @@ function initializeTui(api, disposeRoot) {
         }
         if (s.providers && s.providers.length > 0) {
           for (const p of s.providers) {
-            nodes.push((() => {
+            if (p.fiveHour >= 0) nodes.push((() => {
               var _el$16 = _$createElement("box"), _el$17 = _$createElement("text"), _el$19 = _$createElement("text"), _el$20 = _$createElement("text"), _el$21 = _$createElement("text"), _el$22 = _$createTextNode(` `), _el$23 = _$createTextNode(`% `);
               _$insertNode(_el$16, _el$17);
               _$insertNode(_el$16, _el$19);
@@ -349,7 +349,7 @@ function initializeTui(api, disposeRoot) {
               });
               return _el$16;
             })());
-            nodes.push((() => {
+            if (p.weekly >= 0) nodes.push((() => {
               var _el$24 = _$createElement("box"), _el$25 = _$createElement("text"), _el$27 = _$createElement("text"), _el$28 = _$createElement("text"), _el$29 = _$createElement("text"), _el$30 = _$createTextNode(` `), _el$31 = _$createTextNode(`% `);
               _$insertNode(_el$24, _el$25);
               _$insertNode(_el$24, _el$27);
@@ -376,7 +376,7 @@ function initializeTui(api, disposeRoot) {
             })());
           }
         } else {
-          nodes.push((() => {
+          if (s.fiveHour >= 0) nodes.push((() => {
             var _el$32 = _$createElement("box"), _el$33 = _$createElement("text"), _el$35 = _$createElement("text"), _el$36 = _$createElement("text"), _el$37 = _$createElement("text"), _el$38 = _$createTextNode(` `), _el$39 = _$createTextNode(`%`);
             _$insertNode(_el$32, _el$33);
             _$insertNode(_el$32, _el$35);
@@ -400,7 +400,7 @@ function initializeTui(api, disposeRoot) {
             });
             return _el$32;
           })());
-          nodes.push((() => {
+          if (s.weekly >= 0) nodes.push((() => {
             var _el$40 = _$createElement("box"), _el$41 = _$createElement("text"), _el$43 = _$createElement("text"), _el$44 = _$createElement("text"), _el$45 = _$createElement("text"), _el$46 = _$createTextNode(` `), _el$47 = _$createTextNode(`%`);
             _$insertNode(_el$40, _el$41);
             _$insertNode(_el$40, _el$43);

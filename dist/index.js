@@ -1534,11 +1534,11 @@ async function fetchEnabledProviders() {
 }
 function providerAdvice(h5, wk) {
   const S5H = STOP_5H, SWK = STOP_WK, T5H = THR_5H, TWK = THR_WK;
-  if (h5 >= S5H || wk >= SWK) return "STOP \u2014 finish current only";
-  if (h5 >= T5H && wk >= TWK) return "small tasks only \u2014 big ones will hit both limits";
-  if (h5 >= T5H) return "small tasks only \u2014 5h window nearly full, big tasks after reset";
-  if (wk >= TWK) return "small tasks only \u2014 big ones will strain late-week";
-  if (h5 >= 50 || wk >= 50) return "moderate tasks OK \u2014 save big ones for headroom";
+  if (h5 !== null && h5 >= S5H || wk !== null && wk >= SWK) return "STOP \u2014 finish current only";
+  if (h5 !== null && wk !== null && h5 >= T5H && wk >= TWK) return "small tasks only \u2014 big ones will hit both limits";
+  if (h5 !== null && h5 >= T5H) return "small tasks only \u2014 5h window nearly full, big tasks after reset";
+  if (wk !== null && wk >= TWK) return "small tasks only \u2014 big ones will strain late-week";
+  if (h5 !== null && h5 >= 50 || wk !== null && wk >= 50) return "moderate tasks OK \u2014 save big ones for headroom";
   return "big tasks OK \u2014 short & long limits comfortable";
 }
 async function fetchProvidersCoach() {
@@ -1546,17 +1546,17 @@ async function fetchProvidersCoach() {
   const results = await Promise.all(ids.map(async (id) => {
     try {
       const out = await captureStdout(["usage", "--provider", id, "--json"]);
-      const u = JSON.parse(out)[0]?.usage;
-      if (!u) return null;
-      const h5 = Math.round(u.tertiary?.usedPercent ?? 0);
-      const wk = Math.round(u.primary?.usedPercent ?? 0);
+      const q = parseQuotaResponse(out);
+      if (!q) return null;
+      const h5 = q.fiveHour ? Math.round(q.fiveHour.usedPercent ?? 0) : null;
+      const wk = q.weekly ? Math.round(q.weekly.usedPercent ?? 0) : null;
       return {
         id,
         name: id,
-        fiveHour: h5,
-        weekly: wk,
-        fiveHourReset: humanRemaining(u.tertiary?.resetsAt),
-        weeklyReset: humanRemaining(u.primary?.resetsAt),
+        fiveHour: h5 ?? -1,
+        weekly: wk ?? -1,
+        fiveHourReset: q.fiveHour ? humanRemaining(q.fiveHour.resetsAt) : "",
+        weeklyReset: q.weekly ? humanRemaining(q.weekly.resetsAt) : "",
         advice: providerAdvice(h5, wk)
       };
     } catch {
@@ -1571,11 +1571,36 @@ function parseQuotaResponse(rawText) {
     if (!text || text === "[]") return null;
     const u = JSON.parse(text)[0]?.usage;
     if (!u) return null;
-    return {
-      weekly: u.primary ?? { usedPercent: 0 },
-      monthly: u.secondary ?? { usedPercent: 0 },
-      fiveHour: u.tertiary ?? { usedPercent: 0 }
-    };
+    const result = { weekly: null, monthly: null, fiveHour: null };
+    const entries = [
+      { key: "primary", slot: u.primary },
+      { key: "secondary", slot: u.secondary },
+      { key: "tertiary", slot: u.tertiary }
+    ].filter((e) => e.slot != null);
+    for (const { key, slot } of entries) {
+      const mins = slot.windowMinutes ?? 0;
+      const desc = String(slot.resetDescription ?? "").toLowerCase();
+      if (mins === 300 || desc.includes("5 hour") || desc.includes("5h")) {
+        result.fiveHour = slot;
+      } else if (mins === 10080 || desc.includes("week")) {
+        result.weekly = slot;
+      } else if (desc.includes("month")) {
+        result.monthly = slot;
+      } else if (mins > 0 && mins <= 360) {
+        result.fiveHour = slot;
+      } else if (mins > 360 && mins <= 14400) {
+        result.weekly = slot;
+      } else if (mins > 14400) {
+        result.monthly = slot;
+      } else if (key === "primary") {
+        result.weekly = slot;
+      } else if (key === "secondary") {
+        result.monthly = slot;
+      } else if (key === "tertiary") {
+        result.fiveHour = slot;
+      }
+    }
+    return result;
   } catch {
     return null;
   }
@@ -1617,17 +1642,31 @@ async function fetchQuotaWithRetry(provider, maxRetries = 3) {
 }
 function coach(q, lighter) {
   if (!q) return { decision: "GO", advice: "quota unavailable \u2014 retrying. proceeding cautiously.", weekly: -2, monthly: -2, fiveHour: -2 };
-  const wk = Math.round(q.weekly?.usedPercent ?? 0), mo = Math.round(q.monthly?.usedPercent ?? 0), h5 = Math.round(q.fiveHour?.usedPercent ?? 0);
-  if (Number.isNaN(wk) || Number.isNaN(mo) || Number.isNaN(h5)) return { decision: "THROTTLE", advice: "invalid quota data \u2014 proceeding with caution. switch to lighter model if available.", weekly: Number.isNaN(wk) ? 0 : wk, monthly: Number.isNaN(mo) ? 0 : mo, fiveHour: Number.isNaN(h5) ? 0 : h5 };
-  const wkR = humanRemaining(q.weekly?.resetsAt), h5R = humanRemaining(q.fiveHour?.resetsAt);
-  const stop = (r) => ({ decision: "STOP", advice: `STOP recommend \u2014 ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk, monthly: mo, fiveHour: h5 });
-  const thr = (r) => ({ decision: "THROTTLE", advice: `Throttle recommend \u2014 ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk, monthly: mo, fiveHour: h5 });
-  if (h5 >= STOP_5H) return stop(`5h window ${h5}% (${h5R})`);
-  if (wk >= STOP_WK) return stop(`weekly ${wk}% (${wkR})`);
-  if (mo >= STOP_MO) return stop(`monthly ${mo}%`);
-  if (h5 >= THR_5H) return thr(`5h window ${h5}% (${h5R})`);
-  if (wk >= THR_WK) return thr(`weekly ${wk}% (${wkR})`);
-  return { decision: "GO", advice: `Comfortable \u2014 weekly ${wk}% \xB7 5h ${h5}% \xB7 monthly ${mo}%. proceed. 5h window ${h5R}.`, weekly: wk, monthly: mo, fiveHour: h5 };
+  const wk = q.weekly ? Math.round(q.weekly.usedPercent ?? 0) : null;
+  const mo = q.monthly ? Math.round(q.monthly.usedPercent ?? 0) : null;
+  const h5 = q.fiveHour ? Math.round(q.fiveHour.usedPercent ?? 0) : null;
+  if (wk !== null && Number.isNaN(wk) || mo !== null && Number.isNaN(mo) || h5 !== null && Number.isNaN(h5)) {
+    const sWk = wk !== null && !Number.isNaN(wk) ? wk : 0;
+    const sMo = mo !== null && !Number.isNaN(mo) ? mo : 0;
+    const sH5 = h5 !== null && !Number.isNaN(h5) ? h5 : 0;
+    return { decision: "THROTTLE", advice: "invalid quota data \u2014 proceeding with caution. switch to lighter model if available.", weekly: sWk, monthly: sMo, fiveHour: sH5 };
+  }
+  const wkR = q.weekly ? humanRemaining(q.weekly.resetsAt) : "";
+  const h5R = q.fiveHour ? humanRemaining(q.fiveHour.resetsAt) : "";
+  const stop = (r) => ({ decision: "STOP", advice: `STOP recommend \u2014 ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
+  const thr = (r) => ({ decision: "THROTTLE", advice: `Throttle recommend \u2014 ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
+  if (h5 !== null && h5 >= STOP_5H) return stop(`5h window ${h5}% (${h5R})`);
+  if (wk !== null && wk >= STOP_WK) return stop(`weekly ${wk}% (${wkR})`);
+  if (mo !== null && mo >= STOP_MO) return stop(`monthly ${mo}%`);
+  if (h5 !== null && h5 >= THR_5H) return thr(`5h window ${h5}% (${h5R})`);
+  if (wk !== null && wk >= THR_WK) return thr(`weekly ${wk}% (${wkR})`);
+  const parts = [];
+  if (wk !== null) parts.push(`weekly ${wk}%`);
+  if (h5 !== null) parts.push(`5h ${h5}%`);
+  if (mo !== null) parts.push(`monthly ${mo}%`);
+  const summary = parts.length > 0 ? parts.join(" \xB7 ") : "no quota limits detected";
+  const resetInfo = h5R ? ` 5h window ${h5R}.` : wkR ? ` weekly ${wkR}.` : "";
+  return { decision: "GO", advice: `Comfortable \u2014 ${summary}. proceed.${resetInfo}`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 };
 }
 var agentCache = /* @__PURE__ */ new Map();
 var currentModel = "";
@@ -1731,9 +1770,12 @@ async function UsageCoachPlugin(input) {
               providers = await fetchProvidersCoach();
             } catch {
             }
-            if (providers.length > 0 && last.weekly < 0) {
+            if (providers.length > 0 && last.weekly < 0 && last.fiveHour < 0) {
               const p0 = providers[0];
-              last = { ...last, weekly: p0.weekly, fiveHour: p0.fiveHour, monthly: p0.weekly >= 0 ? 0 : -1, advice: p0.advice, decision: p0.weekly >= STOP_WK ? "STOP" : p0.weekly >= THR_WK ? "THROTTLE" : "GO" };
+              const newWeekly = p0.weekly >= 0 ? p0.weekly : last.weekly;
+              const newFiveHour = p0.fiveHour >= 0 ? p0.fiveHour : last.fiveHour;
+              const newDecision = newWeekly >= STOP_WK || newFiveHour >= STOP_5H ? "STOP" : newWeekly >= THR_WK || newFiveHour >= THR_5H ? "THROTTLE" : "GO";
+              last = { ...last, weekly: newWeekly, fiveHour: newFiveHour, advice: p0.advice, decision: newDecision };
             }
             writeState({ ...last, providers, model: currentModel, provider: currentProvider, isFree: false, agent: currentAgent, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
             log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
@@ -1807,7 +1849,13 @@ async function UsageCoachPlugin(input) {
           let instruction = "";
           if (c.decision === "STOP") instruction = `[${PLUGIN_NAME}] QUOTA limit exceeded. ${c.advice} Stop making further tool calls, finish the in-progress work, then report the quota status to the user.`;
           else if (c.decision === "THROTTLE") instruction = `[${PLUGIN_NAME}] ${c.advice} Hold off on long/heavy tasks.`;
-          else if (c.weekly >= 0) instruction = `[${PLUGIN_NAME}] quota ok \u2014 weekly ${c.weekly}% \xB7 5h ${c.fiveHour}% \xB7 monthly ${c.monthly}%.`;
+          else if (c.weekly >= 0 || c.fiveHour >= 0) {
+            const parts = [];
+            if (c.weekly >= 0) parts.push(`weekly ${c.weekly}%`);
+            if (c.fiveHour >= 0) parts.push(`5h ${c.fiveHour}%`);
+            if (c.monthly >= 0) parts.push(`monthly ${c.monthly}%`);
+            instruction = `[${PLUGIN_NAME}] quota ok \u2014 ${parts.join(" \xB7 ")}.`;
+          }
           if (instruction) output.system.push(instruction);
         } catch (e) {
           log(`system.transform err: ${String(e)}`);
@@ -2671,35 +2719,4 @@ Note: Changes take effect immediately for new generate/grade calls.`,
     return NOOP_HOOKS;
   }
 }
-export {
-  __resetCodexbarMissing,
-  buildGapPrompt,
-  buildScanSummary,
-  checkScanGate,
-  clearSubSession,
-  coach,
-  UsageCoachPlugin as default,
-  detectLanguage,
-  extractImplNotes,
-  extractKeywords,
-  fetchQuotaWithRetry,
-  findActiveTaskId,
-  formatReport,
-  humanRemaining,
-  isCodexbarMissing,
-  isFreeModel,
-  isHarnessAgent,
-  parseFileList,
-  parseGapAnalysis,
-  parseQuotaResponse,
-  providerAdvice,
-  providerToCodexbar,
-  readHarness,
-  readHarnessCfg,
-  readRules,
-  UsageCoachPlugin as server,
-  setStateDir,
-  updateSubSession,
-  writeHarness,
-  writeHarnessCfg
-};
+export { UsageCoachPlugin as server, UsageCoachPlugin as default };
