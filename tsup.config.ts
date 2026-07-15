@@ -19,6 +19,17 @@ export default defineConfig([
     external: ["@opencode-ai/plugin"],
   },
   {
+    // CLI module: standalone entry for `usage-coach` bin. No external deps.
+    entry: { cli: "src/cli.ts" },
+    format: ["esm"],
+    target: "node22",
+    bundle: true,
+    splitting: false,
+    clean: false,
+    outDir: "dist",
+    external: [],
+  },
+  {
     // TUI module: solid packages external + compile JSX via solidPlugin (universal).
     entry: { tui: "src/tui.tsx" },
     format: ["esm"],

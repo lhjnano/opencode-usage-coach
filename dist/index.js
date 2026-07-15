@@ -1349,6 +1349,7 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
     const modelID = slash >= 0 ? model.slice(slash + 1) : "";
     const s = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
+    log(`runModel(${model}): session.create ${Date.now() - t0}ms`);
     const id = s?.data?.info?.id ?? s?.data?.id ?? s?.id;
     if (!id) return `ERROR: session.create returned no id (response: ${JSON.stringify(s?.data ?? s).slice(0, 200)})`;
     subId = id;
@@ -1417,6 +1418,7 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
     );
     const resp = await Promise.race([promptP, timeoutSignal.then(() => null)]);
     const elapsed = Math.round((Date.now() - t0) / 1e3);
+    log(`runModel(${model}): prompt resolved ${elapsed}s, timedOut=${timedOut}`);
     if (timedOut) {
       try {
         const summary = await client.session.summarize?.({ path: { id } });
@@ -1424,7 +1426,7 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
       } catch {
       }
       try {
-        await client.session.delete?.({ path: { id } });
+        client.session.delete?.({ path: { id } });
       } catch {
       }
       subId = null;
@@ -1434,17 +1436,19 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
     }
     const parts = resp?.data?.parts ?? resp?.parts ?? [];
     const text = parts.filter((p) => p?.type === "text").map((p) => p?.text ?? "").join("");
+    const cleanupStart = Date.now();
     try {
-      const summary = await client.session.summarize?.({ path: { id } });
-      log(`runModel(${model}): sub-session summary: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`);
+      client.session.summarize?.({ path: { id } }).then((summary) => log(`runModel(${model}): summary ${Date.now() - cleanupStart}ms: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`)).catch(() => {
+      });
     } catch {
     }
     try {
-      await client.session.delete?.({ path: { id } });
+      client.session.delete?.({ path: { id } }).catch(() => {
+      });
     } catch {
     }
     subId = null;
-    log(`runModel(${model}): done ${elapsed}s, ${text.length} chars`);
+    log(`runModel(${model}): done ${elapsed}s, ${text.length} chars (cleanup dispatched)`);
     return text.trim() || `ERROR: no assistant text in prompt response after ${elapsed}s (parts: ${parts.length}, types: ${parts.map((p) => p?.type).join(",")})`;
   } catch (e) {
     const elapsed = Math.round((Date.now() - t0) / 1e3);
@@ -1462,7 +1466,8 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
     }
     if (subId) {
       try {
-        await client.session.delete?.({ path: { id: subId } });
+        client.session.delete?.({ path: { id: subId } }).catch(() => {
+        });
       } catch {
       }
     }
@@ -1510,11 +1515,15 @@ function captureStdout(args) {
     p.stdout?.on("data", (d) => {
       out += d.toString();
     });
-    p.on("error", () => resolve2(""));
+    p.on("error", (err) => {
+      if (err.code === "ENOENT") codexbarMissing = true;
+      resolve2("");
+    });
     p.on("close", () => resolve2(out));
   });
 }
 async function fetchEnabledProviders() {
+  if (codexbarMissing) return [];
   const out = await captureStdout(["config", "providers"]);
   const ids = [];
   for (const line of out.split("\n")) {
@@ -1586,13 +1595,17 @@ function fetchQuota(provider) {
     p.stdout?.on("data", (d) => {
       out += d.toString();
     });
-    p.on("error", () => resolve2(null));
+    p.on("error", (err) => {
+      if (err.code === "ENOENT") codexbarMissing = true;
+      resolve2(null);
+    });
     p.on("close", () => {
       resolve2(parseQuotaResponse(out));
     });
   });
 }
 async function fetchQuotaWithRetry(provider, maxRetries = 3) {
+  if (codexbarMissing) return null;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const q = await fetchQuota(provider);
     if (q) return q;
@@ -1621,6 +1634,13 @@ var currentModel = "";
 var currentProvider = "";
 var currentAgent = "";
 var modelChanged = false;
+var codexbarMissing = false;
+function isCodexbarMissing() {
+  return codexbarMissing;
+}
+function __resetCodexbarMissing() {
+  codexbarMissing = false;
+}
 function isFreeModel(model, provider) {
   if (!model && !provider) return false;
   if (provider === "opencode") return true;
@@ -1682,6 +1702,12 @@ async function UsageCoachPlugin(input) {
     const refreshBackground = () => {
       try {
         if (refreshing) return;
+        if (codexbarMissing) {
+          last = { decision: "GO", advice: "codexbar not installed \u2014 running in GO-only mode (no quota sensing).", weekly: -3, monthly: -3, fiveHour: -3 };
+          lastFetchedAt = Date.now();
+          refreshing = false;
+          return;
+        }
         if (last && !modelChanged && Date.now() - lastFetchedAt < TTL_MS) return;
         refreshing = true;
         modelChanged = false;
@@ -2646,6 +2672,7 @@ Note: Changes take effect immediately for new generate/grade calls.`,
   }
 }
 export {
+  __resetCodexbarMissing,
   buildGapPrompt,
   buildScanSummary,
   checkScanGate,
@@ -2655,9 +2682,11 @@ export {
   detectLanguage,
   extractImplNotes,
   extractKeywords,
+  fetchQuotaWithRetry,
   findActiveTaskId,
   formatReport,
   humanRemaining,
+  isCodexbarMissing,
   isFreeModel,
   isHarnessAgent,
   parseFileList,

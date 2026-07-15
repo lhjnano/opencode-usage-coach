@@ -943,6 +943,7 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
     const modelID = slash >= 0 ? model.slice(slash + 1) : "";
     const s: any = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
+    log(`runModel(${model}): session.create ${Date.now() - t0}ms`);
     const id = s?.data?.info?.id ?? s?.data?.id ?? s?.id;
     if (!id) return `ERROR: session.create returned no id (response: ${JSON.stringify(s?.data ?? s).slice(0, 200)})`;
     subId = id;
@@ -1011,6 +1012,7 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     );
     const resp: any = await Promise.race([promptP, timeoutSignal.then(() => null)]);
     const elapsed = Math.round((Date.now() - t0) / 1000);
+    log(`runModel(${model}): prompt resolved ${elapsed}s, timedOut=${timedOut}`);
 
     // Step-limit timeout: the task is too large — tell the caller to split it.
     if (timedOut) {
@@ -1018,7 +1020,7 @@ async function runModel(client: any, model: string, prompt: string, directory: s
         const summary: any = await client.session.summarize?.({ path: { id } });
         log(`runModel(${model}): TIMED OUT summary: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`);
       } catch { /* */ }
-      try { await client.session.delete?.({ path: { id } }); } catch { /* */ }
+      try { client.session.delete?.({ path: { id } }); } catch { /* */ }
       subId = null;
       log(`runModel(${model}): TIMED OUT after ${elapsed}s (${maxSteps} steps exceeded)`);
       return `Task appears too large (exceeded ${maxSteps} steps). Consider splitting into smaller subtasks.\n[usage-coach NEXT] split the original task into smaller subtasks (each should complete within ${maxSteps} steps), then re-run generate for each subtask.`;
@@ -1027,14 +1029,13 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     // Normal completion: extract assistant text from the response parts.
     const parts: any[] = resp?.data?.parts ?? resp?.parts ?? [];
     const text = parts.filter((p: any) => p?.type === "text").map((p: any) => p?.text ?? "").join("");
-    // Before cleanup, summarize the sub-session for visibility (what did it do?).
-    try {
-      const summary: any = await client.session.summarize?.({ path: { id } });
-      log(`runModel(${model}): sub-session summary: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`);
-    } catch { /* summarize not available — skip */ }
-    try { await client.session.delete?.({ path: { id } }); } catch { /* */ }
+    // Fire-and-forget: summarize + delete are cleanup/diagnostic, NOT on the critical path.
+    // Previously these were awaited, causing the harness to stall after the model finished.
+    const cleanupStart = Date.now();
+    try { client.session.summarize?.({ path: { id } }).then((summary: any) => log(`runModel(${model}): summary ${Date.now() - cleanupStart}ms: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`)).catch(() => {}); } catch { /* */ }
+    try { client.session.delete?.({ path: { id } }).catch(() => {}); } catch { /* */ }
     subId = null;
-    log(`runModel(${model}): done ${elapsed}s, ${text.length} chars`);
+    log(`runModel(${model}): done ${elapsed}s, ${text.length} chars (cleanup dispatched)`);
     return text.trim() || `ERROR: no assistant text in prompt response after ${elapsed}s (parts: ${parts.length}, types: ${parts.map((p: any) => p?.type).join(",")})`;
   } catch (e) {
     const elapsed = Math.round((Date.now() - t0) / 1000);
@@ -1047,7 +1048,8 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     if (poller) clearInterval(poller);
     if (wallTimer) clearTimeout(wallTimer);
     if (track) { try { clearSubSession(track.sessionID, track.taskId); } catch { /* */ } }
-    if (subId) { try { await client.session.delete?.({ path: { id: subId } }); } catch { /* */ } }
+    // Fire-and-forget delete — no need to block the return on session cleanup.
+    if (subId) { try { client.session.delete?.({ path: { id: subId } }).catch(() => {}); } catch { /* */ } }
   }
 }
 
@@ -1089,13 +1091,17 @@ function captureStdout(args: string[]): Promise<string> {
     try { p = spawn("codexbar", args, { stdio: ["ignore", "pipe", "ignore"] }); }
     catch { return resolve(""); }
     p.stdout?.on("data", (d) => { out += d.toString(); });
-    p.on("error", () => resolve(""));
+    p.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") codexbarMissing = true;
+      resolve("");
+    });
     p.on("close", () => resolve(out));
   });
 }
 
 /** enabled provider ids from `codexbar config providers`. */
 async function fetchEnabledProviders(): Promise<string[]> {
+  if (codexbarMissing) return [];
   const out = await captureStdout(["config", "providers"]);
   const ids: string[] = [];
   for (const line of out.split("\n")) {
@@ -1167,7 +1173,10 @@ function fetchQuota(provider: string): Promise<Quota | null> {
       });
     } catch { return resolve(null); }
     p.stdout?.on("data", (d) => { out += d.toString(); });
-    p.on("error", () => resolve(null));
+    p.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") codexbarMissing = true;
+      resolve(null);
+    });
     p.on("close", () => {
       resolve(parseQuotaResponse(out));
     });
@@ -1175,7 +1184,8 @@ function fetchQuota(provider: string): Promise<Quota | null> {
 }
 
 /** fetchQuota with retry: max 3 attempts with 1s, 2s delays between failures. */
-async function fetchQuotaWithRetry(provider: string, maxRetries = 3): Promise<Quota | null> {
+export async function fetchQuotaWithRetry(provider: string, maxRetries = 3): Promise<Quota | null> {
+  if (codexbarMissing) return null;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const q = await fetchQuota(provider);
     if (q) return q;
@@ -1209,6 +1219,13 @@ let currentModel = "";
 let currentProvider = "";
 let currentAgent = "";
 let modelChanged = false; // set by resolveAgent on model change, cleared by refreshBackground
+let codexbarMissing = false; // set true on ENOENT — skip all future codexbar spawns
+
+/** Test accessor for the codexbarMissing flag. */
+export function isCodexbarMissing(): boolean { return codexbarMissing; }
+
+/** Test-only: reset the codexbarMissing flag for test isolation. */
+export function __resetCodexbarMissing(): void { codexbarMissing = false; }
 
 function isFreeModel(model: string, provider: string): boolean {
   if (!model && !provider) return false;
@@ -1286,6 +1303,12 @@ export default async function UsageCoachPlugin(input: {
     const refreshBackground = () => {
       try {
         if (refreshing) return;
+        if (codexbarMissing) {
+          last = { decision: "GO", advice: "codexbar not installed — running in GO-only mode (no quota sensing).", weekly: -3, monthly: -3, fiveHour: -3 };
+          lastFetchedAt = Date.now();
+          refreshing = false;
+          return;
+        }
         if (last && !modelChanged && Date.now() - lastFetchedAt < TTL_MS) return;
         refreshing = true;
         modelChanged = false; // consumed

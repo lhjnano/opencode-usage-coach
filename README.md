@@ -33,15 +33,22 @@ See **[docs/architecture.md](docs/architecture.md)** for the full design.
 { "$schema": "https://opencode.ai/tui.json", "plugin": ["opencode-usage-coach/tui"] }
 ```
 
-Then wire `codexbar` and drop `agents/usage-coach-harness.md` into `~/.config/opencode/agents/` for agent mode:
+Then run setup:
 
 ```bash
-# provider quota data source
-printf '%s' "$YOUR_PROVIDER_API_KEY" | codexbar config set-api-key --provider <id> --stdin
-
-# harness role → model mapping (place in your work directory)
-cp harness.config.example.json harness.config.json   # edit generator/grader
+usage-coach setup          # auto-generates harness.config.json + copies agent file
+usage-coach setup --json   # machine-readable output (for scripts/CI)
 ```
+
+This creates `~/.config/opencode-usage-coach/harness.config.json` (edit `generator`/`grader` or use `/coach-config` at runtime) and copies `agents/usage-coach-harness.md` to `~/.config/opencode/agents/`.
+
+If you use `codexbar` for quota sensing:
+
+```bash
+printf '%s' "$YOUR_PROVIDER_API_KEY" | codexbar config set-api-key --provider <id> --stdin
+```
+
+Without codexbar, the plugin runs in GO-only mode (no quota sensing).
 
 For local dev without npm: `bun install && bun run build`, then point both configs at the `dist/` files.
 

@@ -1,6 +1,6 @@
 {
   "name": "opencode-usage-coach",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "description": "opencode closed-loop usage coach — quota SENSE -> coaching DECIDE -> loop ACT + TUI integration",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +13,14 @@
     "./tui": {
       "types": "./dist/tui.d.ts",
       "import": "./dist/tui.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
     }
+  },
+  "bin": {
+    "usage-coach": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsup",
