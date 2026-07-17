@@ -1419,7 +1419,7 @@ export default async function UsageCoachPlugin(input: {
         currentAgent = agent;
         refreshBackground(); // picks up model changes immediately
 
-        const harnessTools = ["unknown_scan", "question", "generate", "generate_batch", "grade", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure", "reverse_interview"];
+        const harnessTools = ["unknown_scan", "question", "generate", "generate_batch", "grade", "grade_batch", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure", "reverse_interview"];
         if (!harnessTools.includes(_input.tool)) return; // only harness tools are gated below
         if (!isHarnessAgent(agent)) {
           throw new Error(`[${PLUGIN_NAME}] '${_input.tool}' is restricted to agent mode ${JSON.stringify(HARNESS_AGENTS)} (current: ${JSON.stringify(agent || "unknown")}). Switch to that agent mode to use it.`);
@@ -1480,13 +1480,16 @@ DETERMINISTIC LOOP — first classify the tasks:
   INDEPENDENT = task B does NOT need task A's output  ->  use PATH A (parallel, faster)
   DEPENDENT   = task B needs task A's output          ->  use PATH B (sequential)
 
-PATH A — INDEPENDENT (parallel via generate_batch):
+PATH A — INDEPENDENT (parallel via generate_batch + grade_batch):
   1. task_update(1..${args.total}, title, "generating")
   2. generate_batch({tasks: [{id:1, prompt:"Task: <title1>. Perform it."}, ...]})  -> all results + NEXT
-  3. for each i: task_update(i, title, "grading") + grade({prompt:"Evaluate... PASS/FAIL first line. Task: <title>"})  -> verdict + NEXT
-  4. for each i: PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or task_update(i, title, "failed", "FAIL")
+  3. task_update(1..${args.total}, title, "grading")
+  4. grade_batch({tasks: [{id:1, prompt:"Evaluate... PASS/FAIL first line. Task: <title1>"}, ...]})  -> all verdicts + per-task NEXT
+  5. for each i: PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or task_update(i, title, "failed", "FAIL")
+  Note: grade_batch runs all grades IN PARALLEL — much faster than grading one-by-one.
+  After revisions, you can grade_batch the revised tasks together too.
 
-PATH B — DEPENDENT (sequential):
+PATH B — DEPENDENT (sequential — one task at a time):
   Optional: task_update(1..N, title, "pending")  ← pre-register all tasks first
   for i in 1..${args.total}:
     1. task_update(i, title, "generating")
@@ -1494,6 +1497,7 @@ PATH B — DEPENDENT (sequential):
     3. task_update(i, title, "grading")
     4. grade(...)  -> verdict + NEXT
     5. PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or failed
+  Note: use single grade() here — tasks are dependent, grading is one at a time.
 
 Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns. Do NOT improvise the sequence.`;
           },
@@ -1983,6 +1987,93 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
               ? `\n[usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).`
               : `\n[usage-coach NEXT] FAIL -> if revisions < 2: task_update(i, title, "revising", revisions+1) + generate({prompt: "Apply feedback:\\n{grade result}\\nTask: {title}"}); else: run the learning loop before failing —\n  1. record_failure({task, prompt, gradeResult, model, revisions})\n  2. investigate({task, prompt, gradeResult}) -> diagnosis\n  3. verify_diagnosis({diagnosis, task, gradeResult}) -> if PASS: generalize({diagnosis, task}) (saves rule to rules.md)\n  4. task_update(i, title, "failed", "FAIL") -> next task.\nThe next generate call will automatically include the new rule.`;
             return out + "\n" + next;
+          },
+        }),
+        grade_batch: tool({
+          description: "Run the GRADER model on MULTIPLE tasks IN PARALLEL. Quota-aware: GO = full parallel; THROTTLE = concurrency capped at 2; STOP = refused. Use after generate_batch returns results for all INDEPENDENT tasks — grade them all at once instead of one-by-one. Each result includes a per-task PASS/FAIL verdict + NEXT directive. Resilient: failed grades are retried sequentially (once).",
+          args: {
+            tasks: tool.schema.array(tool.schema.object({
+              id: tool.schema.number().describe("Task ID (must match the task_update ID)."),
+              prompt: tool.schema.string().describe("The grading prompt for this task (same format as grade())."),
+            })).describe("One entry per task to grade. All run in parallel on GO."),
+          },
+          async execute(args: { tasks: Array<{ id: number; prompt: string }> }, ctx: any) {
+            const cfg = readHarnessCfg(ctx.directory);
+            const model = cfg.grader ?? cfg.generator;
+            if (!model) {
+              return "ERROR: no grader/generator model configured. Set \"grader\" or \"generator\" in harness.config.json.";
+            }
+
+            // ── Quota gate ──
+            let decision = "GO"; try { decision = current().decision; } catch { /* */ }
+            if (decision === "STOP") {
+              return "ERROR: quota STOP — halt the harness loop now. Call task_update(current, \"halted_quota\") and stop.";
+            }
+            // GO: grade all in parallel. THROTTLE: cap at 2 to avoid quota spike.
+            const limit = decision === "THROTTLE" ? 2 : args.tasks.length;
+
+            // ── Inner runner: grade a single task ──
+            const gradeOne = async (t: { id: number; prompt: string }): Promise<{ id: number; result: string }> => {
+              const gradeTaskId = findActiveTaskId(ctx.sessionID, "grading");
+              const out = await runModel(input.client, model, t.prompt, ctx.directory,
+                gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : undefined);
+
+              // Parse verdict from first non-empty line
+              let verdict = "FAIL";
+              if (!out.startsWith("ERROR:")) {
+                const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
+                if (/^pass\b/i.test(f)) verdict = "PASS";
+                else if (/^fail\b/i.test(f)) verdict = "FAIL";
+              }
+
+              const next = verdict === "PASS"
+                ? `[usage-coach NEXT] task ${t.id}: PASS -> task_update(${t.id}, title, "completed", "PASS"), then proceed.`
+                : `[usage-coach NEXT] task ${t.id}: FAIL -> if revisions < 2: task_update(${t.id}, title, "revising") + generate({prompt:"Apply feedback:\\n${out.slice(0, 500)}\\nTask: {title}"}); else: record_failure + investigate + verify + generalize, then task_update(${t.id}, title, "failed", "FAIL").`;
+
+              return { id: t.id, result: `[task ${t.id}] ${verdict}\n${out}\n${next}` };
+            };
+
+            // ── Parallel execution with concurrency cap ──
+            const results: string[] = [];
+            const failed: Array<{ id: number; prompt: string; error: string }> = [];
+
+            for (let i = 0; i < args.tasks.length; i += limit) {
+              const batch = args.tasks.slice(i, i + limit);
+              const settled = await Promise.allSettled(batch.map((t) => gradeOne(t)));
+              for (let j = 0; j < settled.length; j++) {
+                const s = settled[j];
+                const t = batch[j];
+                if (s.status === "fulfilled") {
+                  results.push(s.value.result);
+                } else {
+                  const err = String(s.reason ?? "unknown rejection");
+                  log(`grade_batch task ${t.id} REJECTED: ${err}`);
+                  failed.push({ id: t.id, prompt: t.prompt, error: err });
+                }
+              }
+            }
+
+            // ── Retry failed grades sequentially ──
+            if (failed.length > 0) {
+              log(`grade_batch: retrying ${failed.length} failed grade(s) sequentially`);
+              for (const f of failed) {
+                try {
+                  const r = await gradeOne(f);
+                  results.push(r.result.replace(`[task ${r.id}]`, `[task ${r.id}] (retry)`));
+                } catch (e2) {
+                  const err2 = String(e2 ?? "unknown rejection on retry");
+                  log(`grade_batch task ${f.id} retry ALSO FAILED: ${err2}`);
+                  results.push(`[task ${f.id}] FAIL\n(ERROR: grade failed on both batch and retry: ${err2})\n[usage-coach NEXT] task ${f.id}: grade error — re-run grade() individually for this task.`);
+                }
+              }
+            }
+
+            const throttleNote = decision === "THROTTLE"
+              ? `\n[usage-coach] quota THROTTLE — grader concurrency capped at ${limit}.`
+              : "";
+            const passCount = results.filter((r) => /\[task \d+\] PASS/.test(r)).length;
+            const summary = `\n[usage-coach] Graded ${results.length} task(s): ${passCount} PASS, ${results.length - passCount} FAIL.`;
+            return results.join("\n\n") + summary + throttleNote;
           },
         }),
         reverse_interview: tool({

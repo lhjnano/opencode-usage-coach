@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] - 2026-07-17
+
+### Added
+- **`grade_batch` tool** — grade multiple tasks IN PARALLEL instead of one-by-one.
+  Same quota-aware pattern as `generate_batch`: GO = full parallel, THROTTLE = capped at 2,
+  STOP = refused. Failed grades are retried sequentially. Use after `generate_batch` in PATH A
+  (INDEPENDENT tasks) for a significant speedup — N tasks grade in the time of 1.
+  PATH B (DEPENDENT) still uses single `grade()` since tasks are sequential.
+
+### Changed
+- **Harness loop prompt updated** — PATH A now uses `grade_batch` instead of sequential `grade`.
+  PATH B (sequential) still uses single `grade()`.
+
 ## [0.13.2] - 2026-07-15
 
 ### Fixed
