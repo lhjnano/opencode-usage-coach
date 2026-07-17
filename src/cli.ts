@@ -584,6 +584,7 @@ function formatDomain(r: DomainStats): string {
 
 const GLOBAL_CONFIG_DIR = join(homedir(), ".config", "opencode-usage-coach");
 const OPENCODE_AGENTS_DIR = join(homedir(), ".config", "opencode", "agents");
+const OPENCODE_TUI_CONFIG = join(homedir(), ".config", "opencode", "tui.json");
 const DEFAULT_HARNESS_CONFIG = {
   generator: "opencode/deepseek-v4-flash-free",
   grader: "opencode/mimo-v2.5-free",
@@ -595,17 +596,80 @@ export type SetupResult = {
   harnessConfig: { action: "created" | "exists"; path: string };
   codexbar: { found: boolean; version: string };
   agentFile: { action: "copied" | "exists" | "source-not-found"; path: string };
+  tuiConfig: { action: "configured" | "exists" | "not-found" | "write-error"; path: string };
 };
 
 export type SetupOptions = {
   configDir?: string;
   agentsDir?: string;
   agentSourceFile?: string;
+  tuiConfigPath?: string;
+  scriptDir?: string; // for testing — overrides import.meta.url resolution
 };
 
 export function resolveAgentSourceFile(): string {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   return join(scriptDir, "..", "agents", "usage-coach-harness.md");
+}
+
+/**
+ * Resolve the absolute path to dist/tui.js.
+ * Uses import.meta.url (sibling of cli.js in dist/) so it works regardless
+ * of whether the package was installed globally via npm or via opencode's
+ * Bun cache. The optional scriptDir parameter is for test injection.
+ */
+export function resolveTuiPath(scriptDir?: string): string {
+  const dir = scriptDir ?? dirname(fileURLToPath(import.meta.url));
+  return join(dir, "tui.js");
+}
+
+/**
+ * Non-destructively merge the TUI plugin path into tui.json.
+ * Preserves existing plugins, schema, and any other keys.
+ * Returns "exists" if the path is already present.
+ */
+export function configureTui(
+  tuiPath: string,
+  tuiConfigPath: string,
+): { action: "configured" | "exists" | "not-found" | "write-error"; path: string } {
+  if (!existsSync(tuiPath)) {
+    return { action: "not-found", path: tuiPath };
+  }
+
+  let config: Record<string, unknown> = {};
+  if (existsSync(tuiConfigPath)) {
+    try {
+      config = JSON.parse(readFileSync(tuiConfigPath, "utf8"));
+    } catch {
+      // corrupt JSON — start fresh
+      config = {};
+    }
+  }
+
+  const plugins = Array.isArray(config["plugin"]) ? (config["plugin"] as string[]) : [];
+  if (plugins.includes(tuiPath)) {
+    return { action: "exists", path: tuiConfigPath };
+  }
+
+  // Remove any stale opencode-usage-coach references (subpath or old path)
+  const filtered = plugins.filter(
+    (p) => !p.includes("opencode-usage-coach"),
+  );
+  filtered.push(tuiPath);
+  config["plugin"] = filtered;
+
+  // Ensure schema is preserved
+  if (!config["$schema"]) {
+    config["$schema"] = "https://opencode.ai/tui.json";
+  }
+
+  try {
+    mkdirSync(dirname(tuiConfigPath), { recursive: true });
+    writeFileSync(tuiConfigPath, JSON.stringify(config, null, 2) + "\n");
+    return { action: "configured", path: tuiConfigPath };
+  } catch {
+    return { action: "write-error", path: tuiConfigPath };
+  }
 }
 
 function detectCodexbar(): { found: boolean; version: string } {
@@ -624,6 +688,7 @@ export function doSetup(opts: SetupOptions = {}): SetupResult {
   const configDir = opts.configDir ?? GLOBAL_CONFIG_DIR;
   const agentsDir = opts.agentsDir ?? OPENCODE_AGENTS_DIR;
   const agentSource = opts.agentSourceFile ?? resolveAgentSourceFile();
+  const tuiConfigPath = opts.tuiConfigPath ?? OPENCODE_TUI_CONFIG;
 
   const configPath = join(configDir, "harness.config.json");
 
@@ -656,10 +721,15 @@ export function doSetup(opts: SetupOptions = {}): SetupResult {
     agentAction = "copied";
   }
 
+  // 4. TUI config — auto-resolve and write absolute path to tui.json
+  const tuiPath = resolveTuiPath(opts.scriptDir);
+  const tuiResult = configureTui(tuiPath, tuiConfigPath);
+
   return {
     harnessConfig: { action: configAction, path: configPath },
     codexbar,
     agentFile: { action: agentAction, path: agentDestPath },
+    tuiConfig: tuiResult,
   };
 }
 
@@ -700,6 +770,22 @@ function formatSetup(r: SetupResult): string {
   } else {
     lines.push(`  \u26a0\ufe0f  Agent source not found`);
     lines.push(`     Expected: ${r.agentFile.path}`);
+  }
+
+  // TUI config
+  lines.push("");
+  if (r.tuiConfig.action === "configured") {
+    lines.push(`  \u2705 TUI plugin configured`);
+    lines.push(`     ${r.tuiConfig.path}`);
+  } else if (r.tuiConfig.action === "exists") {
+    lines.push(`  \u2705 TUI plugin already configured`);
+    lines.push(`     ${r.tuiConfig.path}`);
+  } else if (r.tuiConfig.action === "not-found") {
+    lines.push(`  \u26a0\ufe0f  TUI plugin (dist/tui.js) not found`);
+    lines.push(`     Run: npm install -g opencode-usage-coach`);
+  } else {
+    lines.push(`  \u26a0\ufe0f  Could not write TUI config`);
+    lines.push(`     Manually add to ${r.tuiConfig.path}`);
   }
 
   lines.push("");

@@ -25,32 +25,52 @@ See **[docs/architecture.md](docs/architecture.md)** for the full design.
 
 ## Quick Start
 
+### 3 steps to get running
+
+**Step 1 — Install globally (provides the `usage-coach` CLI):**
+
+```bash
+npm install -g opencode-usage-coach
+```
+
+**Step 2 — Add the server plugin to opencode:**
+
 ```jsonc
-// ~/.config/opencode/opencode.json  — server plugin
+// ~/.config/opencode/opencode.json
 { "plugin": ["opencode-usage-coach"] }
-
-// ~/.config/opencode/tui.json        — sidebar panel (point at built dist/tui.js)
-{ "$schema": "https://opencode.ai/tui.json", "plugin": ["opencode-usage-coach/tui"] }
 ```
 
-Then run setup:
+**Step 3 — Run setup (auto-configures everything else):**
 
 ```bash
-usage-coach setup          # auto-generates harness.config.json + copies agent file
-usage-coach setup --json   # machine-readable output (for scripts/CI)
+usage-coach setup
 ```
 
-This creates `~/.config/opencode-usage-coach/harness.config.json` (edit `generator`/`grader` or use `/coach-config` at runtime) and copies `agents/usage-coach-harness.md` to `~/.config/opencode/agents/`.
+This single command:
+- Creates `~/.config/opencode-usage-coach/harness.config.json` (model config)
+- Copies the harness agent file to `~/.config/opencode/agents/`
+- **Auto-configures `~/.config/opencode/tui.json`** with the correct TUI plugin path
+- Detects whether `codexbar` is installed
 
-If you use `codexbar` for quota sensing:
+Restart opencode — you're done. The sidebar panel appears (toggle with `Alt+H`).
+
+> **Without `npm install -g`:** The server plugin still works (opencode auto-installs it from npm), but `usage-coach setup` and the `usage-coach` CLI won't be available. You'd need to manually create `harness.config.json` and configure `tui.json` yourself.
+
+### Quota sensing (optional but recommended)
+
+The plugin works in **GO-only mode** out of the box (no quota sensing). To enable real-time quota monitoring, install [codexbar](https://github.com/nicepkg/codexbar):
 
 ```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/nicepkg/codexbar/main/install.sh | bash
+
+# Then configure your provider API key:
 printf '%s' "$YOUR_PROVIDER_API_KEY" | codexbar config set-api-key --provider <id> --stdin
 ```
 
-Without codexbar, the plugin runs in GO-only mode (no quota sensing).
+codexbar supports any provider with a usage API (OpenAI, Anthropic, Google, z.ai, etc.). Check `codexbar providers` for the full list.
 
-For local dev without npm: `bun install && bun run build`, then point both configs at the `dist/` files.
+Without codexbar, the plugin simply doesn't sense quota — all other features (harness loop, learning, domain knowledge) work normally.
 
 ## Configuration
 
@@ -89,7 +109,13 @@ See **[docs/architecture.md](docs/architecture.md)** for details on the loop, NE
 
 ## Troubleshooting
 
-Common issues: TUI panel missing (check `tui.json` points at `dist/tui.js`, never install `solid-js` in the config dir), model selection errors (`generator` is required), and tool-abort timeouts (platform limit — split large tasks).
+**opencode crashes on startup after adding the plugin** — Make sure you're on v0.13.1 or later. Earlier versions had a bug where opencode would crash due to named exports. Run `npm install -g opencode-usage-coach@latest`.
+
+**TUI sidebar not showing** — Run `usage-coach setup` again. It auto-detects the TUI path and writes `tui.json`. If you installed via `npm install -g`, the path is `$(npm root -g)/opencode-usage-coach/dist/tui.js`. Never install `solid-js` in the opencode config directory.
+
+**`usage-coach: command not found`** — You need `npm install -g opencode-usage-coach` for the CLI. The server plugin works without it, but setup and status commands require the global install.
+
+**Model selection errors** — `generator` is required in `harness.config.json`. Run `usage-coach setup` to create it, then edit the model or use `/coach-config` at runtime.
 
 See **[docs/troubleshooting.md](docs/troubleshooting.md)** for full diagnoses and fixes.
 

@@ -8,16 +8,31 @@ This plugin has four config surfaces. Only the first two are required to run.
 // ~/.config/opencode/opencode.json — server plugin (guardian + harness tools)
 { "plugin": ["opencode-usage-coach"] }            // from npm, OR a local path:
 // { "plugin": ["/abs/path/dist/index.js"] }
-
-// ~/.config/opencode/tui.json — TUI panel (MUST point at the built dist/tui.js)
-{ "$schema": "https://opencode.ai/tui.json",
-  "plugin": ["/abs/path/dist/tui.js"] }
-
-// ~/.config/opencode/agents/usage-coach-harness.md — agent mode (copy from agents/)
 ```
 
-> The TUI file MUST be loaded via `tui.json` file path (not the `plugins/` dir), and MUST be
-> the compiled `dist/tui.js` (raw `.tsx` / installing `solid-js` crashes opencode).
+The TUI panel is **auto-configured by `usage-coach setup`**, which resolves the
+absolute path to `dist/tui.js` and writes it into `~/.config/opencode/tui.json`.
+You should not need to edit `tui.json` manually — just run:
+
+```bash
+npm install -g opencode-usage-coach   # provides the CLI + dist/tui.js
+usage-coach setup                     # auto-writes tui.json + harness.config.json + agent file
+```
+
+If you need to configure `tui.json` manually (e.g. local dev without npm):
+
+```jsonc
+// ~/.config/opencode/tui.json — TUI panel (MUST be an absolute file path to dist/tui.js)
+{ "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["/abs/path/to/opencode-usage-coach/dist/tui.js"] }
+```
+
+> **Do NOT use** `opencode-usage-coach/tui` (subpath) in `tui.json` — opencode's
+> plugin installer cannot resolve npm subpath exports for TUI plugins. Use the
+> absolute file path instead. `usage-coach setup` handles this automatically.
+>
+> The TUI file MUST be the compiled `dist/tui.js` (raw `.tsx` / installing
+> `solid-js` crashes opencode).
 
 ## 2. codexbar (quota data source)
 

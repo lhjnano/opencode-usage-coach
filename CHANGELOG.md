@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-07-15
+
+### Fixed
+- **TUI plugin resolution broken.** `opencode-usage-coach/tui` subpath in `tui.json` caused
+  `NpmInstallFailedError`. `usage-coach setup` now auto-resolves the absolute `dist/tui.js` path
+  and writes it into `tui.json` non-destructively (preserves existing plugins).
+- **Broken exports map.** Removed non-existent `.d.ts` `types` fields from `package.json` exports
+  that could cause TUI subpath resolution failures.
+- **README/docs contradiction on TUI loading.** README recommended subpath (broken);
+  `docs/configuration.md` required file path. Both now consistently use absolute file path via
+  `usage-coach setup`.
+
+### Added
+- `resolveTuiPath()` and `configureTui()` exports in CLI — testable, injected seams.
+- `prepublishOnly` script gates publish on lint + typecheck + test.
+- README rewritten with clear 3-step install guide + codexbar install instructions + troubleshooting.
+- Setup now reports TUI config status (configured / exists / not-found / write-error).
+
+## [0.13.1] - 2026-07-15
+
+### Fixed
+- **CRITICAL: opencode crashes on plugin load (named export bug).** opencode calls ALL named exports
+  as plugin factory functions. `buildGapPrompt(undefined)` → `tasks.map()` → TypeError → TUI crash.
+  Fixed: tsup `onSuccess` strips named exports from dist, leaving only `server` and `default`.
+- **Dynamic quota window mapping.** `parseQuotaResponse()` now classifies windows by
+  `windowMinutes`/`resetDescription` instead of positional slots. Handles 2-window plans
+  (5h + monthly, no weekly). TUI conditionally hides `-1` windows.
+
+## [0.13.0] - 2026-07-14
+
+### Added
+- **`usage-coach setup` CLI command** — auto-generates `harness.config.json`, detects codexbar,
+  copies agent file. `--json` flag for machine-readable output.
+- **ENOENT short-circuit** — `codexbarMissing` flag skips all codexbar spawns after first ENOENT,
+  preventing repeated process spawn errors.
+
 ## [0.12.1] - 2026-07-13
 
 ### Fixed
