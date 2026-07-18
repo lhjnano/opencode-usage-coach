@@ -350,7 +350,8 @@ var DEFAULT_HARNESS_CONFIG = {
   generator: "opencode/deepseek-v4-flash-free",
   grader: "opencode/mimo-v2.5-free",
   provider: "",
-  lighterModel: ""
+  lighterModel: "",
+  maxSteps: 30
 };
 function resolveAgentSourceFile() {
   const scriptDir = dirname(fileURLToPath(import.meta.url));

@@ -590,6 +590,7 @@ const DEFAULT_HARNESS_CONFIG = {
   grader: "opencode/mimo-v2.5-free",
   provider: "",
   lighterModel: "",
+  maxSteps: 30,
 };
 
 export type SetupResult = {

@@ -27,6 +27,11 @@ const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
 // Each generate/generate_batch call creates a sub-session whose agent loop is monitored;
 // if the assistant-turn count exceeds maxSteps, the session is aborted.
 const DEFAULT_MAX_STEPS = Number(process.env.UC_MAX_STEPS ?? 30) || 30;
+
+/** Resolve max steps: explicit arg > harness.config.json > env var > default 30. */
+function resolveMaxSteps(cfg: HarnessCfg, explicit?: number): number {
+  return explicit ?? cfg.maxSteps ?? DEFAULT_MAX_STEPS;
+}
 const WATCHDOG_POLL_MS = Math.max(1000, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3000) || 3000);
 // Wall-clock timeout: if the prompt hasn't completed within this many minutes,
 // abort the sub-session regardless of step count. Prevents zombie pollers from
@@ -896,7 +901,7 @@ function checkScanGate(sessionID: string): { warning: string | null; summary: st
 }
 
 // Read harness config (workdir > global). Used by generate/grade tools + quota provider.
-type HarnessCfg = { generator?: string; grader?: string; provider?: string; lighterModel?: string };
+type HarnessCfg = { generator?: string; grader?: string; provider?: string; lighterModel?: string; maxSteps?: number };
 function readHarnessCfg(dir: string): HarnessCfg {
   const tryRead = (p: string): HarnessCfg => {
     try { if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8")); } catch { /* */ }
@@ -1839,7 +1844,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
               prefix = `Pre-flight scan findings (from unknown_scan — heed these):\n${gate.summary}\n\n---\n\n` + prefix;
             }
             const genTaskId = findActiveTaskId(ctx.sessionID, "generating");
-            const maxSteps = args.max_steps ?? DEFAULT_MAX_STEPS;
+            const maxSteps = resolveMaxSteps(cfg, args.max_steps);
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory,
               genTaskId ? { sessionID: ctx.sessionID, taskId: genTaskId } : undefined, maxSteps);
             // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty
@@ -1885,7 +1890,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             // Shared prefix components (rules + prior impl-notes) computed once for all tasks.
             const rules = readRules();
             const priorNotes = readImplNotes(5);
-            const maxSteps = args.max_steps ?? DEFAULT_MAX_STEPS;
+            const maxSteps = resolveMaxSteps(cfg, args.max_steps);
 
             // ── Diagnosis gate (shared by all tasks in this batch) ──
             const gate = checkScanGate(ctx.sessionID);
@@ -2222,24 +2227,27 @@ If the task is already well-specified with no significant ambiguities, return {"
         }),
 
         coach_config: tool({
-          description: 'View or update harness model configuration (generator, grader, lighterModel, provider). Call with no args to view current config. Pass any combination of generator/grader/lighterModel/provider to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free" })',
+          description: 'View or update harness model configuration (generator, grader, lighterModel, provider, maxSteps). Call with no args to view current config. Pass any combination of fields to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free", maxSteps: 15 })',
           args: {
             generator: tool.schema.string().optional(),
             grader: tool.schema.string().optional(),
             lighterModel: tool.schema.string().optional(),
             provider: tool.schema.string().optional(),
+            maxSteps: tool.schema.number().optional().describe("Max steps per generate/grade sub-session (default 30). Lower = faster but may timeout on complex tasks."),
           },
-          async execute(args: { generator?: string; grader?: string; lighterModel?: string; provider?: string }, ctx: any) {
+          async execute(args: { generator?: string; grader?: string; lighterModel?: string; provider?: string; maxSteps?: number }, ctx: any) {
             const dir = (ctx as any)?.directory ?? input.directory;
             const current = readHarnessCfg(dir);
 
             // If no args → view mode
             const hasUpdates = args.generator !== undefined || args.grader !== undefined ||
-                               args.lighterModel !== undefined || args.provider !== undefined;
+                               args.lighterModel !== undefined || args.provider !== undefined ||
+                               args.maxSteps !== undefined;
             if (!hasUpdates) {
               const envOverrides: string[] = [];
               if (process.env.UC_PROVIDER) envOverrides.push(`UC_PROVIDER=${process.env.UC_PROVIDER}`);
               if (process.env.UC_LIGHTER_MODEL) envOverrides.push(`UC_LIGHTER_MODEL=${process.env.UC_LIGHTER_MODEL}`);
+              if (process.env.UC_MAX_STEPS) envOverrides.push(`UC_MAX_STEPS=${process.env.UC_MAX_STEPS}`);
               return [
                 `Harness Configuration`,
                 `═══════════════════════════════════════════════`,
@@ -2247,10 +2255,11 @@ If the task is already well-specified with no significant ambiguities, return {"
                 `  grader:        ${current.grader ?? "(defaults to generator)"}`,
                 `  lighterModel:  ${current.lighterModel ?? "(not set — no THROTTLE fallback)"}`,
                 `  provider:      ${current.provider ?? "(auto-detected from model)"}`,
+                `  maxSteps:      ${current.maxSteps ?? 30}  (env: UC_MAX_STEPS)`,
                 `═══════════════════════════════════════════════`,
                 envOverrides.length > 0 ? `\nEnvironment overrides (take precedence):\n  ${envOverrides.join("\n  ")}` : "",
                 `\nConfig file: ~/.config/opencode-usage-coach/harness.config.json`,
-                `\nTo update, call: coach_config({ generator: "provider/model-id", ... })`,
+                `\nTo update, call: coach_config({ generator: "provider/model-id", maxSteps: 15, ... })`,
               ].filter(Boolean).join("\n");
             }
 
@@ -2260,6 +2269,7 @@ If the task is already well-specified with no significant ambiguities, return {"
             if (args.grader !== undefined) updates.grader = args.grader.trim();
             if (args.lighterModel !== undefined) updates.lighterModel = args.lighterModel.trim();
             if (args.provider !== undefined) updates.provider = args.provider.trim();
+            if (args.maxSteps !== undefined) updates.maxSteps = args.maxSteps;
 
             const writtenPath = writeHarnessCfg(updates);
             const updated = readHarnessCfg(dir);
@@ -2271,6 +2281,7 @@ If the task is already well-specified with no significant ambiguities, return {"
               `  grader:        ${updated.grader ?? "(defaults to generator)"}`,
               `  lighterModel:  ${updated.lighterModel ?? "(not set)"}`,
               `  provider:      ${updated.provider ?? "(auto-detected)"}`,
+              `  maxSteps:      ${updated.maxSteps ?? 30}`,
               `═══════════════════════════════════════════════`,
               `\nSaved to: ${writtenPath}`,
               `\nNote: Changes take effect immediately for new generate/grade calls.`,

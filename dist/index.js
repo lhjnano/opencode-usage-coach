@@ -434,6 +434,9 @@ async function searchContext(query, frameworks, keyDeps, timeoutMs) {
 var PLUGIN_NAME = "opencode-usage-coach";
 var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
 var DEFAULT_MAX_STEPS = Number(process.env.UC_MAX_STEPS ?? 30) || 30;
+function resolveMaxSteps(cfg, explicit) {
+  return explicit ?? cfg.maxSteps ?? DEFAULT_MAX_STEPS;
+}
 var WATCHDOG_POLL_MS = Math.max(1e3, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3e3) || 3e3);
 var WALL_TIMEOUT_MS = Math.max(1, Number(process.env.UC_WALL_TIMEOUT_MIN ?? 30) || 30) * 60 * 1e3;
 var DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUESTIONS ?? 7)) || 7);
@@ -2340,7 +2343,7 @@ ${gate.summary}
 ` + prefix;
             }
             const genTaskId = findActiveTaskId(ctx.sessionID, "generating");
-            const maxSteps = args.max_steps ?? DEFAULT_MAX_STEPS;
+            const maxSteps = resolveMaxSteps(cfg, args.max_steps);
             const out = await runModel(
               input.client,
               model,
@@ -2401,7 +2404,7 @@ ${gate.summary}
             const limit = decision === "THROTTLE" ? 2 : args.tasks.length;
             const rules = readRules();
             const priorNotes = readImplNotes(5);
-            const maxSteps = args.max_steps ?? DEFAULT_MAX_STEPS;
+            const maxSteps = resolveMaxSteps(cfg, args.max_steps);
             const gate = checkScanGate(ctx.sessionID);
             const gatePrefix = gate.warning ? `${gate.warning}
 
@@ -2743,21 +2746,23 @@ If the task is already well-specified with no significant ambiguities, return {"
           }
         }),
         coach_config: tool({
-          description: 'View or update harness model configuration (generator, grader, lighterModel, provider). Call with no args to view current config. Pass any combination of generator/grader/lighterModel/provider to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free" })',
+          description: 'View or update harness model configuration (generator, grader, lighterModel, provider, maxSteps). Call with no args to view current config. Pass any combination of fields to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free", maxSteps: 15 })',
           args: {
             generator: tool.schema.string().optional(),
             grader: tool.schema.string().optional(),
             lighterModel: tool.schema.string().optional(),
-            provider: tool.schema.string().optional()
+            provider: tool.schema.string().optional(),
+            maxSteps: tool.schema.number().optional().describe("Max steps per generate/grade sub-session (default 30). Lower = faster but may timeout on complex tasks.")
           },
           async execute(args, ctx) {
             const dir = ctx?.directory ?? input.directory;
             const current2 = readHarnessCfg(dir);
-            const hasUpdates = args.generator !== void 0 || args.grader !== void 0 || args.lighterModel !== void 0 || args.provider !== void 0;
+            const hasUpdates = args.generator !== void 0 || args.grader !== void 0 || args.lighterModel !== void 0 || args.provider !== void 0 || args.maxSteps !== void 0;
             if (!hasUpdates) {
               const envOverrides = [];
               if (process.env.UC_PROVIDER) envOverrides.push(`UC_PROVIDER=${process.env.UC_PROVIDER}`);
               if (process.env.UC_LIGHTER_MODEL) envOverrides.push(`UC_LIGHTER_MODEL=${process.env.UC_LIGHTER_MODEL}`);
+              if (process.env.UC_MAX_STEPS) envOverrides.push(`UC_MAX_STEPS=${process.env.UC_MAX_STEPS}`);
               return [
                 `Harness Configuration`,
                 `\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550`,
@@ -2765,6 +2770,7 @@ If the task is already well-specified with no significant ambiguities, return {"
                 `  grader:        ${current2.grader ?? "(defaults to generator)"}`,
                 `  lighterModel:  ${current2.lighterModel ?? "(not set \u2014 no THROTTLE fallback)"}`,
                 `  provider:      ${current2.provider ?? "(auto-detected from model)"}`,
+                `  maxSteps:      ${current2.maxSteps ?? 30}  (env: UC_MAX_STEPS)`,
                 `\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550`,
                 envOverrides.length > 0 ? `
 Environment overrides (take precedence):
@@ -2772,7 +2778,7 @@ Environment overrides (take precedence):
                 `
 Config file: ~/.config/opencode-usage-coach/harness.config.json`,
                 `
-To update, call: coach_config({ generator: "provider/model-id", ... })`
+To update, call: coach_config({ generator: "provider/model-id", maxSteps: 15, ... })`
               ].filter(Boolean).join("\n");
             }
             const updates = {};
@@ -2780,6 +2786,7 @@ To update, call: coach_config({ generator: "provider/model-id", ... })`
             if (args.grader !== void 0) updates.grader = args.grader.trim();
             if (args.lighterModel !== void 0) updates.lighterModel = args.lighterModel.trim();
             if (args.provider !== void 0) updates.provider = args.provider.trim();
+            if (args.maxSteps !== void 0) updates.maxSteps = args.maxSteps;
             const writtenPath = writeHarnessCfg(updates);
             const updated = readHarnessCfg(dir);
             return [
@@ -2789,6 +2796,7 @@ To update, call: coach_config({ generator: "provider/model-id", ... })`
               `  grader:        ${updated.grader ?? "(defaults to generator)"}`,
               `  lighterModel:  ${updated.lighterModel ?? "(not set)"}`,
               `  provider:      ${updated.provider ?? "(auto-detected)"}`,
+              `  maxSteps:      ${updated.maxSteps ?? 30}`,
               `\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550`,
               `
 Saved to: ${writtenPath}`,
