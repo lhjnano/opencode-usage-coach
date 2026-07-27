@@ -16,7 +16,7 @@ function initDomain(stateDir) {
   if (basename(dirname(stateDir)) === "projects") {
     SHARED_DIR = join(dirname(dirname(stateDir)), "shared");
   } else {
-    SHARED_DIR = join(stateDir, "_shared");
+    SHARED_DIR = join(stateDir, "shared");
   }
 }
 var nodesFile = () => join(BASE_DIR, "nodes.ndjson");
@@ -2307,6 +2307,9 @@ ${rules}
 ---
 
 ` + prefix;
+                  log(`generate domain HIT: ${nodes.length} nodes, ${edges.length} edges (kw=[${keywords.join(",")}])`);
+                } else {
+                  log(`generate domain MISS: 0 nodes (kw=[${keywords.join(",")}])`);
                 }
               }
             } catch (e) {

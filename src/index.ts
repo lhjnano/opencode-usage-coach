@@ -1821,6 +1821,9 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n` + prefix;
+                  log(`generate domain HIT: ${nodes.length} nodes, ${edges.length} edges (kw=[${keywords.join(",")}])`);
+                } else {
+                  log(`generate domain MISS: 0 nodes (kw=[${keywords.join(",")}])`);
                 }
               }
             } catch (e) { log(`generate domain query err: ${String(e)}`); }

@@ -47,11 +47,11 @@ let SHARED_DIR = "";
 export function initDomain(stateDir: string): void {
   BASE_DIR = stateDir;
   // SHARED_DIR: if stateDir is .../projects/<hash>/, use .../shared/ (cross-project layer).
-  // Otherwise (tests, custom UC_STATE_DIR), fall back to stateDir/_shared/ for isolation.
+  // Otherwise (top-level cache dir, tests, custom UC_STATE_DIR), use stateDir/shared/.
   if (basename(dirname(stateDir)) === "projects") {
     SHARED_DIR = join(dirname(dirname(stateDir)), "shared");
   } else {
-    SHARED_DIR = join(stateDir, "_shared");
+    SHARED_DIR = join(stateDir, "shared");
   }
 }
 
