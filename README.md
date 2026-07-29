@@ -58,19 +58,31 @@ Restart opencode — you're done. The sidebar panel appears (toggle with `Alt+H`
 
 ### Quota sensing (optional but recommended)
 
-The plugin works in **GO-only mode** out of the box (no quota sensing). To enable real-time quota monitoring, install [codexbar](https://github.com/nicepkg/codexbar):
+The plugin works in **GO-only mode** out of the box (no quota sensing). To enable real-time quota monitoring, install [CodexBar](https://github.com/steipete/CodexBar):
 
 ```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/nicepkg/codexbar/main/install.sh | bash
+# macOS
+brew install --cask codexbar
 
-# Then configure your provider API key:
+# Linux (Homebrew)
+brew install steipete/tap/codexbar
+
+# Linux (Arch AUR)
+yay -S codexbar-cli
+
+# Or download CLI tarballs from GitHub Releases
+# https://github.com/steipete/CodexBar/releases
+```
+
+Then configure your provider API key:
+
+```bash
 printf '%s' "$YOUR_PROVIDER_API_KEY" | codexbar config set-api-key --provider <id> --stdin
 ```
 
-codexbar supports any provider with a usage API (OpenAI, Anthropic, Google, z.ai, etc.). Check `codexbar providers` for the full list.
+CodexBar supports 65+ providers including z.ai, OpenAI, Claude, Cursor, Gemini, Copilot, and more. Check `codexbar config providers` for the full list.
 
-Without codexbar, the plugin simply doesn't sense quota — all other features (harness loop, learning, domain knowledge) work normally.
+Without CodexBar, the plugin simply doesn't sense quota — all other features (harness loop, learning, domain knowledge) work normally.
 
 ## Configuration
 
