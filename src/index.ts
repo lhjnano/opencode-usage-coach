@@ -270,7 +270,13 @@ function extractKeywords(text: string): string[] {
     ]);
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const raw of (text ?? "").toLowerCase().split(/[^a-z0-9_-]+/)) {
+    // Strip path-like substrings BEFORE tokenizing — otherwise every task prompt's
+    // "Working directory: /home/lhjnano/services/x" pollutes keywords with generic
+    // path fragments (home, lhjnano, services...), causing 100% domain-DB hit rates
+    // that dump ~600KB of the graph into each generate prompt.
+    const clean = (text ?? "")
+      .replace(/\b[\w.-]+(?:\/[\w.-]+)+\b/g, " ");   // slash-paths (a/b/c, ./x/y)
+    for (const raw of clean.toLowerCase().split(/[^a-z0-9_-]+/)) {
       const t = raw.trim();
       if (t.length < 3 || STOP.has(t) || seen.has(t)) continue;
       seen.add(t);
@@ -984,7 +990,7 @@ function checkScanGate(sessionID: string): { warning: string | null; summary: st
 }
 
 // Read harness config (workdir > global). Used by generate/grade tools + quota provider.
-type HarnessCfg = { generator?: string; grader?: string; provider?: string; lighterModel?: string; maxSteps?: number };
+type HarnessCfg = { generator?: string; grader?: string; provider?: string; lighterModel?: string; maxSteps?: number; domainMaxNodes?: number };
 function readHarnessCfg(dir: string): HarnessCfg {
   const tryRead = (p: string): HarnessCfg => {
     try { if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8")); } catch { /* */ }
@@ -1810,7 +1816,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords);
+                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes });
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n`;
@@ -1903,7 +1909,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords);
+                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes });
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   domainNodeCount = nodes.length;
@@ -2340,22 +2346,23 @@ If the task is already well-specified with no significant ambiguities, return {"
         }),
 
         coach_config: tool({
-          description: 'View or update harness model configuration (generator, grader, lighterModel, provider, maxSteps). Call with no args to view current config. Pass any combination of fields to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free", maxSteps: 15 })',
+          description: 'View or update harness model configuration (generator, grader, lighterModel, provider, maxSteps, domainMaxNodes). Call with no args to view current config. Pass any combination of fields to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free", maxSteps: 15 })',
           args: {
             generator: tool.schema.string().optional(),
             grader: tool.schema.string().optional(),
             lighterModel: tool.schema.string().optional(),
             provider: tool.schema.string().optional(),
             maxSteps: tool.schema.number().optional().describe("Max steps per generate/grade sub-session (default 30). Lower = faster but may timeout on complex tasks."),
+            domainMaxNodes: tool.schema.number().optional().describe("Max domain DB nodes injected into a generate prompt (default 20). Lower keeps prompts small; 0 or unset uses the default."),
           },
-          async execute(args: { generator?: string; grader?: string; lighterModel?: string; provider?: string; maxSteps?: number }, ctx: any) {
+          async execute(args: { generator?: string; grader?: string; lighterModel?: string; provider?: string; maxSteps?: number; domainMaxNodes?: number }, ctx: any) {
             const dir = (ctx as any)?.directory ?? input.directory;
             const current = readHarnessCfg(dir);
 
             // If no args → view mode
             const hasUpdates = args.generator !== undefined || args.grader !== undefined ||
                                args.lighterModel !== undefined || args.provider !== undefined ||
-                               args.maxSteps !== undefined;
+                               args.maxSteps !== undefined || args.domainMaxNodes !== undefined;
             if (!hasUpdates) {
               const envOverrides: string[] = [];
               if (process.env.UC_PROVIDER) envOverrides.push(`UC_PROVIDER=${process.env.UC_PROVIDER}`);
@@ -2383,6 +2390,7 @@ If the task is already well-specified with no significant ambiguities, return {"
             if (args.lighterModel !== undefined) updates.lighterModel = args.lighterModel.trim();
             if (args.provider !== undefined) updates.provider = args.provider.trim();
             if (args.maxSteps !== undefined) updates.maxSteps = args.maxSteps;
+            if (args.domainMaxNodes !== undefined) updates.domainMaxNodes = args.domainMaxNodes;
 
             const writtenPath = writeHarnessCfg(updates);
             const updated = readHarnessCfg(dir);
@@ -2395,6 +2403,7 @@ If the task is already well-specified with no significant ambiguities, return {"
               `  lighterModel:  ${updated.lighterModel ?? "(not set)"}`,
               `  provider:      ${updated.provider ?? "(auto-detected)"}`,
               `  maxSteps:      ${updated.maxSteps ?? 30}`,
+              `  domainMaxNodes: ${updated.domainMaxNodes ?? "(default 20)"}`,
               `═══════════════════════════════════════════════`,
               `\nSaved to: ${writtenPath}`,
               `\nNote: Changes take effect immediately for new generate/grade calls.`,

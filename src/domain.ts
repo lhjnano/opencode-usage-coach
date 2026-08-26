@@ -129,18 +129,40 @@ function writeSharedNodes(nodes: DomainNode[]): void {
 }
 
 // Keyword match against node name + props; include every edge touching a matched node.
-export function queryDomain(keywords: string[]): { nodes: DomainNode[]; edges: DomainEdge[] } {
+// opts.maxNodes caps the result (default 20) — without a cap, a mature mesh DB dumps
+// hundreds of nodes (~600KB) into every generate prompt, burying the actual task.
+// Nodes are ranked by DISTINCT keyword match count (more matching keywords = more relevant).
+export function queryDomain(
+  keywords: string[],
+  opts: { maxNodes?: number; maxEdges?: number } = {},
+): { nodes: DomainNode[]; edges: DomainEdge[] } {
+  const maxNodes = Math.max(1, Math.round(opts.maxNodes ?? 20) || 20);
+  const maxEdges = Math.max(1, Math.round(opts.maxEdges ?? 60) || 60);
   const lc = keywords.map((k) => k.toLowerCase());
   const nodes = readNodes();
-  const matched = nodes.filter((n) => {
-    const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
-    return lc.some((k) => k && hay.includes(k));
-  });
+  const matched = nodes
+    .map((n) => {
+      const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
+      // Score = number of distinct keywords present in this node.
+      const score = lc.reduce((acc, k) => acc + (k && hay.includes(k) ? 1 : 0), 0);
+      return { n, score };
+    })
+    .filter(({ score }) => score > 0);
+  // Rank by relevance, keep top maxNodes. Ties broken by recency (ts desc).
+  matched.sort((a, b) => b.score - a.score ||
+    new Date(b.n.ts).getTime() - new Date(a.n.ts).getTime());
+  const kept = matched.slice(0, maxNodes).map(({ n }) => n);
   // Track access for the worm — lastAccessed/accessCount drive eviction.
-  if (matched.length) touchNodes(new Set(matched.map((n) => n.id)));
-  const ids = new Set(matched.map((n) => n.id));
-  const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to));
-  return { nodes: matched, edges };
+  if (kept.length) touchNodes(new Set(kept.map((n) => n.id)));
+  const ids = new Set(kept.map((n) => n.id));
+  // Edges touching kept nodes; internal edges (both endpoints kept) ranked first,
+  // capped at maxEdges so hub-heavy meshes don't flood the prompt.
+  const edges = readEdges()
+    .filter((e) => ids.has(e.from) || ids.has(e.to))
+    .sort((a, b) =>
+      Number(ids.has(b.from) && ids.has(b.to)) - Number(ids.has(a.from) && ids.has(a.to)))
+    .slice(0, maxEdges);
+  return { nodes: kept, edges };
 }
 
 // Worm — update lastAccessed + accessCount for the given node ids (rewrite). Low-frequency:
@@ -294,10 +316,10 @@ export function traverseNeighborhood(
 export function queryDomainGraph(
   keywords: string[],
   maxDepth = 2,
-  opts: { maxNodes?: number } = {},
+  opts: { maxNodes?: number; maxEdges?: number } = {},
 ): { nodes: DomainNode[]; edges: DomainEdge[] } {
   // queryDomain touches the seed nodes (worm GC) — kept for behavior parity.
-  const seed = queryDomain(keywords);
+  const seed = queryDomain(keywords, opts);
   const seedIds = seed.nodes.map((n) => n.id);
   if (maxDepth <= 0 || seedIds.length === 0) {
     return { nodes: seed.nodes, edges: seed.edges };

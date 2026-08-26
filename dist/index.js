@@ -59,17 +59,22 @@ function writeNodes(nodes) {
   } catch {
   }
 }
-function queryDomain(keywords) {
+function queryDomain(keywords, opts = {}) {
+  const maxNodes = Math.max(1, Math.round(opts.maxNodes ?? 20) || 20);
+  const maxEdges = Math.max(1, Math.round(opts.maxEdges ?? 60) || 60);
   const lc = keywords.map((k) => k.toLowerCase());
   const nodes = readNodes();
-  const matched = nodes.filter((n) => {
+  const matched = nodes.map((n) => {
     const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
-    return lc.some((k) => k && hay.includes(k));
-  });
-  if (matched.length) touchNodes(new Set(matched.map((n) => n.id)));
-  const ids = new Set(matched.map((n) => n.id));
-  const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to));
-  return { nodes: matched, edges };
+    const score = lc.reduce((acc, k) => acc + (k && hay.includes(k) ? 1 : 0), 0);
+    return { n, score };
+  }).filter(({ score }) => score > 0);
+  matched.sort((a, b) => b.score - a.score || new Date(b.n.ts).getTime() - new Date(a.n.ts).getTime());
+  const kept = matched.slice(0, maxNodes).map(({ n }) => n);
+  if (kept.length) touchNodes(new Set(kept.map((n) => n.id)));
+  const ids = new Set(kept.map((n) => n.id));
+  const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to)).sort((a, b) => Number(ids.has(b.from) && ids.has(b.to)) - Number(ids.has(a.from) && ids.has(a.to))).slice(0, maxEdges);
+  return { nodes: kept, edges };
 }
 function touchNodes(ids) {
   if (ids.size === 0) return;
@@ -156,7 +161,7 @@ function traverseNeighborhood(seedNodeIds, maxDepth = 2, opts = {}) {
   return { nodes, edges };
 }
 function queryDomainGraph(keywords, maxDepth = 2, opts = {}) {
-  const seed = queryDomain(keywords);
+  const seed = queryDomain(keywords, opts);
   const seedIds = seed.nodes.map((n) => n.id);
   if (maxDepth <= 0 || seedIds.length === 0) {
     return { nodes: seed.nodes, edges: seed.edges };
@@ -733,7 +738,8 @@ function extractKeywords(text) {
     ]);
     const seen = /* @__PURE__ */ new Set();
     const out = [];
-    for (const raw of (text ?? "").toLowerCase().split(/[^a-z0-9_-]+/)) {
+    const clean = (text ?? "").replace(/\b[\w.-]+(?:\/[\w.-]+)+\b/g, " ");
+    for (const raw of clean.toLowerCase().split(/[^a-z0-9_-]+/)) {
       const t = raw.trim();
       if (t.length < 3 || STOP.has(t) || seen.has(t)) continue;
       seen.add(t);
@@ -2217,7 +2223,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords);
+                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes });
                 if (nodes && nodes.length || edges && edges.length) {
                   domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
@@ -2367,7 +2373,7 @@ ${rules}
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords);
+                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes });
                 if (nodes && nodes.length || edges && edges.length) {
                   domainEmpty = false;
                   domainNodeCount = nodes.length;
@@ -2842,18 +2848,19 @@ If the task is already well-specified with no significant ambiguities, return {"
           }
         }),
         coach_config: tool({
-          description: 'View or update harness model configuration (generator, grader, lighterModel, provider, maxSteps). Call with no args to view current config. Pass any combination of fields to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free", maxSteps: 15 })',
+          description: 'View or update harness model configuration (generator, grader, lighterModel, provider, maxSteps, domainMaxNodes). Call with no args to view current config. Pass any combination of fields to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free", maxSteps: 15 })',
           args: {
             generator: tool.schema.string().optional(),
             grader: tool.schema.string().optional(),
             lighterModel: tool.schema.string().optional(),
             provider: tool.schema.string().optional(),
-            maxSteps: tool.schema.number().optional().describe("Max steps per generate/grade sub-session (default 30). Lower = faster but may timeout on complex tasks.")
+            maxSteps: tool.schema.number().optional().describe("Max steps per generate/grade sub-session (default 30). Lower = faster but may timeout on complex tasks."),
+            domainMaxNodes: tool.schema.number().optional().describe("Max domain DB nodes injected into a generate prompt (default 20). Lower keeps prompts small; 0 or unset uses the default.")
           },
           async execute(args, ctx) {
             const dir = ctx?.directory ?? input.directory;
             const current2 = readHarnessCfg(dir);
-            const hasUpdates = args.generator !== void 0 || args.grader !== void 0 || args.lighterModel !== void 0 || args.provider !== void 0 || args.maxSteps !== void 0;
+            const hasUpdates = args.generator !== void 0 || args.grader !== void 0 || args.lighterModel !== void 0 || args.provider !== void 0 || args.maxSteps !== void 0 || args.domainMaxNodes !== void 0;
             if (!hasUpdates) {
               const envOverrides = [];
               if (process.env.UC_PROVIDER) envOverrides.push(`UC_PROVIDER=${process.env.UC_PROVIDER}`);
@@ -2883,6 +2890,7 @@ To update, call: coach_config({ generator: "provider/model-id", maxSteps: 15, ..
             if (args.lighterModel !== void 0) updates.lighterModel = args.lighterModel.trim();
             if (args.provider !== void 0) updates.provider = args.provider.trim();
             if (args.maxSteps !== void 0) updates.maxSteps = args.maxSteps;
+            if (args.domainMaxNodes !== void 0) updates.domainMaxNodes = args.domainMaxNodes;
             const writtenPath = writeHarnessCfg(updates);
             const updated = readHarnessCfg(dir);
             return [
@@ -2893,6 +2901,7 @@ To update, call: coach_config({ generator: "provider/model-id", maxSteps: 15, ..
               `  lighterModel:  ${updated.lighterModel ?? "(not set)"}`,
               `  provider:      ${updated.provider ?? "(auto-detected)"}`,
               `  maxSteps:      ${updated.maxSteps ?? 30}`,
+              `  domainMaxNodes: ${updated.domainMaxNodes ?? "(default 20)"}`,
               `\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550`,
               `
 Saved to: ${writtenPath}`,

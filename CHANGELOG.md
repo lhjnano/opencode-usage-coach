@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-08-26
+
+### Fixed
+- **Domain DB prompt flooding.** Real-world logs showed a 100% domain-query hit rate
+  dumping an average of 420 nodes (~600KB, up to 1MB) into every generate prompt:
+  - `extractKeywords` now strips slash-paths before tokenizing — task prompts'
+    "Working directory: /home/..." lines were polluting keywords with generic path
+    fragments (`home`, `lhjnano`, `services`), matching half the graph on every query.
+  - `queryDomain` caps results: top 20 nodes ranked by distinct-keyword match count
+    (ties broken by recency), max 60 edges (internal edges first). Configurable via
+    `domainMaxNodes` in `harness.config.json` or `coach_config({ domainMaxNodes })`.
+  - `queryDomainGraph` forwards the same caps.
+
+### Added
+- 5 regression tests (`test/query-cap.test.ts`) — path stripping, node cap, relevance
+  ranking. 351 total.
+
 ## [0.14.0] - 2026-08-26
 
 ### Added
