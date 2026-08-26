@@ -146,7 +146,7 @@ function readAggregateStatus() {
   const decCount = {};
   let max5h = 0, maxWk = 0, maxMo = 0, activeHarnesses = 0, totalTasks = 0, totalRules = 0, totalFailures = 0, totalDomainNodes = 0, totalDomainEdges = 0;
   for (const d of dirs) {
-    let isDir = false;
+    let isDir;
     try {
       isDir = statSync(d).isDirectory();
     } catch {

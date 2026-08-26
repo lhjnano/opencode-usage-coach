@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildGapPrompt,
+  buildGradePrompt,
   formatReport,
   isFreeModel,
   providerToCodexbar,
@@ -193,4 +194,45 @@ test("humanRemaining: returns 'Xd left' for over 1 day", () => {
   const result = humanRemaining(iso);
   assert.ok(result.includes("d left"), `expected 'Xd left', got: ${result}`);
   assert.ok(!result.includes("resets in"), `should not say 'resets in' for days, got: ${result}`);
+});
+
+// ── buildGradePrompt ─────────────────────────────────────────────────────────
+test("buildGradePrompt: prepends the verification protocol before the user prompt", () => {
+  const userPrompt = "Evaluate task 7: add retry logic.";
+  const p = buildGradePrompt(userPrompt);
+  assert.ok(typeof p === "string");
+  assert.ok(p.includes(userPrompt), "should contain the user prompt verbatim");
+  assert.ok(p.indexOf(userPrompt) > 0, "user prompt must come AFTER the protocol prefix");
+  assert.ok(p.endsWith(userPrompt), "user prompt must be the tail of the wrapped prompt");
+});
+
+test("buildGradePrompt: protocol demands file:line citations", () => {
+  const p = buildGradePrompt("x");
+  assert.ok(p.includes("file:line"), "must demand file:line evidence");
+  assert.ok(/src\/index\.ts:\d+/.test(p), "must show a concrete file:line example");
+});
+
+test("buildGradePrompt: protocol requires running tests (or stating why not)", () => {
+  const p = buildGradePrompt("x");
+  assert.ok(/run them/i.test(p), "must instruct to run tests");
+  assert.ok(/state why/i.test(p), "must require a reason when tests cannot run");
+});
+
+test("buildGradePrompt: protocol blocks WYSIATI (visible-only judgement)", () => {
+  const p = buildGradePrompt("x");
+  assert.ok(p.includes("WYSIATI"), "must mention WYSIATI");
+  assert.ok(/edge cases/i.test(p), "must mention edge cases");
+});
+
+test("buildGradePrompt: locks the first-line PASS/FAIL output contract", () => {
+  const p = buildGradePrompt("x");
+  assert.ok(/FIRST line/i.test(p), "must pin the first line");
+  assert.ok(/"PASS" or "FAIL"/.test(p), "must pin exact verdict tokens");
+});
+
+test("buildGradePrompt: protocol stays within 10 lines", () => {
+  const p = buildGradePrompt("user body");
+  const protocol = p.split("\n\n---\n\n")[0];
+  const lineCount = protocol.split("\n").length;
+  assert.ok(lineCount <= 10, `protocol should be <= 10 lines, got ${lineCount}`);
 });

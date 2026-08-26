@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-08-26
+
+### Added
+- **File-overlap detection in `generate_batch`** — tasks may now declare an optional
+  `files: string[]` (the files they will MODIFY). When any two tasks in a batch declare
+  overlapping files, concurrency is forced to 1 (sequential) to prevent parallel
+  grade-attribution problems. Priority: overlap (1) > THROTTLE (2) > GO (all parallel).
+  Paths are normalized (`./` prefix stripped, lowercased) so `./A.ts` and `a.ts` count
+  as the same file. New pure exports: `normalizeFilePath`, `resolveBatchLimit`.
+- **Grading verification protocol** — `grade` and `grade_batch` prompts are now wrapped
+  by `buildGradePrompt()`, which enforces evidence-based verdicts:
+  PASS requires `file:line` citations, tests must be run (or the reason stated),
+  and the grader is explicitly instructed to look for what is NOT visible
+  (WYSIATI countermeasure). The first-line `PASS`/`FAIL` output contract is preserved.
+- 23 new tests (`test/batch-isolation.test.ts`, `test/grade-enforcement.test.ts`) — 346 total.
+
+### Fixed
+- ESLint `no-console` exemption for `src/cli.ts` (a CLI legitimately prints to stdout).
+- Useless `isDir` initialization in `src/cli.ts` (`no-useless-assignment`).
+
 ## [0.13.3] - 2026-07-17
 
 ### Added

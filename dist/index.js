@@ -437,6 +437,19 @@ var DEFAULT_MAX_STEPS = Number(process.env.UC_MAX_STEPS ?? 30) || 30;
 function resolveMaxSteps(cfg, explicit) {
   return explicit ?? cfg.maxSteps ?? DEFAULT_MAX_STEPS;
 }
+function normalizeFilePath(p) {
+  return p.trim().replace(/^(\.\/)+/, "").toLowerCase();
+}
+function resolveBatchLimit(tasks, decision) {
+  if (tasks.length === 0) return 0;
+  const seen = /* @__PURE__ */ new Set();
+  for (const t of tasks) {
+    const files = new Set((t.files ?? []).map(normalizeFilePath).filter(Boolean));
+    for (const f of files) if (seen.has(f)) return 1;
+    for (const f of files) seen.add(f);
+  }
+  return decision === "THROTTLE" ? 2 : tasks.length;
+}
 var WATCHDOG_POLL_MS = Math.max(1e3, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3e3) || 3e3);
 var WALL_TIMEOUT_MS = Math.max(1, Number(process.env.UC_WALL_TIMEOUT_MIN ?? 30) || 30) * 60 * 1e3;
 var DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUESTIONS ?? 7)) || 7);
@@ -913,7 +926,48 @@ function clearSubSession(sessionID, taskId) {
     t.subStep = void 0;
     t.lastActivity = void 0;
     t.subElapsed = void 0;
+    t.lastPollTs = void 0;
   });
+}
+function analyzeInjection(sessionID) {
+  try {
+    const h = readHarness(sessionID);
+    if (!h) return { total: 0, passed: 0, failed: 0, withInjection: { total: 0, passRate: 0 }, withoutInjection: { total: 0, passRate: 0 }, byCategory: {} };
+    const tasks = h.tasks.filter((t) => t.score === "PASS" || t.score === "FAIL");
+    let withInj = 0, withInjPass = 0, withoutInj = 0, withoutInjPass = 0;
+    const cats = {};
+    for (const t of tasks) {
+      const inj = t.injected;
+      const hasAny = inj && (inj.rules > 0 || inj.implNotes > 0 || inj.domainNodes > 0 || inj.hasScanFindings);
+      if (hasAny) {
+        withInj++;
+        if (t.score === "PASS") withInjPass++;
+      } else {
+        withoutInj++;
+        if (t.score === "PASS") withoutInjPass++;
+      }
+      if (inj) {
+        for (const k of ["rules", "implNotes", "domainNodes", "hasScanFindings"]) {
+          const v = inj[k];
+          if (typeof v === "number" && v > 0 || v === true) {
+            if (!cats[k]) cats[k] = { total: 0, passed: 0 };
+            cats[k].total++;
+            if (t.score === "PASS") cats[k].passed++;
+          }
+        }
+      }
+    }
+    return {
+      total: tasks.length,
+      passed: tasks.filter((t) => t.score === "PASS").length,
+      failed: tasks.filter((t) => t.score === "FAIL").length,
+      withInjection: { total: withInj, passRate: withInj > 0 ? Math.round(withInjPass * 100 / withInj) : 0 },
+      withoutInjection: { total: withoutInj, passRate: withoutInj > 0 ? Math.round(withoutInjPass * 100 / withoutInj) : 0 },
+      byCategory: cats
+    };
+  } catch {
+    return { total: 0, passed: 0, failed: 0, withInjection: { total: 0, passRate: 0 }, withoutInjection: { total: 0, passRate: 0 }, byCategory: {} };
+  }
 }
 function findActiveTaskId(sessionID, status) {
   try {
@@ -1100,6 +1154,17 @@ Also output:
 
 Output as JSON ONLY (no markdown fences, no prose before or after):
 {"knownKnowns":[{"taskId":1,"title":"","note":"requirement from prompt"}],"knownUnknowns":[{"taskId":1,"gap":"what is ambiguous","suggestion":"how to resolve"}],"unknownKnowns":[{"finding":"implicit knowledge","source":"file or pattern"}],"unknownUnknowns":[{"finding":"blind spot","impact":"high","mitigation":"how to handle"}],"questions":[{"id":"Q1","question":"..."}],"taskRefinements":[{"taskId":1,"action":"split","detail":"..."}]}`;
+}
+function buildGradePrompt(userPrompt) {
+  return `[usage-coach] Verification protocol \u2014 obey ALL of these:
+1. PASS requires evidence cited as file:line references (e.g., src/index.ts:42). No citations -> FAIL.
+2. If the project has tests, run them and report the command and the result. If you cannot run them, state why.
+3. Do not judge only by what is visible \u2014 actively check for missing edge cases and unhandled errors (WYSIATI).
+4. OUTPUT CONTRACT: your FIRST line must be exactly "PASS" or "FAIL" with nothing else on it; all evidence and reasoning go on the following lines.
+
+---
+
+${userPrompt}`;
 }
 function parseGapAnalysis(raw, profile, domainHits) {
   const scannedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -1393,7 +1458,8 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
             subSessionId: id,
             subStep: step,
             lastActivity: lastTs,
-            subElapsed: elapsed2
+            subElapsed: elapsed2,
+            lastPollTs: Date.now()
           });
         }
       } catch (e) {
@@ -2296,12 +2362,16 @@ ${rules}
 ` : "";
             let keywords = [];
             let domainEmpty = true;
+            let domainNodeCount = 0;
+            let domainEdgeCount = 0;
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
                 const { nodes, edges } = queryDomain(keywords);
                 if (nodes && nodes.length || edges && edges.length) {
                   domainEmpty = false;
+                  domainNodeCount = nodes.length;
+                  domainEdgeCount = edges.length;
                   prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
 
 ---
@@ -2315,9 +2385,11 @@ ${rules}
             } catch (e) {
               log(`generate domain query err: ${String(e)}`);
             }
+            let notesLines = 0;
             try {
               const priorNotes = keywords.length ? readImplNotesByGraph(keywords, 5) : readImplNotes(5);
               if (priorNotes) {
+                notesLines = priorNotes.split("\n").filter(Boolean).length;
                 prefix = `Notes from previous runs (context for this task):
 ${priorNotes}
 
@@ -2347,6 +2419,22 @@ ${gate.summary}
             }
             const genTaskId = findActiveTaskId(ctx.sessionID, "generating");
             const maxSteps = resolveMaxSteps(cfg, args.max_steps);
+            const injected = {
+              rules: rules ? rules.split("\n").filter(Boolean).length : 0,
+              implNotes: notesLines,
+              domainNodes: domainNodeCount,
+              domainEdges: domainEdgeCount,
+              hasScanFindings: !!gate.summary
+            };
+            if (genTaskId) {
+              try {
+                mutateHarness(ctx.sessionID, (h) => {
+                  const t = h.tasks.find((x) => x.id === genTaskId);
+                  if (t) t.injected = injected;
+                });
+              } catch {
+              }
+            }
             const out = await runModel(
               input.client,
               model,
@@ -2384,8 +2472,12 @@ ${gate.summary}
           }
         }),
         generate_batch: tool({
-          description: "Run the GENERATOR model on MULTIPLE tasks. Quota-aware: GO = full parallel; THROTTLE = lighter model + concurrency capped at 2; STOP = refused. Use for INDEPENDENT tasks. Step-limited: each sub-session aborts after max_steps (default 30). Resilient: failed tasks are retried sequentially (once); if retry also fails, re-run them individually with generate().",
-          args: { tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), prompt: tool.schema.string() })), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps per task before timeout (default 30).") },
+          description: "Run the GENERATOR model on MULTIPLE tasks. Quota-aware: GO = full parallel; THROTTLE = lighter model + concurrency capped at 2; STOP = refused. Use for INDEPENDENT tasks. Step-limited: each sub-session aborts after max_steps (default 30). Resilient: failed tasks are retried sequentially (once); if retry also fails, re-run them individually with generate(). Each task may declare files it will modify via `files: string[]` \u2014 overlapping files across tasks force sequential execution (limit=1).",
+          args: { tasks: tool.schema.array(tool.schema.object({
+            id: tool.schema.number(),
+            prompt: tool.schema.string(),
+            files: tool.schema.array(tool.schema.string()).optional().describe("Files this task will MODIFY. Required when tasks might touch the same files \u2014 overlapping files force sequential execution.")
+          })), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps per task before timeout (default 30).") },
           async execute(args, ctx) {
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) {
@@ -2404,7 +2496,8 @@ ${gate.summary}
             if (decision === "STOP") return 'ERROR: quota STOP \u2014 halt the harness loop now. Call task_update(current, "halted_quota") and stop.';
             const throttle = decision === "THROTTLE" && cfg.lighterModel;
             const model = throttle ? cfg.lighterModel : cfg.generator;
-            const limit = decision === "THROTTLE" ? 2 : args.tasks.length;
+            const limit = resolveBatchLimit(args.tasks, decision);
+            if (limit === 1 && args.tasks.length > 1) log(`generate_batch: file overlap detected, forcing sequential (limit=1)`);
             const rules = readRules();
             const priorNotes = readImplNotes(5);
             const maxSteps = resolveMaxSteps(cfg, args.max_steps);
@@ -2473,7 +2566,7 @@ ${priorNotes}
                 } else {
                   const err = String(s.reason ?? "unknown rejection");
                   log(`generate_batch task ${t.id} REJECTED: ${err}`);
-                  failed.push({ id: t.id, prompt: t.prompt, error: err });
+                  failed.push({ id: t.id, prompt: t.prompt, files: t.files, error: err });
                 }
               }
             }
@@ -2509,7 +2602,7 @@ ${priorNotes}
             const out = await runModel(
               input.client,
               model,
-              args.prompt,
+              buildGradePrompt(args.prompt),
               ctx.directory,
               gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : void 0
             );
@@ -2559,7 +2652,7 @@ The next generate call will automatically include the new rule.`;
               const out = await runModel(
                 input.client,
                 model,
-                t.prompt,
+                buildGradePrompt(t.prompt),
                 ctx.directory,
                 gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : void 0
               );
@@ -2807,6 +2900,34 @@ Saved to: ${writtenPath}`,
 Note: Changes take effect immediately for new generate/grade calls.`,
               `       A running harness will pick up the new config on the next tool call.`
             ].join("\n");
+          }
+        }),
+        coach_analyze: tool({
+          description: "Analyze knowledge injection effectiveness \u2014 compares grade PASS rates for tasks WITH injected knowledge (rules, impl-notes, domain DB, scan findings) vs WITHOUT. Run after 20+ harness tasks to see if accumulated knowledge actually helps.",
+          args: {},
+          async execute(_args, ctx) {
+            const a = analyzeInjection(ctx.sessionID);
+            const lines = [
+              "\u2550\u2550\u2550 Knowledge Injection Effectiveness \u2550\u2550\u2550",
+              `Total graded tasks: ${a.total} (PASS: ${a.passed}, FAIL: ${a.failed})`,
+              "",
+              `With injection:    ${a.withInjection.total} tasks \u2192 ${a.withInjection.passRate}% PASS`,
+              `Without injection: ${a.withoutInjection.total} tasks \u2192 ${a.withoutInjection.passRate}% PASS`,
+              "",
+              "By category (PASS rate when injected):"
+            ];
+            for (const [cat, d] of Object.entries(a.byCategory)) {
+              const rate = d.total > 0 ? Math.round(d.passed * 100 / d.total) : 0;
+              lines.push(`  ${cat}: ${d.passed}/${d.total} = ${rate}%`);
+            }
+            const delta = a.withInjection.passRate - a.withoutInjection.passRate;
+            if (a.withInjection.total > 0 && a.withoutInjection.total > 0) {
+              lines.push("");
+              lines.push(delta > 0 ? `\u2192 Injection helps: +${delta}% PASS rate with knowledge injection.` : delta < 0 ? `\u2192 Injection HURTS: ${delta}% PASS rate. Injected knowledge may be noise.` : `\u2192 No measurable difference (${delta}%).`);
+            } else {
+              lines.push("", "\u2192 Need more data (both groups need 5+ tasks).");
+            }
+            return lines.join("\n");
           }
         })
       }

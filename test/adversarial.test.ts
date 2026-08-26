@@ -89,13 +89,13 @@ test("parseQuotaResponse: malformed JSON (extra trailing chars) → null", () =>
 test("parseQuotaResponse: negative usedPercent → preserved (no clamping)", () => {
   const result = parseQuotaResponse('[{"usage":{"primary":{"usedPercent":-10}}}]');
   assert.ok(result);
-  assert.equal(result!.weekly.usedPercent, -10);
+  assert.equal(result!.weekly!.usedPercent, -10);
 });
 
 test("parseQuotaResponse: usedPercent > 100 → preserved (no clamping)", () => {
   const result = parseQuotaResponse('[{"usage":{"primary":{"usedPercent":150}}}]');
   assert.ok(result);
-  assert.equal(result!.weekly.usedPercent, 150);
+  assert.equal(result!.weekly!.usedPercent, 150);
 });
 
 test("parseQuotaResponse: non-numeric usedPercent (string '50') → preserved as-is in object", () => {
@@ -104,7 +104,7 @@ test("parseQuotaResponse: non-numeric usedPercent (string '50') → preserved as
   const result = parseQuotaResponse('[{"usage":{"primary":{"usedPercent":"50"}}}]');
   assert.ok(result);
   // Actual behavior: the string is preserved in the QuotaWindow
-  assert.equal(result!.weekly.usedPercent, "50");
+  assert.equal(result!.weekly!.usedPercent, "50");
 });
 
 test("parseQuotaResponse: 1000+ entries in array → only reads [0]", () => {
@@ -113,7 +113,7 @@ test("parseQuotaResponse: 1000+ entries in array → only reads [0]", () => {
   }));
   const result = parseQuotaResponse(JSON.stringify(entries));
   assert.ok(result);
-  assert.equal(result!.weekly.usedPercent, 0, "should read only index 0 (usedPercent: 0)");
+  assert.equal(result!.weekly!.usedPercent, 0, "should read only index 0 (usedPercent: 0)");
 });
 
 test("parseQuotaResponse: null input → null (no crash)", () => {
@@ -128,9 +128,9 @@ test("parseQuotaResponse: extra whitespace/newlines around valid JSON → parses
   const raw = '\n  \n [{"usage":{"primary":{"usedPercent":42},"secondary":{"usedPercent":33},"tertiary":{"usedPercent":11}}}]  \n';
   const result = parseQuotaResponse(raw);
   assert.ok(result);
-  assert.equal(result!.weekly.usedPercent, 42);
-  assert.equal(result!.monthly.usedPercent, 33);
-  assert.equal(result!.fiveHour.usedPercent, 11);
+  assert.equal(result!.weekly!.usedPercent, 42);
+  assert.equal(result!.monthly!.usedPercent, 33);
+  assert.equal(result!.fiveHour!.usedPercent, 11);
 });
 
 test("parseQuotaResponse: array with null first element → null", () => {

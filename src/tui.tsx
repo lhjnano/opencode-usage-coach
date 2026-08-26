@@ -30,7 +30,7 @@ let MARKER = join(STATE_DIR, "tui-loaded.txt");
 
 type State = { decision: "GO" | "THROTTLE" | "STOP"; advice: string; weekly: number; monthly: number; fiveHour: number; providers?: ProviderCoach[]; model?: string; provider?: string; isFree?: boolean; agent?: string };
 type ProviderCoach = { id: string; name: string; fiveHour: number; weekly: number; fiveHourReset: string; weeklyReset: string; advice: string };
-type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null; startedAt?: string; subSessionId?: string; subStep?: number; lastActivity?: string; subElapsed?: number };
+type TaskState = { id: number; title: string; status: string; model: string; revisions: number; score: string | null; startedAt?: string; subSessionId?: string; subStep?: number; lastActivity?: string; subElapsed?: number; lastPollTs?: number };
 type ProviderQuota = { weekly: number; monthly: number; fiveHour: number };
 type HarnessState = { name: string; total: number; current: number; tasks: TaskState[]; quotas?: Record<string, ProviderQuota>; active?: boolean; updatedAt?: string };
 
@@ -176,7 +176,7 @@ function initializeTui(api: TuiPluginApi, disposeRoot: () => void) {
       nodes.push(<text style={st("textMuted")}>harness: {h.name} {h.current}/{h.total}{isStale ? " (stale)" : ""}</text>);
       for (const t of h.tasks) {
         const td = computeTaskDisplay(t, isStale);
-        nodes.push(<text style={st(td.themeKey)}> ● {t.id}{td.modelStr} {td.label}{td.revSuffix}{td.stepStr}{td.elapsedStr} {t.title}</text>);
+        nodes.push(<text style={st(td.themeKey)}> ● {t.id}{td.modelStr} {td.label}{td.revSuffix}{td.stepStr}{td.elapsedStr}{td.heartbeat} {t.title}</text>);
         const { pct, label: pctLabel } = taskQuotaPct(t, s);
         nodes.push(<box flexDirection="row"><text>   5h </text><text style={st("text")}>{barFill(pct)}</text><text style={st("text")}>{barEmpty(pct)}</text><text> {pctLabel}</text></box>);
       }

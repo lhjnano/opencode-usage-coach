@@ -17,6 +17,7 @@ export type TaskState = {
   subStep?: number;
   lastActivity?: string;
   subElapsed?: number;
+  lastPollTs?: number;
 };
 
 export type ProviderCoach = {
@@ -142,6 +143,7 @@ export type TaskDisplay = {
   elapsedStr: string;
   hasSub: boolean;
   subWarn: boolean;
+  heartbeat: string;
 };
 
 export function computeTaskDisplay(
@@ -160,6 +162,15 @@ export function computeTaskDisplay(
   const subEl = hasSub && t.subElapsed !== undefined ? ` ${t.subElapsed}s` : "";
   const subWarn = hasSub && (t.subElapsed ?? 0) > 300;
 
+  // Heartbeat: how long since the poller last wrote progress? Shows "live" while
+  // the model is actively producing turns, or "stalled" if the poller went quiet.
+  const pollAge = t.lastPollTs ? Math.round((now - t.lastPollTs) / 1000) : -1;
+  const hb = hasSub && pollAge >= 0
+    ? pollAge <= 10 ? " ●"      // alive — poller ticking within last 10s
+    : pollAge <= 30 ? " ◐"      // slow — 10–30s since last poll (model may be thinking)
+    : " ○"                       // stale — 30s+ since last poll (possibly stuck)
+    : "";
+
   const elapsed = t.startedAt ? Math.max(0, Math.round((now - new Date(t.startedAt).getTime()) / 1000)) : 0;
   const taskEl = (t.status === "completed" || t.status === "failed") ? "" : (elapsed > 0 ? ` ${elapsed}s` : "");
   const displayEl = hasSub ? subEl : taskEl;
@@ -176,6 +187,7 @@ export function computeTaskDisplay(
     elapsedStr: displayEl,
     hasSub,
     subWarn,
+    heartbeat: hb,
   };
 }
 

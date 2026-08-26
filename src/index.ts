@@ -32,6 +32,29 @@ const DEFAULT_MAX_STEPS = Number(process.env.UC_MAX_STEPS ?? 30) || 30;
 function resolveMaxSteps(cfg: HarnessCfg, explicit?: number): number {
   return explicit ?? cfg.maxSteps ?? DEFAULT_MAX_STEPS;
 }
+
+/** A generate_batch task as declared by the orchestrator. */
+type BatchTask = { id: number; prompt: string; files?: string[] };
+
+/** Normalize a file path for overlap comparison: trim, drop leading './', lowercase. */
+function normalizeFilePath(p: string): string {
+  return p.trim().replace(/^(\.\/)+/, "").toLowerCase();
+}
+
+/** Resolve generate_batch concurrency, preventing parallel grade-attribution
+ *  problems: tasks whose (normalized) files overlap must run sequentially.
+ *  Empty batch -> 0; any file overlap forces limit=1 (strongest constraint —
+ *  wins over THROTTLE too); otherwise THROTTLE caps at 2, GO runs all in parallel. */
+function resolveBatchLimit(tasks: BatchTask[], decision: string): number {
+  if (tasks.length === 0) return 0;
+  const seen = new Set<string>();
+  for (const t of tasks) {
+    const files = new Set((t.files ?? []).map(normalizeFilePath).filter(Boolean));
+    for (const f of files) if (seen.has(f)) return 1;
+    for (const f of files) seen.add(f);
+  }
+  return decision === "THROTTLE" ? 2 : tasks.length;
+}
 const WATCHDOG_POLL_MS = Math.max(1000, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3000) || 3000);
 // Wall-clock timeout: if the prompt hasn't completed within this many minutes,
 // abort the sub-session regardless of step count. Prevents zombie pollers from
@@ -457,8 +480,52 @@ function clearSubSession(sessionID: string, taskId: number): Promise<void> {
     t.subStep = undefined;
     t.lastActivity = undefined;
     t.subElapsed = undefined;
+    t.lastPollTs = undefined;
   });
 }
+// ── Knowledge injection effectiveness tracking ──────────────────────────────
+// Analyzes harness.json files to determine if injected knowledge correlates
+// with grade PASS/FAIL. Call from a tool or script after enough data accumulates.
+function analyzeInjection(sessionID: string): {
+  total: number; passed: number; failed: number;
+  withInjection: { total: number; passRate: number };
+  withoutInjection: { total: number; passRate: number };
+  byCategory: Record<string, { total: number; passed: number }>;
+} {
+  try {
+    const h = readHarness(sessionID);
+    if (!h) return { total: 0, passed: 0, failed: 0, withInjection: { total: 0, passRate: 0 }, withoutInjection: { total: 0, passRate: 0 }, byCategory: {} };
+    const tasks = h.tasks.filter((t: any) => t.score === "PASS" || t.score === "FAIL");
+    let withInj = 0, withInjPass = 0, withoutInj = 0, withoutInjPass = 0;
+    const cats: Record<string, { total: number; passed: number }> = {};
+    for (const t of tasks) {
+      const inj = t.injected as any;
+      const hasAny = inj && (inj.rules > 0 || inj.implNotes > 0 || inj.domainNodes > 0 || inj.hasScanFindings);
+      if (hasAny) { withInj++; if (t.score === "PASS") withInjPass++; }
+      else { withoutInj++; if (t.score === "PASS") withoutInjPass++; }
+      // By category.
+      if (inj) {
+        for (const k of ["rules", "implNotes", "domainNodes", "hasScanFindings"]) {
+          const v = inj[k];
+          if ((typeof v === "number" && v > 0) || v === true) {
+            if (!cats[k]) cats[k] = { total: 0, passed: 0 };
+            cats[k].total++;
+            if (t.score === "PASS") cats[k].passed++;
+          }
+        }
+      }
+    }
+    return {
+      total: tasks.length,
+      passed: tasks.filter((t: any) => t.score === "PASS").length,
+      failed: tasks.filter((t: any) => t.score === "FAIL").length,
+      withInjection: { total: withInj, passRate: withInj > 0 ? Math.round(withInjPass * 100 / withInj) : 0 },
+      withoutInjection: { total: withoutInj, passRate: withoutInj > 0 ? Math.round(withoutInjPass * 100 / withoutInj) : 0 },
+      byCategory: cats,
+    };
+  } catch { return { total: 0, passed: 0, failed: 0, withInjection: { total: 0, passRate: 0 }, withoutInjection: { total: 0, passRate: 0 }, byCategory: {} }; }
+}
+
 // Find the harness task currently in a given status (for correlating runModel with a task).
 function findActiveTaskId(sessionID: string, status: string): number | undefined {
   try {
@@ -695,6 +762,22 @@ Also output:
 
 Output as JSON ONLY (no markdown fences, no prose before or after):
 {"knownKnowns":[{"taskId":1,"title":"","note":"requirement from prompt"}],"knownUnknowns":[{"taskId":1,"gap":"what is ambiguous","suggestion":"how to resolve"}],"unknownKnowns":[{"finding":"implicit knowledge","source":"file or pattern"}],"unknownUnknowns":[{"finding":"blind spot","impact":"high","mitigation":"how to handle"}],"questions":[{"id":"Q1","question":"..."}],"taskRefinements":[{"taskId":1,"action":"split","detail":"..."}]}`;
+}
+
+// Wrap a grading prompt with the verification protocol. Forces evidence-based
+// verdicts instead of eyeballing: file:line citations, real test runs, and an
+// explicit search for what is NOT visible (WYSIATI). The first-line contract
+// keeps the /^pass\b/i and /^fail\b/i verdict parsing in grade/grade_batch valid.
+function buildGradePrompt(userPrompt: string): string {
+  return `[usage-coach] Verification protocol — obey ALL of these:
+1. PASS requires evidence cited as file:line references (e.g., src/index.ts:42). No citations -> FAIL.
+2. If the project has tests, run them and report the command and the result. If you cannot run them, state why.
+3. Do not judge only by what is visible — actively check for missing edge cases and unhandled errors (WYSIATI).
+4. OUTPUT CONTRACT: your FIRST line must be exactly "PASS" or "FAIL" with nothing else on it; all evidence and reasoning go on the following lines.
+
+---
+
+${userPrompt}`;
 }
 
 // Parse the model's gap-analysis output into a structured result. Defensive:
@@ -990,6 +1073,7 @@ async function runModel(client: any, model: string, prompt: string, directory: s
           const elapsed = Math.round((Date.now() - subStart) / 1000);
           updateSubSession(track.sessionID, track.taskId, {
             subSessionId: id, subStep: step, lastActivity: lastTs, subElapsed: elapsed,
+            lastPollTs: Date.now(),
           });
         }
       } catch (e) { log(`runModel poller err: ${String(e)}`); }
@@ -1171,23 +1255,23 @@ export function parseQuotaResponse(rawText: string): Quota | null {
       const desc = String(slot!.resetDescription ?? "").toLowerCase();
 
       if (mins === 300 || desc.includes("5 hour") || desc.includes("5h")) {
-        result.fiveHour = slot;
+        result.fiveHour = slot!;
       } else if (mins === 10080 || desc.includes("week")) {
-        result.weekly = slot;
+        result.weekly = slot!;
       } else if (desc.includes("month")) {
-        result.monthly = slot;
+        result.monthly = slot!;
       } else if (mins > 0 && mins <= 360) {
-        result.fiveHour = slot;
+        result.fiveHour = slot!;
       } else if (mins > 360 && mins <= 14400) {
-        result.weekly = slot;
+        result.weekly = slot!;
       } else if (mins > 14400) {
-        result.monthly = slot;
+        result.monthly = slot!;
       } else if (key === "primary") {
-        result.weekly = slot;
+        result.weekly = slot!;
       } else if (key === "secondary") {
-        result.monthly = slot;
+        result.monthly = slot!;
       } else if (key === "tertiary") {
-        result.fiveHour = slot;
+        result.fiveHour = slot!;
       }
     }
 
@@ -1814,12 +1898,16 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             // Also inject known facts from the domain DB (same project scope).
             let keywords: string[] = [];
             let domainEmpty = true;
+            let domainNodeCount = 0;
+            let domainEdgeCount = 0;
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
                 const { nodes, edges } = queryDomain(keywords);
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
+                  domainNodeCount = nodes.length;
+                  domainEdgeCount = edges.length;
                   prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n` + prefix;
                   log(`generate domain HIT: ${nodes.length} nodes, ${edges.length} edges (kw=[${keywords.join(",")}])`);
                 } else {
@@ -1828,9 +1916,11 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
               }
             } catch (e) { log(`generate domain query err: ${String(e)}`); }
             // Inject prior impl-notes (graph-matched for this task, fallback to last-5).
+            let notesLines = 0;
             try {
               const priorNotes = keywords.length ? readImplNotesByGraph(keywords, 5) : readImplNotes(5);
               if (priorNotes) {
+                notesLines = priorNotes.split("\n").filter(Boolean).length;
                 prefix = `Notes from previous runs (context for this task):\n${priorNotes}\n\n---\n\n` + prefix;
               }
             } catch (e) { log(`generate impl-notes read err: ${String(e)}`); }
@@ -1848,6 +1938,20 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             }
             const genTaskId = findActiveTaskId(ctx.sessionID, "generating");
             const maxSteps = resolveMaxSteps(cfg, args.max_steps);
+            // Record injected knowledge stats for effectiveness tracking.
+            const injected = {
+              rules: rules ? rules.split("\n").filter(Boolean).length : 0,
+              implNotes: notesLines,
+              domainNodes: domainNodeCount,
+              domainEdges: domainEdgeCount,
+              hasScanFindings: !!(gate.summary),
+            };
+            if (genTaskId) {
+              try { mutateHarness(ctx.sessionID, (h) => {
+                const t = h.tasks.find((x: any) => x.id === genTaskId);
+                if (t) t.injected = injected;
+              }); } catch { /* */ }
+            }
             const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory,
               genTaskId ? { sessionID: ctx.sessionID, taskId: genTaskId } : undefined, maxSteps);
             // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty
@@ -1875,9 +1979,13 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           },
         }),
         generate_batch: tool({
-          description: "Run the GENERATOR model on MULTIPLE tasks. Quota-aware: GO = full parallel; THROTTLE = lighter model + concurrency capped at 2; STOP = refused. Use for INDEPENDENT tasks. Step-limited: each sub-session aborts after max_steps (default 30). Resilient: failed tasks are retried sequentially (once); if retry also fails, re-run them individually with generate().",
-          args: { tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), prompt: tool.schema.string() })), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps per task before timeout (default 30).") },
-          async execute(args: { tasks: Array<{ id: number; prompt: string }>; max_steps?: number }, ctx: any) {
+          description: "Run the GENERATOR model on MULTIPLE tasks. Quota-aware: GO = full parallel; THROTTLE = lighter model + concurrency capped at 2; STOP = refused. Use for INDEPENDENT tasks. Step-limited: each sub-session aborts after max_steps (default 30). Resilient: failed tasks are retried sequentially (once); if retry also fails, re-run them individually with generate(). Each task may declare files it will modify via `files: string[]` — overlapping files across tasks force sequential execution (limit=1).",
+          args: { tasks: tool.schema.array(tool.schema.object({
+            id: tool.schema.number(),
+            prompt: tool.schema.string(),
+            files: tool.schema.array(tool.schema.string()).optional().describe('Files this task will MODIFY. Required when tasks might touch the same files — overlapping files force sequential execution.'),
+          })), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps per task before timeout (default 30).") },
+          async execute(args: { tasks: BatchTask[]; max_steps?: number }, ctx: any) {
             const cfg = readHarnessCfg(ctx.directory);
             if (!cfg.generator) {
               const h = readHarness(ctx.sessionID);
@@ -1889,7 +1997,9 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const throttle = decision === "THROTTLE" && cfg.lighterModel;
             const model = throttle ? cfg.lighterModel! : cfg.generator;
             // GO: run all in parallel. THROTTLE: cap concurrency at 2 to avoid spiking quota.
-            const limit = decision === "THROTTLE" ? 2 : args.tasks.length;
+            // File overlap between tasks forces sequential (limit=1) — the strongest constraint.
+            const limit = resolveBatchLimit(args.tasks, decision);
+            if (limit === 1 && args.tasks.length > 1) log(`generate_batch: file overlap detected, forcing sequential (limit=1)`);
             // Shared prefix components (rules + prior impl-notes) computed once for all tasks.
             const rules = readRules();
             const priorNotes = readImplNotes(5);
@@ -1903,7 +2013,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
 
             // Inner runner: execute a single task's runModel + impl-notes extraction.
             // Returns { id, result } on success, or { id, error } on rejection.
-            const runOne = async (t: { id: number; prompt: string }): Promise<{ id: number; result: string }> => {
+            const runOne = async (t: BatchTask): Promise<{ id: number; result: string }> => {
               let prefix = gatePrefix;
               prefix += rules ? `Lessons learned from previous failures (apply where relevant):\n${rules}\n\n---\n\n` : "";
               if (priorNotes) prefix = `Notes from previous runs (context for this task):\n${priorNotes}\n\n---\n\n` + prefix;
@@ -1931,7 +2041,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             // Process tasks in concurrency-limited batches using Promise.allSettled
             // (not Promise.all — one rejection must not kill the entire batch).
             const results: string[] = [];
-            const failed: Array<{ id: number; prompt: string; error: string }> = [];
+            const failed: Array<{ id: number; prompt: string; files?: string[]; error: string }> = [];
 
             for (let i = 0; i < args.tasks.length; i += limit) {
               const batch = args.tasks.slice(i, i + limit);
@@ -1944,7 +2054,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
                 } else {
                   const err = String(s.reason ?? "unknown rejection");
                   log(`generate_batch task ${t.id} REJECTED: ${err}`);
-                  failed.push({ id: t.id, prompt: t.prompt, error: err });
+                  failed.push({ id: t.id, prompt: t.prompt, files: t.files, error: err });
                 }
               }
             }
@@ -1981,7 +2091,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const model = cfg.grader ?? cfg.generator;
             if (!model) return "FAIL\n(ERROR: no grader/generator model configured.)\n[usage-coach NEXT] configure grader in harness.config.json, then retry grade.";
             const gradeTaskId = findActiveTaskId(ctx.sessionID, "grading");
-            const out = await runModel(input.client, model, args.prompt, ctx.directory,
+            const out = await runModel(input.client, model, buildGradePrompt(args.prompt), ctx.directory,
               gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : undefined);
             // Determine verdict from the first non-empty line.
             let verdict = "FAIL";
@@ -2023,7 +2133,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             // ── Inner runner: grade a single task ──
             const gradeOne = async (t: { id: number; prompt: string }): Promise<{ id: number; result: string }> => {
               const gradeTaskId = findActiveTaskId(ctx.sessionID, "grading");
-              const out = await runModel(input.client, model, t.prompt, ctx.directory,
+              const out = await runModel(input.client, model, buildGradePrompt(t.prompt), ctx.directory,
                 gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : undefined);
 
               // Parse verdict from first non-empty line
@@ -2292,6 +2402,39 @@ If the task is already well-specified with no significant ambiguities, return {"
             ].join("\n");
           },
         }),
+
+        coach_analyze: tool({
+          description: "Analyze knowledge injection effectiveness — compares grade PASS rates for tasks WITH injected knowledge (rules, impl-notes, domain DB, scan findings) vs WITHOUT. Run after 20+ harness tasks to see if accumulated knowledge actually helps.",
+          args: {},
+          async execute(_args: Record<string, never>, ctx: any) {
+            const a = analyzeInjection(ctx.sessionID);
+            const lines = [
+              "═══ Knowledge Injection Effectiveness ═══",
+              `Total graded tasks: ${a.total} (PASS: ${a.passed}, FAIL: ${a.failed})`,
+              "",
+              `With injection:    ${a.withInjection.total} tasks → ${a.withInjection.passRate}% PASS`,
+              `Without injection: ${a.withoutInjection.total} tasks → ${a.withoutInjection.passRate}% PASS`,
+              "",
+              "By category (PASS rate when injected):",
+            ];
+            for (const [cat, d] of Object.entries(a.byCategory)) {
+              const rate = d.total > 0 ? Math.round(d.passed * 100 / d.total) : 0;
+              lines.push(`  ${cat}: ${d.passed}/${d.total} = ${rate}%`);
+            }
+            const delta = a.withInjection.passRate - a.withoutInjection.passRate;
+            if (a.withInjection.total > 0 && a.withoutInjection.total > 0) {
+              lines.push("");
+              lines.push(delta > 0
+                ? `→ Injection helps: +${delta}% PASS rate with knowledge injection.`
+                : delta < 0
+                ? `→ Injection HURTS: ${delta}% PASS rate. Injected knowledge may be noise.`
+                : `→ No measurable difference (${delta}%).`);
+            } else {
+              lines.push("", "→ Need more data (both groups need 5+ tasks).");
+            }
+            return lines.join("\n");
+          },
+        }),
       },
     };
   } catch (e) {
@@ -2309,7 +2452,7 @@ export {
   coach, parseFileList, extractKeywords, extractImplNotes,
   detectLanguage, buildScanSummary, parseGapAnalysis, providerAdvice,
   buildGapPrompt, formatReport, isFreeModel, providerToCodexbar,
-  isHarnessAgent, humanRemaining,
+  isHarnessAgent, humanRemaining, buildGradePrompt, normalizeFilePath, resolveBatchLimit,
   setStateDir, readHarness, writeHarness, readRules,
   checkScanGate, updateSubSession, clearSubSession, findActiveTaskId,
   readHarnessCfg, writeHarnessCfg,

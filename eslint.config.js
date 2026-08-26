@@ -80,4 +80,12 @@ export default tseslint.config(
       },
     },
   },
+
+  // --- CLI 도구 (src/cli.ts) — 콘솔 출력이 정상 동작 (사용자Facing CLI) ---
+  {
+    files: ["src/cli.ts"],
+    rules: {
+      "no-console": "off",
+    },
+  },
 );

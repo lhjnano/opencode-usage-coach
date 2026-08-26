@@ -76,6 +76,8 @@ function computeTaskDisplay(t, isStale, now = Date.now()) {
   const subStepStr = hasSub && t.subStep !== void 0 && t.subStep > 0 ? ` step:${t.subStep}` : "";
   const subEl = hasSub && t.subElapsed !== void 0 ? ` ${t.subElapsed}s` : "";
   const subWarn = hasSub && (t.subElapsed ?? 0) > 300;
+  const pollAge = t.lastPollTs ? Math.round((now - t.lastPollTs) / 1e3) : -1;
+  const hb = hasSub && pollAge >= 0 ? pollAge <= 10 ? " \u25CF" : pollAge <= 30 ? " \u25D0" : " \u25CB" : "";
   const elapsed = t.startedAt ? Math.max(0, Math.round((now - new Date(t.startedAt).getTime()) / 1e3)) : 0;
   const taskEl = t.status === "completed" || t.status === "failed" ? "" : elapsed > 0 ? ` ${elapsed}s` : "";
   const displayEl = hasSub ? subEl : taskEl;
@@ -89,7 +91,8 @@ function computeTaskDisplay(t, isStale, now = Date.now()) {
     stepStr: subStepStr,
     elapsedStr: displayEl,
     hasSub,
-    subWarn
+    subWarn,
+    heartbeat: hb
   };
 }
 function decisionThemeKey(decision) {
@@ -467,6 +470,7 @@ function initializeTui(api, disposeRoot) {
             _$insert(_el$56, () => td.revSuffix, _el$59);
             _$insert(_el$56, () => td.stepStr, _el$59);
             _$insert(_el$56, () => td.elapsedStr, _el$59);
+            _$insert(_el$56, () => td.heartbeat, _el$59);
             _$insert(_el$56, () => t.title, null);
             _$effect((_$p) => _$setProp(_el$56, "style", st(td.themeKey), _$p));
             return _el$56;

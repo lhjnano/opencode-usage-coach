@@ -315,7 +315,7 @@ export function readAggregateStatus(): AggregateResult {
     totalDomainEdges = 0;
 
   for (const d of dirs) {
-    let isDir = false;
+    let isDir: boolean;
     try {
       isDir = statSync(d).isDirectory();
     } catch {
