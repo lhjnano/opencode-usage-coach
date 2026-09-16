@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-09-16
+
+### Fixed
+- **`evictSharedStale` was dead code** — the shared-layer worm (60d TTL, size cap) existed
+  since v0.14 but was never wired into the `session.idle` maintenance path, so the shared DB
+  grew unbounded (the v1 diagnosis pathology). Now runs next to `evictStale` + `sweepDeadEdges`
+  with env-tunable constants `UC_SHARED_WORM_MAX_AGE_DAYS` (default 60) and
+  `UC_SHARED_WORM_MAX_NODES` (default 3000). On the live DB this retires 212 nodes already
+  past 60d on the first idle event.
+
 ## [0.16.0] - 2026-09-16
 
 ### Changed

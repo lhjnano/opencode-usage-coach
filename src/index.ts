@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
-import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, sweepDeadEdges, addDomainEdge, readNodes, readEdges, logDomainInjection, applyReward } from "./domain.js";
+import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, evictSharedStale, sweepDeadEdges, addDomainEdge, readNodes, readEdges, logDomainInjection, applyReward } from "./domain.js";
 import type { DomainNode } from "./domain.js";
 import { searchContext as webSearch, type WebResult } from "./web-search.js";
 
@@ -1173,6 +1173,10 @@ const STOP_MO = num("UC_STOP_MONTHLY", 98);
 // Domain-DB worm (GC) thresholds — override via env. Time-based + size-based eviction.
 const WORM_MAX_AGE_DAYS = num("UC_WORM_MAX_AGE_DAYS", 180);
 const WORM_MAX_NODES = num("UC_WORM_MAX_NODES", 100000);
+// Shared-layer worm defaults: tighter than the project layer — the shared DB is the
+// cross-project accumulation point (2,128 nodes at wiring time; 212 already past 60d).
+const SHARED_WORM_MAX_AGE_DAYS = num("UC_SHARED_WORM_MAX_AGE_DAYS", 60);
+const SHARED_WORM_MAX_NODES = num("UC_SHARED_WORM_MAX_NODES", 3000);
 
 function humanRemaining(iso?: string): string {
   try {
@@ -1516,7 +1520,10 @@ export default async function UsageCoachPlugin(input: {
         try {
           if (event.type === "session.created" || event.type === "session.idle") refreshBackground();
           // Worm (GC): run the domain-DB eviction on idle. Cheap no-op when nothing is stale.
-          if (event.type === "session.idle") { try { const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } try { const s = sweepDeadEdges(); log(`sweepDeadEdges: removed ${s.removed}, kept ${s.kept}`); } catch (e) { log(`sweepDeadEdges err: ${String(e)}`); } }
+          // evictStale = project layer (UC_WORM_*), evictSharedStale = shared layer
+          // (UC_SHARED_WORM_*, default 60d/3000) — fixes the "shared grows unbounded"
+          // pathology from the v1 diagnosis (wired in v0.16.1).
+          if (event.type === "session.idle") { try { const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } try { const sh = evictSharedStale(SHARED_WORM_MAX_AGE_DAYS, SHARED_WORM_MAX_NODES); if (sh.removed) log(`evictSharedStale: removed ${sh.removed}, kept ${sh.kept} (maxAge=${SHARED_WORM_MAX_AGE_DAYS}d, maxNodes=${SHARED_WORM_MAX_NODES})`); } catch (e) { log(`evictSharedStale err: ${String(e)}`); } try { const s = sweepDeadEdges(); log(`sweepDeadEdges: removed ${s.removed}, kept ${s.kept}`); } catch (e) { log(`sweepDeadEdges err: ${String(e)}`); } }
         }
         catch (e) { log(`event err: ${String(e)}`); }
       },
