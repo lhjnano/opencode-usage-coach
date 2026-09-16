@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-16
+
+### Fixed
+- **`generate_batch` intermittent stalls.** A wedged sub-session (message stream frozen —
+  observed in the wild as a 14-minute run producing only reasoning parts and no text) used to
+  hold its batch slot until the 30-minute wall clock. The watchdog poller now performs
+  **stall detection**: if the messages endpoint keeps responding but neither the step count nor
+  the last-message timestamp changes for `UC_STALL_MIN` minutes (default 12, `0` disables), the
+  sub-session is aborted early and the task returns `ERROR: stalled — ...` so the batch's
+  sequential retry can re-run it. Poll failures disable stall detection (progress is
+  unobservable) and fall back to the wall clock as before.
+- **Reward/GC contradiction — shared nodes now get access tracking.** `touchNodes` previously
+  updated only the project layer, so every shared node's `lastAccessed` stayed at its creation
+  time forever and the 60-day shared TTL (v0.16.1) would evict useful nodes regardless of
+  reward or usage — the reward loop said "keep" while the clock said "kill". `touchNodes` is
+  now layer-aware (same rewrite pattern as `evictSharedStale`; no cross-layer duplication),
+  and `applyReward` stamps `lastAccessed` on rewarded nodes even when confidence is clamped at
+  a bound. Net semantics: the shared TTL now reads **"60 days without injection or reward"** —
+  salience emerges from the reward loop without a static type schema.
+
 ## [0.16.1] - 2026-09-16
 
 ### Fixed

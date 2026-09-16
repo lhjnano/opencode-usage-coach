@@ -60,6 +60,14 @@ const WATCHDOG_POLL_MS = Math.max(1000, Number(process.env.UC_WATCHDOG_POLL_MS ?
 // abort the sub-session regardless of step count. Prevents zombie pollers from
 // aborted/interrupted generate calls running forever. Override via UC_WALL_TIMEOUT_MIN.
 const WALL_TIMEOUT_MS = (Math.max(1, Number(process.env.UC_WALL_TIMEOUT_MIN ?? 30) || 30)) * 60 * 1000;
+// Stall detection (v0.17.0): a sub-session whose message stream shows NO progress
+// (same step count AND same last-message ts) for this many minutes is aborted early,
+// instead of holding its generate_batch slot until the 30-min wall clock. Only
+// enforced while the messages endpoint keeps responding (if polling itself fails,
+// progress is unobservable and we fall back to the wall clock). Override UC_STALL_MIN;
+// 0 disables. Set conservatively (12 min) so a single long generation turn is not
+// falsely aborted.
+const STALL_MS = (Math.max(0, Number(process.env.UC_STALL_MIN ?? 12) || 0)) * 60 * 1000;
 // Reverse interview: hard cap on questions per interview (override via UC_MAX_QUESTIONS).
 const DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUESTIONS ?? 7)) || 7);
 
@@ -1039,7 +1047,13 @@ async function runModel(client: any, model: string, prompt: string, directory: s
   let wallTimer: ReturnType<typeof setTimeout> | null = null;
   let subId: string | null = null;
   let timedOut = false;
+  let stalled = false; // v0.17.0: no message-stream progress for STALL_MS while polls succeed
   let pollerDone = false; // set in finally — stops pending async poller callbacks from writing stale data
+  // Stall-detection state: progress = step count changed OR last-message ts changed.
+  let lastStepSeen = -1;
+  let lastTsSeen = "";
+  let lastProgressAt = Date.now();
+  let lastPollOk = true;
   // Deferred promise: resolves when the step limit is exceeded (races against prompt).
   let signalTimeout!: () => void;
   const timeoutSignal = new Promise<void>((resolve) => { signalTimeout = resolve; });
@@ -1075,12 +1089,29 @@ async function runModel(client: any, model: string, prompt: string, directory: s
             const last = msgList[msgList.length - 1];
             const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
             if (ts) lastTs = String(ts);
+            lastPollOk = true; // endpoint responded — stall detection is trustworthy again
           }
-        } catch { /* messages endpoint unavailable — step stays 0 */ }
+        } catch { lastPollOk = false; /* messages endpoint unavailable — step stays 0 */ }
+        // v0.17.0 stall detection: any observable change counts as progress.
+        if (lastPollOk && (step !== lastStepSeen || lastTs !== lastTsSeen)) {
+          lastStepSeen = step;
+          lastTsSeen = lastTs;
+          lastProgressAt = Date.now();
+        }
         // Step-limit enforcement: abort the sub-session if it exceeds maxSteps.
         if (step > maxSteps) {
           log(`runModel(${model}): STEP LIMIT exceeded (${step} > ${maxSteps}), aborting session ${id}`);
           timedOut = true;
+          try { await client.session.abort?.({ path: { id } }); } catch { /* */ }
+          signalTimeout();
+          return;
+        }
+        // Stall enforcement: no progress while polling works — abort early rather
+        // than holding the batch slot until the 30-min wall clock.
+        if (STALL_MS > 0 && lastPollOk && Date.now() - lastProgressAt > STALL_MS) {
+          stalled = true;
+          timedOut = true;
+          log(`runModel(${model}): STALLED — no progress for ${Math.round((Date.now() - lastProgressAt) / 1000)}s (step=${step}, maxSteps=${maxSteps}), aborting session ${id}`);
           try { await client.session.abort?.({ path: { id } }); } catch { /* */ }
           signalTimeout();
           return;
@@ -1120,7 +1151,7 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     const elapsed = Math.round((Date.now() - t0) / 1000);
     log(`runModel(${model}): prompt resolved ${elapsed}s, timedOut=${timedOut}`);
 
-    // Step-limit timeout: the task is too large — tell the caller to split it.
+    // Step-limit timeout / stall: the task is too large or wedged — tell the caller.
     if (timedOut) {
       try {
         const summary: any = await client.session.summarize?.({ path: { id } });
@@ -1128,6 +1159,9 @@ async function runModel(client: any, model: string, prompt: string, directory: s
       } catch { /* */ }
       try { client.session.delete?.({ path: { id } }); } catch { /* */ }
       subId = null;
+      if (stalled) {
+        return `ERROR: stalled — no message-stream progress for ${Math.round(STALL_MS / 60000)} min (step ${lastStepSeen}/${maxSteps}). The sub-session was wedged (observed today as the 837s no-output case). Retry this task individually with generate(); if it stalls again, split it.\n[usage-coach NEXT] re-run the stalled task alone via generate(), or split it.`;
+      }
       log(`runModel(${model}): TIMED OUT after ${elapsed}s (${maxSteps} steps exceeded)`);
       return `Task appears too large (exceeded ${maxSteps} steps). Consider splitting into smaller subtasks.\n[usage-coach NEXT] split the original task into smaller subtasks (each should complete within ${maxSteps} steps), then re-run generate for each subtask.`;
     }

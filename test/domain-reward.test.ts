@@ -213,3 +213,38 @@ test("applyReward confidence bump is reflected by the next queryDomain (ranker i
   assert.equal(q2.nodes[0]!.id, a);
   assert.ok(approx(q2.nodes[0]!.confidence, 0.55), `post-reward query should see ~0.55, got ${q2.nodes[0]!.confidence}`);
 });
+
+// ── v0.17.0: reward-aware GC — access evidence on both layers ──────────────
+import { mkdirSync, appendFileSync } from "node:fs";
+import { touchNodes } from "../src/domain.js";
+
+test("touchNodes stamps shared-layer nodes too (reward-aware GC prerequisite)", () => {
+  const dir = freshDb("touch-shared");
+  const projId = addDomainNode({ type: "fact", name: "proj touch target", props: {}, source: "impl-note", confidence: 0.5 });
+  mkdirSync(getSharedDir(), { recursive: true });
+  const sharedId = "node_sharedtouch_1";
+  appendFileSync(join(getSharedDir(), "nodes.ndjson"),
+    JSON.stringify({ id: sharedId, type: "fact", name: "shared touch target", props: {}, source: "impl-note", confidence: 0.5, ts: new Date().toISOString() }) + "\n");
+  touchNodes(new Set([projId, sharedId]));
+  const after = readNodes() as Array<{ id: string; lastAccessed?: string; accessCount?: number }>;
+  const proj = after.find((n) => n.id === projId);
+  const shared = after.find((n) => n.id === sharedId);
+  assert.ok(proj?.lastAccessed, "project node touched");
+  assert.ok(shared?.lastAccessed, "SHARED node touched (v0.17.0)");
+  assert.equal(shared?.accessCount, 1);
+  assert.equal(after.filter((n) => n.id === sharedId).length, 1, "no cross-layer duplication");
+});
+
+test("applyReward stamps lastAccessed even when confidence is clamped", () => {
+  const dir = freshDb("clamp-access");
+  mkdirSync(getSharedDir(), { recursive: true });
+  const id = "node_clamped_1";
+  appendFileSync(join(getSharedDir(), "nodes.ndjson"),
+    JSON.stringify({ id, type: "fact", name: "clamped", props: {}, source: "impl-note", confidence: 1.0, ts: "2026-01-01T00:00:00.000Z" }) + "\n");
+  logDomainInjection(["clamped"], [id]);
+  const r = applyReward("pass", "clamp test");
+  assert.equal(r.applied, 1);
+  const n = (readNodes() as Array<{ id: string; confidence: number; lastAccessed?: string }>).find((x) => x.id === id)!;
+  assert.equal(n.confidence, 1.0); // clamped — no change
+  assert.ok(n.lastAccessed && n.lastAccessed > "2026-09", "lastAccessed stamped despite clamp (reward = access evidence)");
+});

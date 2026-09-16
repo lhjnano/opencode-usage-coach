@@ -470,25 +470,32 @@ export function applyReward(outcome: "pass" | "fail", note?: string): { applied:
     }
 
     // Confidence bump — per layer, rewriting only the layer that changed.
+    // v0.17.0: a reward is also the strongest access evidence — rewarded nodes get
+    // lastAccessed stamped even when confidence is clamped at a bound, so the 60d
+    // shared TTL reads "60 days without injection OR reward" (reward-aware GC).
+    const now = new Date().toISOString();
     let applied = 0;
     if (nodeIds.length > 0) {
-      const bump = (nodes: DomainNode[]): number => {
+      const bump = (nodes: DomainNode[]): { matchCount: number; changed: number } => {
         let changed = 0;
+        let matchCount = 0;
         for (const n of nodes) {
           if (!seen.has(n.id)) continue;
+          matchCount++;
           const cur = clamp01(typeof n.confidence === "number" && Number.isFinite(n.confidence) ? n.confidence : 0);
           const next = clamp01(cur + (outcome === "pass" ? delta : -delta));
           if (next !== cur) { n.confidence = next; changed++; }
+          n.lastAccessed = now;
         }
-        return changed;
+        return { matchCount, changed };
       };
       const proj = readProjectNodes();
-      const projChanged = bump(proj);
+      const projMatched = bump(proj).matchCount; // see below — bump returns {matchCount, changed}
       const shared = readSharedNodes();
-      const sharedChanged = bump(shared);
-      if (projChanged > 0) writeNodes(proj);
-      if (sharedChanged > 0) writeSharedNodes(shared);
-      applied = projChanged + sharedChanged;
+      const sharedMatched = bump(shared).matchCount;
+      applied = projMatched + sharedMatched;
+      if (projMatched > 0) writeNodes(proj);
+      if (sharedMatched > 0) writeSharedNodes(shared);
       // The confidence rewrite changes the nodes-file fingerprint, so
       // ensureIndex() rebuilds from disk on the next queryDomain and the BM25
       // priors see the new confidence. Deliberately NOT syncCacheAfterTouch —
@@ -518,10 +525,11 @@ export function applyReward(outcome: "pass" | "fail", note?: string): { applied:
 // read-only (no access tracking) to avoid the cross-layer duplication bug.
 export function touchNodes(ids: Set<string>): void {
   if (ids.size === 0) return;
+  const now = new Date().toISOString();
+  // Project layer (BASE_DIR).
   try {
     const nodes = readProjectNodes();
     let changed = false;
-    const now = new Date().toISOString();
     for (const n of nodes) {
       if (ids.has(n.id)) {
         n.lastAccessed = now;
@@ -536,6 +544,23 @@ export function touchNodes(ids: Set<string>): void {
       // like new content on the next query.
       syncCacheAfterTouch(nodes);
     }
+  } catch { /* */ }
+  // Shared layer (SHARED_DIR) — layer-aware, same rewrite pattern as evictSharedStale.
+  // v0.17.0: shared nodes now get access tracking too. Without this, every shared
+  // node's lastAccessed stayed at its creation ts forever and the 60d shared TTL
+  // evicted useful nodes regardless of reward/usage — the reward loop said "keep"
+  // while the clock said "kill". Reward-aware GC requires access on both layers.
+  try {
+    const shared = readSharedNodes();
+    let changed = false;
+    for (const n of shared) {
+      if (ids.has(n.id)) {
+        n.lastAccessed = now;
+        n.accessCount = (n.accessCount ?? 0) + 1;
+        changed = true;
+      }
+    }
+    if (changed) writeSharedNodes(shared);
   } catch { /* */ }
 }
 
