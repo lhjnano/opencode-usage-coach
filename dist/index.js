@@ -7,7 +7,7 @@ import { join as join3, resolve, dirname as dirname2 } from "path";
 import { tool } from "@opencode-ai/plugin";
 
 // src/domain.ts
-import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync, statSync } from "fs";
 import { join, dirname, basename } from "path";
 var BASE_DIR = "";
 var SHARED_DIR = "";
@@ -59,22 +59,185 @@ function writeNodes(nodes) {
   } catch {
   }
 }
+function tokenizeAll(s) {
+  const lowered = (s ?? "").toLowerCase();
+  const out = [];
+  for (const part of lowered.split(/[^a-z0-9가-힣]+/)) {
+    if (!part) continue;
+    let i = 0;
+    while (i < part.length) {
+      if (part[i] && /[가-힣]/.test(part[i])) {
+        let j = i;
+        while (j < part.length && /[가-힣]/.test(part[j])) j++;
+        const run = part.slice(i, j);
+        if (run.length === 1) out.push(run);
+        else for (let k = 0; k < run.length - 1; k++) out.push(run.slice(k, k + 2));
+        i = j;
+      } else {
+        let j = i;
+        while (j < part.length && !/[가-힣]/.test(part[j])) j++;
+        const run = part.slice(i, j);
+        if (run.length >= 2) out.push(run);
+        i = j;
+      }
+    }
+  }
+  return out;
+}
+function tokenize(s) {
+  return [...new Set(tokenizeAll(s))];
+}
+var rankIndex = null;
+function statFp(path) {
+  try {
+    const st = statSync(path);
+    return `${path}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `${path}:missing:0`;
+  }
+}
+function countNdjsonLines(path) {
+  try {
+    if (!existsSync(path)) return 0;
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
+function buildIndex() {
+  const projFp = statFp(nodesFile());
+  const sharedFp = statFp(sharedNodesFile());
+  const nodes = readNodes();
+  const byToken = /* @__PURE__ */ new Map();
+  const tf = /* @__PURE__ */ new Map();
+  const docLen = [];
+  const idToIdx = /* @__PURE__ */ new Map();
+  let total = 0;
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    idToIdx.set(n.id, i);
+    const tokens = tokenizeAll(`${n.name} ${JSON.stringify(n.props)}`);
+    const counts = /* @__PURE__ */ new Map();
+    for (const t of tokens) counts.set(t, (counts.get(t) ?? 0) + 1);
+    tf.set(i, counts);
+    docLen.push(tokens.length);
+    total += tokens.length;
+    for (const t of counts.keys()) {
+      const post = byToken.get(t);
+      if (post) post.push(i);
+      else byToken.set(t, [i]);
+    }
+  }
+  return {
+    projFp,
+    sharedFp,
+    projCount: countNdjsonLines(nodesFile()),
+    byToken,
+    tf,
+    docLen,
+    nodes,
+    idToIdx,
+    N: nodes.length,
+    avgdl: nodes.length > 0 ? total / nodes.length : 0
+  };
+}
+function ensureIndex() {
+  const projFp = statFp(nodesFile());
+  const sharedFp = statFp(sharedNodesFile());
+  if (rankIndex && rankIndex.projFp === projFp && rankIndex.sharedFp === sharedFp) return rankIndex;
+  rankIndex = buildIndex();
+  return rankIndex;
+}
+function syncCacheAfterTouch(fresh) {
+  if (!rankIndex) return;
+  if (fresh.length !== rankIndex.projCount) {
+    rankIndex = null;
+    return;
+  }
+  for (const n of fresh) {
+    const idx = rankIndex.idToIdx.get(n.id);
+    if (idx === void 0) continue;
+    const cached = rankIndex.nodes[idx];
+    if (cached) {
+      cached.lastAccessed = n.lastAccessed;
+      cached.accessCount = n.accessCount;
+    }
+  }
+  rankIndex.projFp = statFp(nodesFile());
+}
+function envWeight(name, fallback) {
+  const v = Number.parseFloat(process.env[name] ?? "");
+  return Number.isFinite(v) ? v : fallback;
+}
+var clamp01 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+var safeTs = (s) => {
+  const t = s ? new Date(s).getTime() : NaN;
+  return Number.isFinite(t) ? t : 0;
+};
 function queryDomain(keywords, opts = {}) {
   const maxNodes = Math.max(1, Math.round(opts.maxNodes ?? 20) || 20);
   const maxEdges = Math.max(1, Math.round(opts.maxEdges ?? 60) || 60);
-  const lc = keywords.map((k) => k.toLowerCase());
-  const nodes = readNodes();
-  const matched = nodes.map((n) => {
-    const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
-    const score = lc.reduce((acc, k) => acc + (k && hay.includes(k) ? 1 : 0), 0);
-    return { n, score };
-  }).filter(({ score }) => score > 0);
-  matched.sort((a, b) => b.score - a.score || new Date(b.n.ts).getTime() - new Date(a.n.ts).getTime());
-  const kept = matched.slice(0, maxNodes).map(({ n }) => n);
+  const idx = ensureIndex();
+  if (!idx || idx.N === 0 || !(idx.avgdl > 0)) return { nodes: [], edges: [] };
+  const qTokens = [...new Set(keywords.flatMap((k) => tokenize(k)))];
+  if (qTokens.length === 0) return { nodes: [], edges: [] };
+  const cand = /* @__PURE__ */ new Set();
+  for (const t of qTokens) for (const i of idx.byToken.get(t) ?? []) cand.add(i);
+  if (cand.size === 0) return { nodes: [], edges: [] };
+  const alpha = envWeight("UC_RANK_ALPHA", 0.3);
+  const beta = envWeight("UC_RANK_BETA", 0.2);
+  const gamma = envWeight("UC_RANK_GAMMA", 0.1);
+  const k1 = 1.2;
+  const b = 0.75;
+  const now = Date.now();
+  const idfCache = /* @__PURE__ */ new Map();
+  const raw = [];
+  let maxBm25 = 0;
+  for (const i of cand) {
+    const dl = idx.docLen[i] ?? 0;
+    const counts = idx.tf.get(i) ?? /* @__PURE__ */ new Map();
+    let s = 0;
+    for (const t of qTokens) {
+      const f = counts.get(t);
+      if (!f) continue;
+      let idf = idfCache.get(t);
+      if (idf === void 0) {
+        const df = (idx.byToken.get(t) ?? []).length;
+        idf = Math.log(1 + (idx.N - df + 0.5) / (df + 0.5));
+        idfCache.set(t, idf);
+      }
+      s += idf * (f * (k1 + 1) / (f + k1 * (1 - b + b * dl / idx.avgdl)));
+    }
+    raw.push({ i, bm25: s });
+    if (s > maxBm25) maxBm25 = s;
+  }
+  const scored = raw.map(({ i, bm25 }) => {
+    const n = idx.nodes[i];
+    if (!n) return null;
+    const norm = maxBm25 > 0 ? bm25 / maxBm25 : 0;
+    const conf = clamp01(typeof n.confidence === "number" && Number.isFinite(n.confidence) ? n.confidence : 0);
+    const ageDays = Math.max(0, (now - safeTs(n.lastAccessed ?? n.ts)) / 864e5);
+    const recency = 1 / (1 + ageDays / 30);
+    const ac = typeof n.accessCount === "number" && Number.isFinite(n.accessCount) && n.accessCount > 0 ? n.accessCount : 0;
+    const access = Math.min(Math.log10(1 + ac), 1);
+    return { n, score: norm + alpha * conf + beta * recency + gamma * access };
+  }).filter((x) => x !== null);
+  scored.sort((a, b2) => b2.score - a.score || safeTs(b2.n.ts) - safeTs(a.n.ts));
+  const kept = scored.slice(0, maxNodes).map(({ n }) => ({ ...n }));
   if (kept.length) touchNodes(new Set(kept.map((n) => n.id)));
   const ids = new Set(kept.map((n) => n.id));
-  const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to)).sort((a, b) => Number(ids.has(b.from) && ids.has(b.to)) - Number(ids.has(a.from) && ids.has(a.to))).slice(0, maxEdges);
+  const edges = readEdges().filter((e) => ids.has(e.from) || ids.has(e.to)).sort((a, b2) => Number(ids.has(b2.from) && ids.has(b2.to)) - Number(ids.has(a.from) && ids.has(a.to))).slice(0, maxEdges);
   return { nodes: kept, edges };
+}
+function logDomainInjection(keywords, nodeIds) {
+  try {
+    mkdirSync(SHARED_DIR, { recursive: true });
+    appendFileSync(
+      join(SHARED_DIR, "injections.ndjson"),
+      JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), keywords, nodeIds }) + "\n"
+    );
+  } catch {
+  }
 }
 function touchNodes(ids) {
   if (ids.size === 0) return;
@@ -89,7 +252,10 @@ function touchNodes(ids) {
         changed = true;
       }
     }
-    if (changed) writeNodes(nodes);
+    if (changed) {
+      writeNodes(nodes);
+      syncCacheAfterTouch(nodes);
+    }
   } catch {
   }
 }
@@ -2223,7 +2389,8 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes });
+                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes ?? 12 });
+                logDomainInjection(keywords, nodes.map((n) => n.id));
                 if (nodes && nodes.length || edges && edges.length) {
                   domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.
@@ -2373,7 +2540,8 @@ ${rules}
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes });
+                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes ?? 12 });
+                logDomainInjection(keywords, nodes.map((n) => n.id));
                 if (nodes && nodes.length || edges && edges.length) {
                   domainEmpty = false;
                   domainNodeCount = nodes.length;
@@ -2855,7 +3023,7 @@ If the task is already well-specified with no significant ambiguities, return {"
             lighterModel: tool.schema.string().optional(),
             provider: tool.schema.string().optional(),
             maxSteps: tool.schema.number().optional().describe("Max steps per generate/grade sub-session (default 30). Lower = faster but may timeout on complex tasks."),
-            domainMaxNodes: tool.schema.number().optional().describe("Max domain DB nodes injected into a generate prompt (default 20). Lower keeps prompts small; 0 or unset uses the default.")
+            domainMaxNodes: tool.schema.number().optional().describe("Max domain DB nodes injected into a generate prompt (default 12). Lower keeps prompts small; 0 or unset uses the default.")
           },
           async execute(args, ctx) {
             const dir = ctx?.directory ?? input.directory;
@@ -2901,7 +3069,7 @@ To update, call: coach_config({ generator: "provider/model-id", maxSteps: 15, ..
               `  lighterModel:  ${updated.lighterModel ?? "(not set)"}`,
               `  provider:      ${updated.provider ?? "(auto-detected)"}`,
               `  maxSteps:      ${updated.maxSteps ?? 30}`,
-              `  domainMaxNodes: ${updated.domainMaxNodes ?? "(default 20)"}`,
+              `  domainMaxNodes: ${updated.domainMaxNodes ?? "(default 12)"}`,
               `\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550`,
               `
 Saved to: ${writtenPath}`,
