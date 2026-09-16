@@ -305,28 +305,32 @@ function applyReward(outcome, note) {
         }
       }
     }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
     let applied = 0;
     if (nodeIds.length > 0) {
       const bump = (nodes) => {
         let changed = 0;
+        let matchCount = 0;
         for (const n of nodes) {
           if (!seen.has(n.id)) continue;
+          matchCount++;
           const cur = clamp01(typeof n.confidence === "number" && Number.isFinite(n.confidence) ? n.confidence : 0);
           const next = clamp01(cur + (outcome === "pass" ? delta : -delta));
           if (next !== cur) {
             n.confidence = next;
             changed++;
           }
+          n.lastAccessed = now;
         }
-        return changed;
+        return { matchCount, changed };
       };
       const proj = readProjectNodes();
-      const projChanged = bump(proj);
+      const projMatched = bump(proj).matchCount;
       const shared = readSharedNodes();
-      const sharedChanged = bump(shared);
-      if (projChanged > 0) writeNodes(proj);
-      if (sharedChanged > 0) writeSharedNodes(shared);
-      applied = projChanged + sharedChanged;
+      const sharedMatched = bump(shared).matchCount;
+      applied = projMatched + sharedMatched;
+      if (projMatched > 0) writeNodes(proj);
+      if (sharedMatched > 0) writeSharedNodes(shared);
     }
     if (drained.length > 0 || applied > 0) {
       try {
@@ -345,10 +349,10 @@ function applyReward(outcome, note) {
 }
 function touchNodes(ids) {
   if (ids.size === 0) return;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
   try {
     const nodes = readProjectNodes();
     let changed = false;
-    const now = (/* @__PURE__ */ new Date()).toISOString();
     for (const n of nodes) {
       if (ids.has(n.id)) {
         n.lastAccessed = now;
@@ -360,6 +364,19 @@ function touchNodes(ids) {
       writeNodes(nodes);
       syncCacheAfterTouch(nodes);
     }
+  } catch {
+  }
+  try {
+    const shared = readSharedNodes();
+    let changed = false;
+    for (const n of shared) {
+      if (ids.has(n.id)) {
+        n.lastAccessed = now;
+        n.accessCount = (n.accessCount ?? 0) + 1;
+        changed = true;
+      }
+    }
+    if (changed) writeSharedNodes(shared);
   } catch {
   }
 }
@@ -772,6 +789,7 @@ function resolveBatchLimit(tasks, decision) {
 }
 var WATCHDOG_POLL_MS = Math.max(1e3, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3e3) || 3e3);
 var WALL_TIMEOUT_MS = Math.max(1, Number(process.env.UC_WALL_TIMEOUT_MIN ?? 30) || 30) * 60 * 1e3;
+var STALL_MS = Math.max(0, Number(process.env.UC_STALL_MIN ?? 12) || 0) * 60 * 1e3;
 var DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUESTIONS ?? 7)) || 7);
 var PIPE_LOG = join3(homedir2(), ".cache", "opencode-usage-coach", "pipeline.log");
 function pipeLog(msg) {
@@ -1737,7 +1755,12 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
   let wallTimer = null;
   let subId = null;
   let timedOut = false;
+  let stalled = false;
   let pollerDone = false;
+  let lastStepSeen = -1;
+  let lastTsSeen = "";
+  let lastProgressAt = Date.now();
+  let lastPollOk = true;
   let signalTimeout;
   const timeoutSignal = new Promise((resolve2) => {
     signalTimeout = resolve2;
@@ -1769,12 +1792,30 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
             const last = msgList[msgList.length - 1];
             const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
             if (ts) lastTs = String(ts);
+            lastPollOk = true;
           }
         } catch {
+          lastPollOk = false;
+        }
+        if (lastPollOk && (step !== lastStepSeen || lastTs !== lastTsSeen)) {
+          lastStepSeen = step;
+          lastTsSeen = lastTs;
+          lastProgressAt = Date.now();
         }
         if (step > maxSteps) {
           log(`runModel(${model}): STEP LIMIT exceeded (${step} > ${maxSteps}), aborting session ${id}`);
           timedOut = true;
+          try {
+            await client.session.abort?.({ path: { id } });
+          } catch {
+          }
+          signalTimeout();
+          return;
+        }
+        if (STALL_MS > 0 && lastPollOk && Date.now() - lastProgressAt > STALL_MS) {
+          stalled = true;
+          timedOut = true;
+          log(`runModel(${model}): STALLED \u2014 no progress for ${Math.round((Date.now() - lastProgressAt) / 1e3)}s (step=${step}, maxSteps=${maxSteps}), aborting session ${id}`);
           try {
             await client.session.abort?.({ path: { id } });
           } catch {
@@ -1829,6 +1870,10 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
       } catch {
       }
       subId = null;
+      if (stalled) {
+        return `ERROR: stalled \u2014 no message-stream progress for ${Math.round(STALL_MS / 6e4)} min (step ${lastStepSeen}/${maxSteps}). The sub-session was wedged (observed today as the 837s no-output case). Retry this task individually with generate(); if it stalls again, split it.
+[usage-coach NEXT] re-run the stalled task alone via generate(), or split it.`;
+      }
       log(`runModel(${model}): TIMED OUT after ${elapsed}s (${maxSteps} steps exceeded)`);
       return `Task appears too large (exceeded ${maxSteps} steps). Consider splitting into smaller subtasks.
 [usage-coach NEXT] split the original task into smaller subtasks (each should complete within ${maxSteps} steps), then re-run generate for each subtask.`;
