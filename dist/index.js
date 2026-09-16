@@ -382,6 +382,25 @@ function evictStale(maxAgeDays = 30, maxNodes = 1e3) {
     return { removed: 0, kept: 0 };
   }
 }
+function evictSharedStale(maxAgeDays = 60, maxNodes = 2e3) {
+  try {
+    const nodes = readSharedNodes();
+    if (nodes.length === 0) return { removed: 0, kept: 0 };
+    const now = Date.now();
+    const ageMs = maxAgeDays * 864e5;
+    const lastTs = (n) => new Date(n.lastAccessed ?? n.ts).getTime();
+    let kept = nodes.filter((n) => now - lastTs(n) < ageMs);
+    if (kept.length > maxNodes) {
+      kept.sort((a, b) => lastTs(b) - lastTs(a));
+      kept = kept.slice(0, maxNodes);
+    }
+    const removed = nodes.length - kept.length;
+    if (removed > 0) writeSharedNodes(kept);
+    return { removed, kept: kept.length };
+  } catch {
+    return { removed: 0, kept: 0 };
+  }
+}
 function sweepDeadEdges() {
   try {
     const ids = new Set(readNodes().map((n) => n.id));
@@ -1869,6 +1888,8 @@ var THR_WK = num("UC_THROTTLE_WEEKLY", 85);
 var STOP_MO = num("UC_STOP_MONTHLY", 98);
 var WORM_MAX_AGE_DAYS = num("UC_WORM_MAX_AGE_DAYS", 180);
 var WORM_MAX_NODES = num("UC_WORM_MAX_NODES", 1e5);
+var SHARED_WORM_MAX_AGE_DAYS = num("UC_SHARED_WORM_MAX_AGE_DAYS", 60);
+var SHARED_WORM_MAX_NODES = num("UC_SHARED_WORM_MAX_NODES", 3e3);
 function humanRemaining(iso) {
   try {
     if (!iso) return "";
@@ -2190,6 +2211,12 @@ async function UsageCoachPlugin(input) {
               if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`);
             } catch (e) {
               log(`evictStale err: ${String(e)}`);
+            }
+            try {
+              const sh = evictSharedStale(SHARED_WORM_MAX_AGE_DAYS, SHARED_WORM_MAX_NODES);
+              if (sh.removed) log(`evictSharedStale: removed ${sh.removed}, kept ${sh.kept} (maxAge=${SHARED_WORM_MAX_AGE_DAYS}d, maxNodes=${SHARED_WORM_MAX_NODES})`);
+            } catch (e) {
+              log(`evictSharedStale err: ${String(e)}`);
             }
             try {
               const s = sweepDeadEdges();
