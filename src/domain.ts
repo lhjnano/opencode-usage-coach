@@ -4,7 +4,7 @@
 //   - read/add/query/traverse helpers; queryDomain + traverse compose the 1-hop lookups
 //     the learning loop (investigate) and generate injections need.
 
-import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, existsSync, writeFileSync, statSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 
 export type Relation =
@@ -128,41 +128,271 @@ function writeSharedNodes(nodes: DomainNode[]): void {
   try { mkdirSync(SHARED_DIR, { recursive: true }); const lines = nodes.map((n) => JSON.stringify(n)); writeFileSync(sharedNodesFile(), lines.length ? lines.join("\n") + "\n" : ""); } catch { /* */ }
 }
 
-// Keyword match against node name + props; include every edge touching a matched node.
-// opts.maxNodes caps the result (default 20) — without a cap, a mature mesh DB dumps
-// hundreds of nodes (~600KB) into every generate prompt, burying the actual task.
-// Nodes are ranked by DISTINCT keyword match count (more matching keywords = more relevant).
+// ── Ranker: tokenizer + inverted-index cache (BM25 + priors) ───────────────
+// v0.15.0 redesign (knowledge-retrieval-redesign Phase 1). Replaces substring
+// `includes` matching with token-based BM25 ranking. INTENDED SEMANTIC CHANGE:
+// ASCII partial-token hits ("test" ∈ "latest") are gone — no prefix matching
+// either; Hangul recovers partial matching naturally via bigrams
+// ("다크모드" → 다크/크모/모드). Legacy tests asserting substring semantics are
+// updated in the follow-up commit — do NOT read those failures as regressions.
+
+// Raw token stream (duplicates kept) — used for document tf counts.
+// Shared by documents and queries: lowercase → split on [^a-z0-9가-힣] →
+// ASCII words (len ≥ 2, kept whole) + Hangul runs → bigrams (len 1 → unigram).
+function tokenizeAll(s: string): string[] {
+  const lowered = (s ?? "").toLowerCase();
+  const out: string[] = [];
+  for (const part of lowered.split(/[^a-z0-9가-힣]+/)) {
+    if (!part) continue;
+    // A single part can mix ASCII and Hangul (e.g. "dark모드") — walk per-run.
+    let i = 0;
+    while (i < part.length) {
+      if (part[i] && /[가-힣]/.test(part[i])) {
+        let j = i;
+        while (j < part.length && /[가-힣]/.test(part[j])) j++;
+        const run = part.slice(i, j);
+        if (run.length === 1) out.push(run);
+        else for (let k = 0; k < run.length - 1; k++) out.push(run.slice(k, k + 2));
+        i = j;
+      } else {
+        let j = i;
+        while (j < part.length && !/[가-힣]/.test(part[j])) j++;
+        const run = part.slice(i, j);
+        if (run.length >= 2) out.push(run);
+        i = j;
+      }
+    }
+  }
+  return out;
+}
+
+// Public document/query tokenizer (unique tokens, in order).
+export function tokenize(s: string): string[] {
+  return [...new Set(tokenizeAll(s))];
+}
+
+// Module-level inverted index over readNodes(). Rebuilt only when the stat
+// fingerprint (mtime+size) of either nodes file changes — parsing ~2k NDJSON
+// nodes per query would erase the latency win the index buys. The path is part
+// of the fingerprint so switching state dirs (tests) never collides.
+type RankIndex = {
+  projFp: string;
+  sharedFp: string;
+  projCount: number;
+  byToken: Map<string, number[]>; // token → node indices (postings)
+  tf: Map<number, Map<string, number>>; // node index → token counts
+  docLen: number[]; // total tokens per node
+  nodes: DomainNode[]; // cached copies in index order
+  idToIdx: Map<string, number>;
+  N: number;
+  avgdl: number;
+};
+
+let rankIndex: RankIndex | null = null;
+
+function statFp(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${path}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `${path}:missing:0`; // stable sentinel for a not-yet-created file
+  }
+}
+
+// Cheap line count (no JSON.parse) — projCount only serves as a change
+// detector in syncCacheAfterTouch; parsing the project file a second time
+// would double the rebuild cost for no informational gain.
+function countNdjsonLines(path: string): number {
+  try {
+    if (!existsSync(path)) return 0;
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).length;
+  } catch { return 0; }
+}
+
+function buildIndex(): RankIndex {
+  // Capture stat fingerprints BEFORE parsing: if a writer appends while we
+  // parse, the file is then newer than the fingerprint → the next query
+  // detects the mismatch and rebuilds. (Fingerprint-after-parse would let
+  // that append hide from the cache until the following change.)
+  const projFp = statFp(nodesFile());
+  const sharedFp = statFp(sharedNodesFile());
+  const nodes = readNodes();
+  const byToken = new Map<string, number[]>();
+  const tf = new Map<number, Map<string, number>>();
+  const docLen: number[] = [];
+  const idToIdx = new Map<string, number>();
+  let total = 0;
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    idToIdx.set(n.id, i);
+    const tokens = tokenizeAll(`${n.name} ${JSON.stringify(n.props)}`);
+    const counts = new Map<string, number>();
+    for (const t of tokens) counts.set(t, (counts.get(t) ?? 0) + 1);
+    tf.set(i, counts);
+    docLen.push(tokens.length);
+    total += tokens.length;
+    for (const t of counts.keys()) {
+      const post = byToken.get(t);
+      if (post) post.push(i);
+      else byToken.set(t, [i]);
+    }
+  }
+  return {
+    projFp,
+    sharedFp,
+    projCount: countNdjsonLines(nodesFile()),
+    byToken,
+    tf,
+    docLen,
+    nodes,
+    idToIdx,
+    N: nodes.length,
+    avgdl: nodes.length > 0 ? total / nodes.length : 0,
+  };
+}
+
+function ensureIndex(): RankIndex | null {
+  const projFp = statFp(nodesFile());
+  const sharedFp = statFp(sharedNodesFile());
+  // Fingerprint mismatch = new content (local add, external writer, eviction
+  // rewrite) → rebuild from a fresh readNodes(). Touch-only rewrites are handled
+  // separately in syncCacheAfterTouch so they don't trigger a rebuild.
+  if (rankIndex && rankIndex.projFp === projFp && rankIndex.sharedFp === sharedFp) return rankIndex;
+  rankIndex = buildIndex();
+  return rankIndex;
+}
+
+// After touchNodes rewrites the project file, keep the cached index consistent
+// WITHOUT a rebuild: sync accessCount/lastAccessed into cached copies (ids
+// present in the cache only) and refresh the project fingerprint. If the node
+// count changed since the index was built (external append/removal raced in),
+// drop the cache so the next query rebuilds from disk. Never mutates shared-fp —
+// external shared-layer writers are still detected on the next query.
+function syncCacheAfterTouch(fresh: DomainNode[]): void {
+  if (!rankIndex) return;
+  if (fresh.length !== rankIndex.projCount) {
+    rankIndex = null;
+    return;
+  }
+  for (const n of fresh) {
+    const idx = rankIndex.idToIdx.get(n.id);
+    if (idx === undefined) continue;
+    const cached = rankIndex.nodes[idx];
+    if (cached) {
+      cached.lastAccessed = n.lastAccessed;
+      cached.accessCount = n.accessCount;
+    }
+  }
+  rankIndex.projFp = statFp(nodesFile());
+}
+
+function envWeight(name: string, fallback: number): number {
+  const v = Number.parseFloat(process.env[name] ?? "");
+  return Number.isFinite(v) ? v : fallback;
+}
+
+const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
+const safeTs = (s: string | undefined): number => {
+  const t = s ? new Date(s).getTime() : NaN;
+  return Number.isFinite(t) ? t : 0;
+};
+
+// Keyword search over the domain DB: query tokens → posting-list union →
+// BM25 (k1=1.2, b=0.75, normalized by the best bm25 in the result set) plus
+// priors: α·confidence + β·recency + γ·log-access. Ties broken by ts desc.
+// opts.maxNodes caps the result (default 20 here; the injection call sites in
+// index.ts apply their own, smaller cap) — without a cap a mature mesh DB dumps
+// hundreds of nodes into every generate prompt, burying the actual task.
+// Edge logic (all edges touching a kept node, internal-first, capped) unchanged.
 export function queryDomain(
   keywords: string[],
   opts: { maxNodes?: number; maxEdges?: number } = {},
 ): { nodes: DomainNode[]; edges: DomainEdge[] } {
   const maxNodes = Math.max(1, Math.round(opts.maxNodes ?? 20) || 20);
   const maxEdges = Math.max(1, Math.round(opts.maxEdges ?? 60) || 60);
-  const lc = keywords.map((k) => k.toLowerCase());
-  const nodes = readNodes();
-  const matched = nodes
-    .map((n) => {
-      const hay = (n.name + " " + JSON.stringify(n.props)).toLowerCase();
-      // Score = number of distinct keywords present in this node.
-      const score = lc.reduce((acc, k) => acc + (k && hay.includes(k) ? 1 : 0), 0);
-      return { n, score };
+  const idx = ensureIndex();
+  // Guard: empty DB or zero avgdl → no candidates, no NaN divisions.
+  if (!idx || idx.N === 0 || !(idx.avgdl > 0)) return { nodes: [], edges: [] };
+  const qTokens = [...new Set(keywords.flatMap((k) => tokenize(k)))];
+  // Guard: query tokenized to nothing (empty/whitespace/punctuation input).
+  if (qTokens.length === 0) return { nodes: [], edges: [] };
+
+  const cand = new Set<number>();
+  for (const t of qTokens) for (const i of idx.byToken.get(t) ?? []) cand.add(i);
+  if (cand.size === 0) return { nodes: [], edges: [] };
+
+  // 예시값, 튜닝 필요 — env overrides: UC_RANK_ALPHA / UC_RANK_BETA / UC_RANK_GAMMA.
+  const alpha = envWeight("UC_RANK_ALPHA", 0.3);
+  const beta = envWeight("UC_RANK_BETA", 0.2);
+  const gamma = envWeight("UC_RANK_GAMMA", 0.1);
+  const k1 = 1.2;
+  const b = 0.75;
+  const now = Date.now();
+  const idfCache = new Map<string, number>();
+  const raw: { i: number; bm25: number }[] = [];
+  let maxBm25 = 0;
+  for (const i of cand) {
+    const dl = idx.docLen[i] ?? 0;
+    const counts = idx.tf.get(i) ?? new Map<string, number>();
+    let s = 0;
+    for (const t of qTokens) {
+      const f = counts.get(t);
+      if (!f) continue;
+      let idf = idfCache.get(t);
+      if (idf === undefined) {
+        const df = (idx.byToken.get(t) ?? []).length;
+        idf = Math.log(1 + (idx.N - df + 0.5) / (df + 0.5));
+        idfCache.set(t, idf);
+      }
+      s += idf * ((f * (k1 + 1)) / (f + k1 * (1 - b + (b * dl) / idx.avgdl)));
+    }
+    raw.push({ i, bm25: s });
+    if (s > maxBm25) maxBm25 = s;
+  }
+  const scored = raw
+    .map(({ i, bm25 }) => {
+      const n = idx.nodes[i];
+      if (!n) return null;
+      // Guard: maxBm25 should be > 0 for any non-empty candidate set (idf > 0
+      // always), but normalize defensively so NaN can never leak into sort.
+      const norm = maxBm25 > 0 ? bm25 / maxBm25 : 0;
+      const conf = clamp01(typeof n.confidence === "number" && Number.isFinite(n.confidence) ? n.confidence : 0);
+      // ageDays from lastAccessed ?? ts (worm-fresh nodes rank higher).
+      const ageDays = Math.max(0, (now - safeTs(n.lastAccessed ?? n.ts)) / 86_400_000);
+      const recency = 1 / (1 + ageDays / 30);
+      const ac = typeof n.accessCount === "number" && Number.isFinite(n.accessCount) && n.accessCount > 0 ? n.accessCount : 0;
+      const access = Math.min(Math.log10(1 + ac), 1);
+      return { n, score: norm + alpha * conf + beta * recency + gamma * access };
     })
-    .filter(({ score }) => score > 0);
-  // Rank by relevance, keep top maxNodes. Ties broken by recency (ts desc).
-  matched.sort((a, b) => b.score - a.score ||
-    new Date(b.n.ts).getTime() - new Date(a.n.ts).getTime());
-  const kept = matched.slice(0, maxNodes).map(({ n }) => n);
+    .filter((x): x is { n: DomainNode; score: number } => x !== null);
+  scored.sort((a, b) => b.score - a.score || safeTs(b.n.ts) - safeTs(a.n.ts));
+  // Shallow copies — the cached objects must never be handed out for callers to
+  // mutate in place (the cache would silently diverge from disk).
+  const kept = scored.slice(0, maxNodes).map(({ n }) => ({ ...n }));
   // Track access for the worm — lastAccessed/accessCount drive eviction.
   if (kept.length) touchNodes(new Set(kept.map((n) => n.id)));
   const ids = new Set(kept.map((n) => n.id));
   // Edges touching kept nodes; internal edges (both endpoints kept) ranked first,
-  // capped at maxEdges so hub-heavy meshes don't flood the prompt.
+  // capped at maxEdges so hub-heavy meshes don't flood the prompt. (Unchanged.)
   const edges = readEdges()
     .filter((e) => ids.has(e.from) || ids.has(e.to))
     .sort((a, b) =>
       Number(ids.has(b.from) && ids.has(b.to)) - Number(ids.has(a.from) && ids.has(a.to)))
     .slice(0, maxEdges);
   return { nodes: kept, edges };
+}
+
+// Injection provenance log — the seed of the reward-closed-loop work. Appends
+// one record per queryDomain injection call, INCLUDING misses (nodeIds: []) so
+// recall has a denominator. Best-effort: logging must never break a query.
+export function logDomainInjection(keywords: string[], nodeIds: string[]): void {
+  try {
+    mkdirSync(SHARED_DIR, { recursive: true });
+    appendFileSync(
+      join(SHARED_DIR, "injections.ndjson"),
+      JSON.stringify({ ts: new Date().toISOString(), keywords, nodeIds }) + "\n",
+    );
+  } catch { /* best-effort */ }
 }
 
 // Worm — update lastAccessed + accessCount for the given node ids (rewrite). Low-frequency:
@@ -182,7 +412,13 @@ export function touchNodes(ids: Set<string>): void {
         changed = true;
       }
     }
-    if (changed) writeNodes(nodes);
+    if (changed) {
+      writeNodes(nodes);
+      // Keep the rank-index cache consistent without a rebuild — a touch-only
+      // rewrite (accessCount/lastAccessed, ts/count unchanged) must not look
+      // like new content on the next query.
+      syncCacheAfterTouch(nodes);
+    }
   } catch { /* */ }
 }
 

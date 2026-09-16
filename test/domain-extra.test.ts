@@ -168,21 +168,25 @@ test("queryDomainGraph: returns queryDomain results when maxDepth=0", () => {
 });
 
 test("queryDomainGraph: expands beyond keyword-matched seeds via BFS", () => {
+  // intended semantic change v0.15.0: token match replaces substring — "qdg-keyword"
+  // and "qdg-neighbor" both tokenize to include "qdg" (hyphens are separators), so
+  // the neighbor legitimately matched the keyword query. Renamed to token-disjoint
+  // names to preserve the test's intent (BFS expansion adds non-keyword nodes).
   const dir = mkdtempSync(join(tmpdir(), "uc-qdg-"));
   initDomain(dir);
   try {
-    const seed = addDomainNode({ type: "fact", name: "qdg-keyword", props: {}, source: "", confidence: 0.7 });
-    const neighbor = addDomainNode({ type: "fact", name: "qdg-neighbor", props: {}, source: "", confidence: 0.7 });
+    const seed = addDomainNode({ type: "fact", name: "seedkw", props: {}, source: "", confidence: 0.7 });
+    const neighbor = addDomainNode({ type: "fact", name: "neighborterm", props: {}, source: "", confidence: 0.7 });
     addDomainEdge({ from: seed, to: neighbor, rel: "related-to" });
 
     // maxDepth=0 → only the seed.
-    const shallow = queryDomainGraph(["qdg-keyword"], 0);
+    const shallow = queryDomainGraph(["seedkw"], 0);
     const shallowIds = shallow.nodes.map((n) => n.id);
     assert.ok(shallowIds.includes(seed), "seed should be in shallow result");
     assert.ok(!shallowIds.includes(neighbor), "neighbor should NOT be in shallow result");
 
     // maxDepth=2 → seed + neighbor.
-    const deep = queryDomainGraph(["qdg-keyword"], 2);
+    const deep = queryDomainGraph(["seedkw"], 2);
     const deepIds = deep.nodes.map((n) => n.id);
     assert.ok(deepIds.includes(seed), "seed should be in deep result");
     assert.ok(deepIds.includes(neighbor), "neighbor should be in deep result (BFS-expanded)");

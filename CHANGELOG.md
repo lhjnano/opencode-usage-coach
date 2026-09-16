@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-09-16
+
+### Changed
+- **`queryDomain` rewritten: tokenized BM25/IDF ranking replaces substring counting.**
+  Queries and node text are now tokenized (lowercase split on non-alphanumeric; Hangul
+  runs become bigrams, e.g. "다크모드" → 다크/크모/모드), scored with BM25 (k1=1.2, b=0.75)
+  over an inverted index plus recency/confidence/access priors, instead of counting
+  keyword-substring hits. **Intended semantic change: partial substring matches removed**
+  ("test" no longer matches "latest"; Hangul partial matching is naturally restored via
+  bigrams). Tests asserting the old substring semantics were updated accordingly.
+- **Injection cap lowered: `domainMaxNodes` default is now 12** (was 20) at the two
+  injection call sites in `index.ts`. `queryDomain`'s internal default stays 20 so
+  `autoLinkKeywords`/`queryDomainGraph` candidate pools are unchanged. Set via
+  `harness.config.json` or `coach_config({ domainMaxNodes })`.
+
+### Added
+- **Injection provenance logging** — `logDomainInjection()` appends one record per
+  injection query to the shared `injections.ndjson` (`{ts, keywords, nodeIds}`),
+  including misses (`nodeIds: []`), so recall and ghost-rate can be measured over time.
+- **Stat-based inverted-index cache** — the index fingerprint comes from file
+  mtime+size (not re-parsing the NDJSON), so append-only growth by any process
+  triggers a rebuild while repeated queries skip parsing entirely (~57× faster than
+  substring scanning at current DB size). Division guards for empty DB, zero avgdl,
+  empty query, and zero-max normalization (no NaN scores).
+- **Ranking priors tunable via env**: `UC_RANK_ALPHA` (confidence, 0.3),
+  `UC_RANK_BETA` (recency, 0.2), `UC_RANK_GAMMA` (log-access, 0.1).
+- `test/domain-rank.test.ts` — tokenizer, IDF damping, priors, cache invalidation,
+  API compatibility (caps + `queryDomainGraph` maxDepth=0 parity), Hangul bigram
+  regression, NaN/empty-DB guards. 365 total.
+
 ## [0.14.1] - 2026-08-26
 
 ### Fixed

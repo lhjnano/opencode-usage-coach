@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
-import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, addDomainEdge, readNodes, readEdges } from "./domain.js";
+import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, addDomainEdge, readNodes, readEdges, logDomainInjection } from "./domain.js";
 import type { DomainNode } from "./domain.js";
 import { searchContext as webSearch, type WebResult } from "./web-search.js";
 
@@ -1816,7 +1816,9 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes });
+                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes ?? 12 });
+                // Injection provenance — record even on miss (nodeIds: []) so recall has a denominator.
+                logDomainInjection(keywords, nodes.map((n) => n.id));
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n`;
@@ -1909,7 +1911,9 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             try {
               keywords = extractKeywords(args.prompt);
               if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes });
+                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes ?? 12 });
+                // Injection provenance — record even on miss (nodeIds: []) so recall has a denominator.
+                logDomainInjection(keywords, nodes.map((n) => n.id));
                 if ((nodes && nodes.length) || (edges && edges.length)) {
                   domainEmpty = false;
                   domainNodeCount = nodes.length;
@@ -2353,7 +2357,7 @@ If the task is already well-specified with no significant ambiguities, return {"
             lighterModel: tool.schema.string().optional(),
             provider: tool.schema.string().optional(),
             maxSteps: tool.schema.number().optional().describe("Max steps per generate/grade sub-session (default 30). Lower = faster but may timeout on complex tasks."),
-            domainMaxNodes: tool.schema.number().optional().describe("Max domain DB nodes injected into a generate prompt (default 20). Lower keeps prompts small; 0 or unset uses the default."),
+            domainMaxNodes: tool.schema.number().optional().describe("Max domain DB nodes injected into a generate prompt (default 12). Lower keeps prompts small; 0 or unset uses the default."),
           },
           async execute(args: { generator?: string; grader?: string; lighterModel?: string; provider?: string; maxSteps?: number; domainMaxNodes?: number }, ctx: any) {
             const dir = (ctx as any)?.directory ?? input.directory;
@@ -2403,7 +2407,7 @@ If the task is already well-specified with no significant ambiguities, return {"
               `  lighterModel:  ${updated.lighterModel ?? "(not set)"}`,
               `  provider:      ${updated.provider ?? "(auto-detected)"}`,
               `  maxSteps:      ${updated.maxSteps ?? 30}`,
-              `  domainMaxNodes: ${updated.domainMaxNodes ?? "(default 20)"}`,
+              `  domainMaxNodes: ${updated.domainMaxNodes ?? "(default 12)"}`,
               `═══════════════════════════════════════════════`,
               `\nSaved to: ${writtenPath}`,
               `\nNote: Changes take effect immediately for new generate/grade calls.`,
