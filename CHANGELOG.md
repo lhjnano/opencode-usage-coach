@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-09-16
+
+### Docs
+- README now documents the v0.15–v0.17 domain-knowledge pipeline: BM25/IDF ranking with
+  Hangul bigrams, graph hygiene (dead-edge sweep, fanout cap, autoLink off), the reward
+  closed loop (injection provenance -> confidence +/-delta on clear verdicts, reward-aware
+  TTL), generate_batch stall detection, and the <=0.14 upgrade path (migrate-v016.mjs).
+
 ## [0.17.0] - 2026-09-16
 
 ### Fixed
