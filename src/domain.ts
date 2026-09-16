@@ -128,6 +128,17 @@ function writeSharedNodes(nodes: DomainNode[]): void {
   try { mkdirSync(SHARED_DIR, { recursive: true }); const lines = nodes.map((n) => JSON.stringify(n)); writeFileSync(sharedNodesFile(), lines.length ? lines.join("\n") + "\n" : ""); } catch { /* */ }
 }
 
+// Edge REWRITE helpers (full-file replacement). Distinct from the append-only
+// writeEdges above — these are only used by maintenance sweeps that must drop
+// lines from an existing file (sweepDeadEdges). Same best-effort, never-throws
+// contract as writeNodes/writeSharedNodes.
+function writeProjectEdges(edges: DomainEdge[]): void {
+  try { mkdirSync(BASE_DIR, { recursive: true }); const lines = edges.map((e) => JSON.stringify(e)); writeFileSync(edgesFile(), lines.length ? lines.join("\n") + "\n" : ""); } catch { /* */ }
+}
+function writeSharedEdges(edges: DomainEdge[]): void {
+  try { mkdirSync(SHARED_DIR, { recursive: true }); const lines = edges.map((e) => JSON.stringify(e)); writeFileSync(sharedEdgesFile(), lines.length ? lines.join("\n") + "\n" : ""); } catch { /* */ }
+}
+
 // ── Ranker: tokenizer + inverted-index cache (BM25 + priors) ───────────────
 // v0.15.0 redesign (knowledge-retrieval-redesign Phase 1). Replaces substring
 // `includes` matching with token-based BM25 ranking. INTENDED SEMANTIC CHANGE:
@@ -395,6 +406,112 @@ export function logDomainInjection(keywords: string[], nodeIds: string[]): void 
   } catch { /* best-effort */ }
 }
 
+// Tolerant per-line NDJSON reader for the reward logs (injections/rewards).
+// Distinct from readNdjson above on purpose: a single malformed line is SKIPPED
+// instead of discarding the whole file. readNdjson's all-or-nothing catch would
+// empty the claim set on partial corruption, making every past injection look
+// unclaimed and re-rewarding the entire history on the next call.
+function readNdjsonTolerant<T>(path: string): T[] {
+  try {
+    if (!existsSync(path)) return [];
+    const out: T[] = [];
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try { out.push(JSON.parse(line) as T); } catch { /* skip malformed line */ }
+    }
+    return out;
+  } catch { return []; }
+}
+
+// Reward closed loop (v0.16.0 phase2-brief Task B / 스캔 반영 결정 4): drain
+// every injections.ndjson record not yet claimed in rewards.ndjson and apply
+// confidence ±δ (pass → +δ, fail → −δ; δ = env UC_REWARD_DELTA, default 0.05,
+// clamped 0..1) to the drained injections' nodeIds. Rewards live beside the
+// injection log (SHARED_DIR/injections.ndjson → SHARED_DIR/rewards.ndjson).
+//
+// Claim accounting is append-only: claimedInjectionTs[] on each reward record
+// is the union of already-paid injection ts values, so the never-rewritten
+// injections file needs no marking pass. Empty-nodeIds records (query misses)
+// are drained too — otherwise they would be re-inspected forever — but they
+// contribute nothing to nodeIds/applied.
+//
+// Concurrency: the claim check, confidence rewrite and claim append all run on
+// sync fs within ONE synchronous block (no await between read and append) —
+// atomic within the Node event loop. rewards.ndjson assumes a SINGLE WRITER
+// per STATE_DIR (one coach process); concurrent multi-writer appends could
+// interleave and are out of scope.
+//
+// Layer safety: nodeIds may span both layers (queryDomain merges them), so
+// each layer is read and rewritten SEPARATELY (touchNodes' layer-isolation
+// pattern — readProjectNodes+writeNodes for BASE_DIR, readSharedNodes+
+// writeSharedNodes for SHARED_DIR). A node id can therefore never be
+// duplicated across layer files by this function.
+export function applyReward(outcome: "pass" | "fail", note?: string): { applied: number } {
+  try {
+    const injectionsPath = join(SHARED_DIR, "injections.ndjson");
+    const rewardsPath = join(SHARED_DIR, "rewards.ndjson");
+    const delta = envWeight("UC_REWARD_DELTA", 0.05);
+
+    // Claim check → rewrite → claim marker: all sync, same tick (see above).
+    const claimed = new Set<string>();
+    for (const r of readNdjsonTolerant<{ claimedInjectionTs?: string[] }>(rewardsPath)) {
+      for (const ts of Array.isArray(r.claimedInjectionTs) ? r.claimedInjectionTs : []) claimed.add(ts);
+    }
+    const drained: string[] = []; // every unclaimed injection ts — claimed by this call
+    const nodeIds: string[] = []; // deduped, order-stable, non-empty node ids only
+    const seen = new Set<string>();
+    for (const inj of readNdjsonTolerant<{ ts?: string; nodeIds?: string[] }>(injectionsPath)) {
+      const ts = typeof inj.ts === "string" ? inj.ts : "";
+      if (!ts || claimed.has(ts)) continue;
+      drained.push(ts);
+      for (const id of Array.isArray(inj.nodeIds) ? inj.nodeIds : []) {
+        if (id && !seen.has(id)) { seen.add(id); nodeIds.push(id); }
+      }
+    }
+
+    // Confidence bump — per layer, rewriting only the layer that changed.
+    let applied = 0;
+    if (nodeIds.length > 0) {
+      const bump = (nodes: DomainNode[]): number => {
+        let changed = 0;
+        for (const n of nodes) {
+          if (!seen.has(n.id)) continue;
+          const cur = clamp01(typeof n.confidence === "number" && Number.isFinite(n.confidence) ? n.confidence : 0);
+          const next = clamp01(cur + (outcome === "pass" ? delta : -delta));
+          if (next !== cur) { n.confidence = next; changed++; }
+        }
+        return changed;
+      };
+      const proj = readProjectNodes();
+      const projChanged = bump(proj);
+      const shared = readSharedNodes();
+      const sharedChanged = bump(shared);
+      if (projChanged > 0) writeNodes(proj);
+      if (sharedChanged > 0) writeSharedNodes(shared);
+      applied = projChanged + sharedChanged;
+      // The confidence rewrite changes the nodes-file fingerprint, so
+      // ensureIndex() rebuilds from disk on the next queryDomain and the BM25
+      // priors see the new confidence. Deliberately NOT syncCacheAfterTouch —
+      // that path syncs only the worm fields (accessCount/lastAccessed).
+    }
+
+    // Claim marker — appended in the same tick as the check above. Written even
+    // when nothing applied (nodeIds: []) as long as injections were drained, so
+    // query misses don't pile up as permanent unclaimed records; but a no-op
+    // call with nothing to drain appends nothing (rewards.ndjson stays clean).
+    if (drained.length > 0 || applied > 0) {
+      try {
+        mkdirSync(SHARED_DIR, { recursive: true });
+        appendFileSync(
+          rewardsPath,
+          JSON.stringify({ ts: new Date().toISOString(), outcome, nodeIds, delta, note, claimedInjectionTs: drained }) + "\n",
+        );
+      } catch { /* best-effort — losing the marker risks a re-drain, never corruption */ }
+    }
+    return { applied };
+  } catch { return { applied: 0 }; }
+}
+
 // Worm — update lastAccessed + accessCount for the given node ids (rewrite). Low-frequency:
 // only the matched subset changes, and only when something matched.
 // IMPORTANT: Only touches project-layer (BASE_DIR) nodes — shared-layer nodes are
@@ -468,6 +585,36 @@ export function evictSharedStale(maxAgeDays = 60, maxNodes = 2000): { removed: n
   } catch { return { removed: 0, kept: 0 }; }
 }
 
+// ── Ghost-edge sweep (v0.16.0 Phase 2, knowledge-retrieval-redesign 02편) ────
+// Judgment set = the UNION of node ids across BOTH layers (project + shared).
+// An edge is a GHOST when EITHER endpoint is missing from that union (an edge
+// survives only if both ends resolve) — deliberately NOT a per-layer check.
+// Rationale: autoLinkKeywords picks candidates via queryDomain (both layers
+// merged) but appends into the shared edge file, so shared edges legitimately
+// point at project-layer node ids (and vice versa). A strict per-layer test
+// would delete those healthy cross-layer edges (phase2-brief 스캔 반영 결정 1).
+//
+// Rewrite safety: a layer is rewritten only when its edge set actually shrank;
+// and since readNdjson() returns [] for an unparseable file, a corrupt layer
+// yields an empty "before" set → nothing to remove → that layer is never
+// rewritten from a failed parse (no mass-wipe on partial corruption).
+export function sweepDeadEdges(): { removed: number; kept: number } {
+  try {
+    const ids = new Set(readNodes().map((n) => n.id));
+    const alive = (e: DomainEdge): boolean => ids.has(e.from) && ids.has(e.to);
+    const projEdges = readNdjson<DomainEdge>(edgesFile());
+    const sharedEdges = readNdjson<DomainEdge>(sharedEdgesFile());
+    const projKept = projEdges.filter(alive);
+    const sharedKept = sharedEdges.filter(alive);
+    const removed = (projEdges.length - projKept.length) + (sharedEdges.length - sharedKept.length);
+    if (removed > 0) {
+      if (projKept.length !== projEdges.length) writeProjectEdges(projKept);
+      if (sharedKept.length !== sharedEdges.length) writeSharedEdges(sharedKept);
+    }
+    return { removed, kept: projKept.length + sharedKept.length };
+  } catch { return { removed: 0, kept: 0 }; }
+}
+
 // Follow edges originating at nodeId, optionally filtered by rel; returns target nodes.
 export function traverse(nodeId: string, rel?: Relation): DomainNode[] {
   const byId = new Map(readNodes().map((n) => [n.id, n] as const));
@@ -484,13 +631,17 @@ export function traverse(nodeId: string, rel?: Relation): DomainNode[] {
 // the nearest seed; 0 = seed itself).
 //
 // Guards against graph explosion: (1) maxDepth caps depth, (2) a visited Set
-// breaks cycles, (3) maxNodes (default 60) caps total nodes returned.
+// breaks cycles, (3) maxNodes (default 60) caps total nodes returned,
+// (4) UC_FANOUT_CAP (default 12 — 예시값, 튜닝 필요) caps how many neighbors a
+// single hub node may expand per BFS step.
 export function traverseNeighborhood(
   seedNodeIds: string[],
   maxDepth = 2,
   opts: { maxNodes?: number } = {},
 ): { nodes: DomainNode[]; edges: DomainEdge[] } {
   const maxNodes = opts.maxNodes ?? 60;
+  // Fanout cap: env-configurable like the rank weights (envWeight pattern).
+  const fanoutCap = Math.max(1, Math.round(envWeight("UC_FANOUT_CAP", 12)));
   const allNodes = readNodes();
   const allEdges = readEdges();
   const byId = new Map(allNodes.map((n) => [n.id, n] as const));
@@ -527,7 +678,19 @@ export function traverseNeighborhood(
     const cur = frontier.shift() as string;
     const d = distance.get(cur) ?? 0;
     if (d >= maxDepth) continue; // don't expand past maxDepth
-    for (const nxt of adj.get(cur) ?? []) {
+    // Deterministic fanout: sort neighbor candidates by target ts desc (id
+    // tiebreak) BEFORE applying the cap — adjacency Sets iterate in file order,
+    // so an unsorted slice would make results depend on append history.
+    // Targets missing from the node store (ghost edges) sort last (-1 sentinel)
+    // and are dropped first by the cap; the collect step filters them anyway.
+    const nbrs = [...(adj.get(cur) ?? [])]
+      .sort((a, b) => {
+        const ta = byId.get(a);
+        const tb = byId.get(b);
+        return (tb ? safeTs(tb.ts) : -1) - (ta ? safeTs(ta.ts) : -1) || (a < b ? -1 : a > b ? 1 : 0);
+      })
+      .slice(0, fanoutCap);
+    for (const nxt of nbrs) {
       if (visited.has(nxt)) continue;
       visited.add(nxt);
       distance.set(nxt, d + 1);
@@ -597,6 +760,13 @@ export function saveInvestigationResult(keywords: string[], result: string, sour
 /** Auto-form mesh edges: find nodes whose keywords overlap with ours by >= minOverlap,
  *  and create related-to edges. Caps at maxLinks to avoid hub explosion. */
 function autoLinkKeywords(nodeId: string, keywords: string[], minOverlap = 2, maxLinks = 8): void {
+  // v0.16.0 BEHAVIOR CHANGE: auto-link mesh edges are now OPT-IN — this gate is
+  // OFF by default (enable via env UC_AUTOLINK=1, or HarnessCfg.domainAutoLink).
+  // Rationale: keyword-overlap edges accumulate faster than they help on a
+  // mature DB (mesh noise); legacy 'auto:' edges can be purged by the v0.16
+  // migration. saveInvestigationResult itself is unchanged.
+  const gate = (process.env.UC_AUTOLINK ?? "").toLowerCase();
+  if (gate !== "1" && gate !== "true") return;
   if (keywords.length < minOverlap) return;
   try {
     const candidates = queryDomain(keywords);

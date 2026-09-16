@@ -26,6 +26,10 @@ let stateDir: string;
 let sharedDir: string;
 
 before(() => {
+  // v0.16.0: auto-link is OFF by default (UC_AUTOLINK gate in domain.ts).
+  // These tests verify the auto-linking behavior itself, so opt in explicitly —
+  // this restores the pre-0.16.0 behavior these tests were written against.
+  process.env.UC_AUTOLINK = "1";
   // Create a realistic .../projects/<hash>/ structure so initDomain can derive SHARED_DIR.
   const root = mkdtempSync(join(tmpdir(), "uc-mesh-"));
   stateDir = join(root, "projects", "testhash123");
@@ -35,6 +39,7 @@ before(() => {
 });
 
 after(() => {
+  delete process.env.UC_AUTOLINK;
   // Clean the whole root (stateDir parent).
   try {
     const root = join(stateDir, "..", "..");

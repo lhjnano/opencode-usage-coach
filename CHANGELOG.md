@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-16
+
+### Changed
+- **Graph hygiene (Phase 2).** `sweepDeadEdges()` runs on `session.idle` next to `evictStale`:
+  removes edges whose `from`/`to` endpoints are missing from the **union of both node layers**
+  (project + shared — cross-layer edges survive). Rewrites only the layer that shrank.
+  Measured on the live DB: 6,139 dangling edges (63.5%) removed; the remaining 9,893 are all
+  keyword-sharing `auto:` edges.
+- **Hub fanout cap.** `traverseNeighborhood` now follows at most `UC_FANOUT_CAP` (default 12,
+  tuning candidate) neighbors per node, chosen deterministically (target-node `ts` desc + id
+  tiebreak) instead of file order — hub nodes (max degree 49) no longer flood BFS expansion.
+- **`autoLinkKeywords` is OFF by default.** Auto `related-to` mesh edges ("keyword soup"
+  amplifiers) are no longer created on `saveInvestigationResult`. **Behavior change** — enable
+  via `UC_AUTOLINK=1` or `harness.config.json` `domainAutoLink: true` (config overrides env at
+  init). Node saves themselves are unchanged.
+
+### Added
+- **Reward closed loop (minimal).** `applyReward(outcome, note?)` drains every unclaimed
+  injection record (`injections.ndjson`, logged by v0.15.0) and pays confidence ±`UC_REWARD_DELTA`
+  (default 0.05, clamped 0..1) on the injected nodes, appending a claim to `rewards.ndjson`
+  (`{ts, outcome, nodeIds, delta, note, claimedInjectionTs}` — append-only, sync claim check).
+  Wired into `grade` and `grade_batch` (per-task, note `batch #<id> <title>`) **only on clear
+  PASS/FAIL verdicts**; `verify_diagnosis` is intentionally not wired. Double-claim safe.
+- **`scripts/migrate-v016.mjs`** — one-shot maintenance: backs up `shared/*.ndjson`, sweeps
+  dead edges (line-tolerant parsing — bad lines are skipped and counted, never nuke-on-parse),
+  and with `--purge-auto` removes all `related-to` edges whose note starts with `auto:`.
+  `--dry-run` prints stats only.
+
+### Migration
+Run `node scripts/migrate-v016.mjs --purge-auto` once after upgrading to drop the 9,893
+legacy auto edges (the graph stays empty of mesh edges until the learning loop creates
+curated ones — intended end state of the redesign).
+
 ## [0.15.0] - 2026-09-16
 
 ### Changed

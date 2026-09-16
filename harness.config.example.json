@@ -1,8 +1,9 @@
 {
-  "_comment": "Harness config. Override per-workdir or in ~/.config/opencode-usage-coach/harness.config.json. provider: which codexbar quota to watch (empty = codexbar default). lighterModel: suggested when throttling. Free models have no quota -> never gated. domainMaxNodes: cap on domain DB nodes injected into generate/investigate prompts (default 12; unset/0 uses the default).",
+  "_comment": "Harness config. Override per-workdir or in ~/.config/opencode-usage-coach/harness.config.json. provider: which codexbar quota to watch (empty = codexbar default). lighterModel: suggested when throttling. Free models have no quota -> never gated. domainMaxNodes: cap on domain DB nodes injected into generate/investigate prompts (default 12; unset/0 uses the default). domainAutoLink: enable keyword-overlap mesh edges when saving facts (default false; overrides UC_AUTOLINK env when set).",
   "generator": "opencode/deepseek-v4-flash-free",
   "grader": "opencode/mimo-v2.5-free",
   "provider": "",
   "lighterModel": "",
-  "domainMaxNodes": 12
+  "domainMaxNodes": 12,
+  "domainAutoLink": false
 }

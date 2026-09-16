@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
-import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, addDomainEdge, readNodes, readEdges, logDomainInjection } from "./domain.js";
+import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, sweepDeadEdges, addDomainEdge, readNodes, readEdges, logDomainInjection, applyReward } from "./domain.js";
 import type { DomainNode } from "./domain.js";
 import { searchContext as webSearch, type WebResult } from "./web-search.js";
 
@@ -541,6 +541,17 @@ function findActiveTaskId(sessionID: string, status: string): number | undefined
   } catch { return undefined; }
 }
 
+// Task title lookup for reward notes (applyReward wiring). Best-effort: undefined
+// when harness state is absent or the task has no usable title — applyReward
+// treats note as optional.
+function harnessTaskTitle(sessionID: string, taskId: number | undefined): string | undefined {
+  if (taskId === undefined) return undefined;
+  try {
+    const t = readHarness(sessionID)?.tasks.find((x: any) => x.id === taskId);
+    return typeof t?.title === "string" && t.title ? t.title : undefined;
+  } catch { return undefined; }
+}
+
 // ── Unknown Scan types + helpers ──────────────────────────────────────────
 // Pre-flight gap analysis (unknown-scan-design.md): scans the codebase against
 // the user's tasks BEFORE generate, finding blind spots that would waste
@@ -990,7 +1001,7 @@ function checkScanGate(sessionID: string): { warning: string | null; summary: st
 }
 
 // Read harness config (workdir > global). Used by generate/grade tools + quota provider.
-type HarnessCfg = { generator?: string; grader?: string; provider?: string; lighterModel?: string; maxSteps?: number; domainMaxNodes?: number };
+type HarnessCfg = { generator?: string; grader?: string; provider?: string; lighterModel?: string; maxSteps?: number; domainMaxNodes?: number; domainAutoLink?: boolean };
 function readHarnessCfg(dir: string): HarnessCfg {
   const tryRead = (p: string): HarnessCfg => {
     try { if (existsSync(p)) return JSON.parse(readFileSync(p, "utf8")); } catch { /* */ }
@@ -1431,6 +1442,10 @@ export default async function UsageCoachPlugin(input: {
     // Provider + lighter model: env > config > empty (codexbar picks its default).
     // No hardcoded provider — this plugin is provider-agnostic.
     const cfg0 = readHarnessCfg(input.directory);
+    // Auto-link gate priority: HarnessCfg.domainAutoLink (when defined) overrides the
+    // UC_AUTOLINK env var — the domain gate (autoLinkKeywords) reads env, so we project
+    // the cfg value onto process.env at load time. When cfg is unset, env alone controls.
+    if (cfg0.domainAutoLink !== undefined) process.env.UC_AUTOLINK = cfg0.domainAutoLink ? "1" : "0";
     const PROVIDER = process.env.UC_PROVIDER ?? cfg0.provider ?? "";
     const LIGHTER = process.env.UC_LIGHTER_MODEL ?? cfg0.lighterModel ?? "a lighter model";
     let last: Coaching | null = null;
@@ -1501,7 +1516,7 @@ export default async function UsageCoachPlugin(input: {
         try {
           if (event.type === "session.created" || event.type === "session.idle") refreshBackground();
           // Worm (GC): run the domain-DB eviction on idle. Cheap no-op when nothing is stale.
-          if (event.type === "session.idle") { try { const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } }
+          if (event.type === "session.idle") { try { const r = evictStale(WORM_MAX_AGE_DAYS, WORM_MAX_NODES); if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`); } catch (e) { log(`evictStale err: ${String(e)}`); } try { const s = sweepDeadEdges(); log(`sweepDeadEdges: removed ${s.removed}, kept ${s.kept}`); } catch (e) { log(`sweepDeadEdges err: ${String(e)}`); } }
         }
         catch (e) { log(`event err: ${String(e)}`); }
       },
@@ -2105,11 +2120,22 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
               gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : undefined);
             // Determine verdict from the first non-empty line.
             let verdict = "FAIL";
+            let verdictClear = false; // true only when the line explicitly matched pass/fail
             if (!out.startsWith("ERROR:")) {
               const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
-              if (/^pass\b/i.test(f)) verdict = "PASS";
-              else if (/^fail\b/i.test(f)) verdict = "FAIL";
+              if (/^pass\b/i.test(f)) { verdict = "PASS"; verdictClear = true; }
+              else if (/^fail\b/i.test(f)) { verdict = "FAIL"; verdictClear = true; }
               else verdict = "FAIL"; // no clear verdict -> FAIL to trigger a revise
+            }
+            // Reward closed loop (v0.16.0): a CLEAR verdict pays confidence ±δ on the
+            // generate-phase injections (applyReward drains every unclaimed injection).
+            // Unclear verdicts (ERROR: / no pass-fail match) pay nothing — no reward.
+            // Best-effort: a reward bug must never break grading.
+            if (verdictClear) {
+              try {
+                const r = applyReward(verdict === "PASS" ? "pass" : "fail", harnessTaskTitle(ctx.sessionID, gradeTaskId));
+                log(`applyReward(${verdict.toLowerCase()}): applied ${r.applied}`);
+              } catch (e) { log(`applyReward err: ${String(e)}`); }
             }
             const next = verdict === "PASS"
               ? `\n[usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).`
@@ -2148,10 +2174,23 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
 
               // Parse verdict from first non-empty line
               let verdict = "FAIL";
+              let verdictClear = false; // true only when the line explicitly matched pass/fail
               if (!out.startsWith("ERROR:")) {
                 const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
-                if (/^pass\b/i.test(f)) verdict = "PASS";
-                else if (/^fail\b/i.test(f)) verdict = "FAIL";
+                if (/^pass\b/i.test(f)) { verdict = "PASS"; verdictClear = true; }
+                else if (/^fail\b/i.test(f)) { verdict = "FAIL"; verdictClear = true; }
+              }
+              // Reward closed loop (v0.16.0): pay per-task verdict, note = "batch #<id> <title>".
+              // applyReward's drain is one synchronous read-check-append block, so batch tasks
+              // resolved in any order stay consistent — the FIRST reward call drains ALL
+              // unclaimed injections; later calls in the same batch drain nothing and append
+              // no reward record. Best-effort like grade().
+              if (verdictClear) {
+                try {
+                  const title = harnessTaskTitle(ctx.sessionID, t.id);
+                  const r = applyReward(verdict === "PASS" ? "pass" : "fail", title ? `batch #${t.id} ${title}` : `batch #${t.id}`);
+                  log(`applyReward(${verdict.toLowerCase()}) batch #${t.id}: applied ${r.applied}`);
+                } catch (e) { log(`applyReward err: ${String(e)}`); }
               }
 
               const next = verdict === "PASS"
