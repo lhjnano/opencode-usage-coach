@@ -51,11 +51,38 @@ function addDomainEdge(edge) {
 function readProjectNodes() {
   return readNdjson(nodesFile());
 }
+function readSharedNodes() {
+  return readNdjson(sharedNodesFile());
+}
 function writeNodes(nodes) {
   try {
     mkdirSync(BASE_DIR, { recursive: true });
     const lines = nodes.map((n) => JSON.stringify(n));
     writeFileSync(nodesFile(), lines.length ? lines.join("\n") + "\n" : "");
+  } catch {
+  }
+}
+function writeSharedNodes(nodes) {
+  try {
+    mkdirSync(SHARED_DIR, { recursive: true });
+    const lines = nodes.map((n) => JSON.stringify(n));
+    writeFileSync(sharedNodesFile(), lines.length ? lines.join("\n") + "\n" : "");
+  } catch {
+  }
+}
+function writeProjectEdges(edges) {
+  try {
+    mkdirSync(BASE_DIR, { recursive: true });
+    const lines = edges.map((e) => JSON.stringify(e));
+    writeFileSync(edgesFile(), lines.length ? lines.join("\n") + "\n" : "");
+  } catch {
+  }
+}
+function writeSharedEdges(edges) {
+  try {
+    mkdirSync(SHARED_DIR, { recursive: true });
+    const lines = edges.map((e) => JSON.stringify(e));
+    writeFileSync(sharedEdgesFile(), lines.length ? lines.join("\n") + "\n" : "");
   } catch {
   }
 }
@@ -239,6 +266,83 @@ function logDomainInjection(keywords, nodeIds) {
   } catch {
   }
 }
+function readNdjsonTolerant(path) {
+  try {
+    if (!existsSync(path)) return [];
+    const out = [];
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+function applyReward(outcome, note) {
+  try {
+    const injectionsPath = join(SHARED_DIR, "injections.ndjson");
+    const rewardsPath = join(SHARED_DIR, "rewards.ndjson");
+    const delta = envWeight("UC_REWARD_DELTA", 0.05);
+    const claimed = /* @__PURE__ */ new Set();
+    for (const r of readNdjsonTolerant(rewardsPath)) {
+      for (const ts of Array.isArray(r.claimedInjectionTs) ? r.claimedInjectionTs : []) claimed.add(ts);
+    }
+    const drained = [];
+    const nodeIds = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const inj of readNdjsonTolerant(injectionsPath)) {
+      const ts = typeof inj.ts === "string" ? inj.ts : "";
+      if (!ts || claimed.has(ts)) continue;
+      drained.push(ts);
+      for (const id of Array.isArray(inj.nodeIds) ? inj.nodeIds : []) {
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          nodeIds.push(id);
+        }
+      }
+    }
+    let applied = 0;
+    if (nodeIds.length > 0) {
+      const bump = (nodes) => {
+        let changed = 0;
+        for (const n of nodes) {
+          if (!seen.has(n.id)) continue;
+          const cur = clamp01(typeof n.confidence === "number" && Number.isFinite(n.confidence) ? n.confidence : 0);
+          const next = clamp01(cur + (outcome === "pass" ? delta : -delta));
+          if (next !== cur) {
+            n.confidence = next;
+            changed++;
+          }
+        }
+        return changed;
+      };
+      const proj = readProjectNodes();
+      const projChanged = bump(proj);
+      const shared = readSharedNodes();
+      const sharedChanged = bump(shared);
+      if (projChanged > 0) writeNodes(proj);
+      if (sharedChanged > 0) writeSharedNodes(shared);
+      applied = projChanged + sharedChanged;
+    }
+    if (drained.length > 0 || applied > 0) {
+      try {
+        mkdirSync(SHARED_DIR, { recursive: true });
+        appendFileSync(
+          rewardsPath,
+          JSON.stringify({ ts: (/* @__PURE__ */ new Date()).toISOString(), outcome, nodeIds, delta, note, claimedInjectionTs: drained }) + "\n"
+        );
+      } catch {
+      }
+    }
+    return { applied };
+  } catch {
+    return { applied: 0 };
+  }
+}
 function touchNodes(ids) {
   if (ids.size === 0) return;
   try {
@@ -278,8 +382,27 @@ function evictStale(maxAgeDays = 30, maxNodes = 1e3) {
     return { removed: 0, kept: 0 };
   }
 }
+function sweepDeadEdges() {
+  try {
+    const ids = new Set(readNodes().map((n) => n.id));
+    const alive = (e) => ids.has(e.from) && ids.has(e.to);
+    const projEdges = readNdjson(edgesFile());
+    const sharedEdges = readNdjson(sharedEdgesFile());
+    const projKept = projEdges.filter(alive);
+    const sharedKept = sharedEdges.filter(alive);
+    const removed = projEdges.length - projKept.length + (sharedEdges.length - sharedKept.length);
+    if (removed > 0) {
+      if (projKept.length !== projEdges.length) writeProjectEdges(projKept);
+      if (sharedKept.length !== sharedEdges.length) writeSharedEdges(sharedKept);
+    }
+    return { removed, kept: projKept.length + sharedKept.length };
+  } catch {
+    return { removed: 0, kept: 0 };
+  }
+}
 function traverseNeighborhood(seedNodeIds, maxDepth = 2, opts = {}) {
   const maxNodes = opts.maxNodes ?? 60;
+  const fanoutCap = Math.max(1, Math.round(envWeight("UC_FANOUT_CAP", 12)));
   const allNodes = readNodes();
   const allEdges = readEdges();
   const byId = new Map(allNodes.map((n) => [n.id, n]));
@@ -310,7 +433,12 @@ function traverseNeighborhood(seedNodeIds, maxDepth = 2, opts = {}) {
     const cur = frontier.shift();
     const d = distance.get(cur) ?? 0;
     if (d >= maxDepth) continue;
-    for (const nxt of adj.get(cur) ?? []) {
+    const nbrs = [...adj.get(cur) ?? []].sort((a, b) => {
+      const ta = byId.get(a);
+      const tb = byId.get(b);
+      return (tb ? safeTs(tb.ts) : -1) - (ta ? safeTs(ta.ts) : -1) || (a < b ? -1 : a > b ? 1 : 0);
+    }).slice(0, fanoutCap);
+    for (const nxt of nbrs) {
       if (visited.has(nxt)) continue;
       visited.add(nxt);
       distance.set(nxt, d + 1);
@@ -362,6 +490,8 @@ function saveInvestigationResult(keywords, result, source, confidence = 0.7) {
   }
 }
 function autoLinkKeywords(nodeId, keywords, minOverlap = 2, maxLinks = 8) {
+  const gate = (process.env.UC_AUTOLINK ?? "").toLowerCase();
+  if (gate !== "1" && gate !== "true") return;
   if (keywords.length < minOverlap) return;
   try {
     const candidates = queryDomain(keywords);
@@ -1146,6 +1276,15 @@ function findActiveTaskId(sessionID, status) {
     const h = readHarness(sessionID);
     if (!h) return void 0;
     return h.tasks.find((x) => x.status === status)?.id;
+  } catch {
+    return void 0;
+  }
+}
+function harnessTaskTitle(sessionID, taskId) {
+  if (taskId === void 0) return void 0;
+  try {
+    const t = readHarness(sessionID)?.tasks.find((x) => x.id === taskId);
+    return typeof t?.title === "string" && t.title ? t.title : void 0;
   } catch {
     return void 0;
   }
@@ -1973,6 +2112,7 @@ async function UsageCoachPlugin(input) {
     setStateDir(input.directory);
     initDomain(STATE_DIR);
     const cfg0 = readHarnessCfg(input.directory);
+    if (cfg0.domainAutoLink !== void 0) process.env.UC_AUTOLINK = cfg0.domainAutoLink ? "1" : "0";
     const PROVIDER = process.env.UC_PROVIDER ?? cfg0.provider ?? "";
     const LIGHTER = process.env.UC_LIGHTER_MODEL ?? cfg0.lighterModel ?? "a lighter model";
     let last = null;
@@ -2050,6 +2190,12 @@ async function UsageCoachPlugin(input) {
               if (r.removed) log(`evictStale: removed ${r.removed}, kept ${r.kept} (maxAge=${WORM_MAX_AGE_DAYS}d, maxNodes=${WORM_MAX_NODES})`);
             } catch (e) {
               log(`evictStale err: ${String(e)}`);
+            }
+            try {
+              const s = sweepDeadEdges();
+              log(`sweepDeadEdges: removed ${s.removed}, kept ${s.kept}`);
+            } catch (e) {
+              log(`sweepDeadEdges err: ${String(e)}`);
             }
           }
         } catch (e) {
@@ -2781,11 +2927,24 @@ ${priorNotes}
               gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : void 0
             );
             let verdict = "FAIL";
+            let verdictClear = false;
             if (!out.startsWith("ERROR:")) {
               const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
-              if (/^pass\b/i.test(f)) verdict = "PASS";
-              else if (/^fail\b/i.test(f)) verdict = "FAIL";
-              else verdict = "FAIL";
+              if (/^pass\b/i.test(f)) {
+                verdict = "PASS";
+                verdictClear = true;
+              } else if (/^fail\b/i.test(f)) {
+                verdict = "FAIL";
+                verdictClear = true;
+              } else verdict = "FAIL";
+            }
+            if (verdictClear) {
+              try {
+                const r = applyReward(verdict === "PASS" ? "pass" : "fail", harnessTaskTitle(ctx.sessionID, gradeTaskId));
+                log(`applyReward(${verdict.toLowerCase()}): applied ${r.applied}`);
+              } catch (e) {
+                log(`applyReward err: ${String(e)}`);
+              }
             }
             const next = verdict === "PASS" ? `
 [usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).` : `
@@ -2831,10 +2990,25 @@ The next generate call will automatically include the new rule.`;
                 gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : void 0
               );
               let verdict = "FAIL";
+              let verdictClear = false;
               if (!out.startsWith("ERROR:")) {
                 const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
-                if (/^pass\b/i.test(f)) verdict = "PASS";
-                else if (/^fail\b/i.test(f)) verdict = "FAIL";
+                if (/^pass\b/i.test(f)) {
+                  verdict = "PASS";
+                  verdictClear = true;
+                } else if (/^fail\b/i.test(f)) {
+                  verdict = "FAIL";
+                  verdictClear = true;
+                }
+              }
+              if (verdictClear) {
+                try {
+                  const title = harnessTaskTitle(ctx.sessionID, t.id);
+                  const r = applyReward(verdict === "PASS" ? "pass" : "fail", title ? `batch #${t.id} ${title}` : `batch #${t.id}`);
+                  log(`applyReward(${verdict.toLowerCase()}) batch #${t.id}: applied ${r.applied}`);
+                } catch (e) {
+                  log(`applyReward err: ${String(e)}`);
+                }
               }
               const next = verdict === "PASS" ? `[usage-coach NEXT] task ${t.id}: PASS -> task_update(${t.id}, title, "completed", "PASS"), then proceed.` : `[usage-coach NEXT] task ${t.id}: FAIL -> if revisions < 2: task_update(${t.id}, title, "revising") + generate({prompt:"Apply feedback:\\n${out.slice(0, 500)}\\nTask: {title}"}); else: record_failure + investigate + verify + generalize, then task_update(${t.id}, title, "failed", "FAIL").`;
               return { id: t.id, result: `[task ${t.id}] ${verdict}
