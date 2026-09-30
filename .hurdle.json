@@ -1,0 +1,8 @@
+{
+  "exclude": ["node_modules/", "dist/", "coverage/", "*.tgz"],
+  "allowlist": {
+    "src/tui-logic.ts": "pure render logic extracted from tui.tsx for testability — fully covered by test/tui-render.test.ts (77 tests), which is named after the feature, not the module",
+    "eslint.config.js": "lint config — exercised on every CI run via `biome/lint` jobs, not unit-testable in isolation",
+    "tsup.config.ts": "bundler config — exercised by every `npm pack`/CI build, not unit-testable in isolation"
+  }
+}
