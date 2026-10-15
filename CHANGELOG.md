@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-09-30
+
+### Added
+- **Deterministic grade checks** — `grade()` and `grade_batch()` accept a `checks`
+  array (`file-exists`, `grep` + `minCount`, `grep-absent`, `line-count`). When
+  present, checks are evaluated locally (milliseconds, no model call) and the
+  verdict is computed from them — the grader model is skipped entirely. Addresses
+  the observed harness bottleneck where mechanical tasks (conversions,
+  extractions, scaffolds) paid a full grader round-trip for what a grep can
+  prove. Directory grep walks skip `node_modules`/`.git`/`dist`/`coverage`,
+  cap file size (2MB) and file count (2000); invalid regex / unknown check
+  types / empty check lists are FAILs, not crashes. Deterministic verdicts are
+  CLEAR verdicts and pay into the reward loop like model verdicts.
+
+### Changed
+- Step-limit abort errors now include the elapsed time and a split-before-start
+  rule of thumb, reflecting the observed retry cost of oversized tasks.
+
 ## [0.17.1] - 2026-09-16
 
 ### Docs

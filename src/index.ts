@@ -19,6 +19,7 @@ import { tool } from "@opencode-ai/plugin";
 import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, evictSharedStale, sweepDeadEdges, addDomainEdge, readNodes, readEdges, logDomainInjection, applyReward } from "./domain.js";
 import type { DomainNode } from "./domain.js";
 import { searchContext as webSearch, type WebResult } from "./web-search.js";
+import { evalChecks, formatCheckReport, type GradeCheck } from "./grade-checks.js";
 
 const PLUGIN_NAME = "opencode-usage-coach";
 const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
@@ -1163,7 +1164,7 @@ async function runModel(client: any, model: string, prompt: string, directory: s
         return `ERROR: stalled — no message-stream progress for ${Math.round(STALL_MS / 60000)} min (step ${lastStepSeen}/${maxSteps}). The sub-session was wedged (observed today as the 837s no-output case). Retry this task individually with generate(); if it stalls again, split it.\n[usage-coach NEXT] re-run the stalled task alone via generate(), or split it.`;
       }
       log(`runModel(${model}): TIMED OUT after ${elapsed}s (${maxSteps} steps exceeded)`);
-      return `Task appears too large (exceeded ${maxSteps} steps). Consider splitting into smaller subtasks.\n[usage-coach NEXT] split the original task into smaller subtasks (each should complete within ${maxSteps} steps), then re-run generate for each subtask.`;
+      return `Task appears too large (exceeded ${maxSteps} steps, aborted after ${Math.round(elapsed)}s). Consider splitting into smaller subtasks.\n[usage-coach NEXT] split the original task into smaller subtasks (each should complete within ${maxSteps} steps), then re-run generate for each subtask. Rule of thumb from observed costs: split BEFORE starting when the task needs >1 output file or >1 distinct transformation — a failed oversized run costs the full step budget again on retry.`;
     }
 
     // Normal completion: extract assistant text from the response parts.
@@ -2150,9 +2151,32 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           },
         }),
         grade: tool({
-          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line + a [usage-coach NEXT] directive. Falls back to generator if grader quota is out.",
-          args: { prompt: tool.schema.string() },
-          async execute(args: { prompt: string }, ctx: any) {
+          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line + a [usage-coach NEXT] directive. Falls back to generator if grader quota is out. For MECHANICAL tasks (conversions, extraction, scaffolds), pass `checks` instead — deterministic file/grep verification runs locally in milliseconds and the grader model is skipped entirely.",
+          args: {
+            prompt: tool.schema.string().describe("What is being graded (context for the verdict; shown in the result)."),
+            checks: tool.schema.array(tool.schema.object({
+              type: tool.schema.enum(["file-exists", "grep", "grep-absent", "line-count"]),
+              path: tool.schema.string().optional().describe("Relative path (file for file-exists/line-count; file OR dir for grep, default '.' = recursive scan skipping node_modules/.git/dist)."),
+              pattern: tool.schema.string().optional().describe("Regex for grep / grep-absent."),
+              minCount: tool.schema.number().optional().describe("grep: minimum total matches (default 1)."),
+              min: tool.schema.number().optional().describe("line-count: minimum non-empty lines."),
+              max: tool.schema.number().optional().describe("line-count: maximum non-empty lines."),
+            })).optional().describe("Deterministic checks — when present, ALL are evaluated locally and the verdict is computed without a model call. Use for mechanical verifications; keep model grading for judgment calls."),
+          },
+          async execute(args: { prompt: string; checks?: Array<Record<string, any>> }, ctx: any) {
+            // Deterministic path (v0.18.0): checks replace the grader-model round-trip.
+            if (args.checks && args.checks.length > 0) {
+              const r = evalChecks(ctx.directory, args.checks as unknown as GradeCheck[]);
+              // Reward loop: a deterministic verdict is a CLEAR verdict — pay it too.
+              try {
+                const gr2 = applyReward(r.pass ? "pass" : "fail", harnessTaskTitle(ctx.sessionID, findActiveTaskId(ctx.sessionID, "grading")));
+                log(`applyReward(${r.pass ? "pass" : "fail"}): applied ${gr2.applied}`);
+              } catch (e) { log(`applyReward err: ${String(e)}`); }
+              const next2 = r.pass
+                ? `\n[usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).`
+                : `\n[usage-coach NEXT] FAIL -> if revisions < 2: task_update(i, title, "revising", revisions+1) + generate({prompt: "Apply feedback:\\n{grade result}\\nTask: {title}"}); else: run the learning loop (record_failure -> investigate -> verify_diagnosis -> generalize), then task_update(i, title, "failed", "FAIL").`;
+              return `${r.pass ? "PASS" : "FAIL"}\n(verified by ${r.results.length} deterministic check(s) — grader model skipped)\n${formatCheckReport(r)}\ngraded claim: ${args.prompt.slice(0, 300)}\n${next2}`;
+            }
             const cfg = readHarnessCfg(ctx.directory);
             const model = cfg.grader ?? cfg.generator;
             if (!model) return "FAIL\n(ERROR: no grader/generator model configured.)\n[usage-coach NEXT] configure grader in harness.config.json, then retry grade.";
@@ -2190,9 +2214,17 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             tasks: tool.schema.array(tool.schema.object({
               id: tool.schema.number().describe("Task ID (must match the task_update ID)."),
               prompt: tool.schema.string().describe("The grading prompt for this task (same format as grade())."),
+              checks: tool.schema.array(tool.schema.object({
+                type: tool.schema.enum(["file-exists", "grep", "grep-absent", "line-count"]),
+                path: tool.schema.string().optional(),
+                pattern: tool.schema.string().optional(),
+                minCount: tool.schema.number().optional(),
+                min: tool.schema.number().optional(),
+                max: tool.schema.number().optional(),
+              })).optional().describe("Deterministic checks — when present, the model call is skipped (see grade())."),
             })).describe("One entry per task to grade. All run in parallel on GO."),
           },
-          async execute(args: { tasks: Array<{ id: number; prompt: string }> }, ctx: any) {
+          async execute(args: { tasks: Array<{ id: number; prompt: string; checks?: Array<Record<string, any>> }> }, ctx: any) {
             const cfg = readHarnessCfg(ctx.directory);
             const model = cfg.grader ?? cfg.generator;
             if (!model) {
@@ -2208,7 +2240,20 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
             const limit = decision === "THROTTLE" ? 2 : args.tasks.length;
 
             // ── Inner runner: grade a single task ──
-            const gradeOne = async (t: { id: number; prompt: string }): Promise<{ id: number; result: string }> => {
+            const gradeOne = async (t: { id: number; prompt: string; checks?: Array<Record<string, any>> }): Promise<{ id: number; result: string }> => {
+              // Deterministic path (v0.18.0): checks replace the grader-model round-trip.
+              if (t.checks && t.checks.length > 0) {
+                const r = evalChecks(ctx.directory, t.checks as unknown as GradeCheck[]);
+                try {
+                  const title = harnessTaskTitle(ctx.sessionID, t.id);
+                  const rw = applyReward(r.pass ? "pass" : "fail", title ? `batch #${t.id} ${title}` : `batch #${t.id}`);
+                  log(`applyReward(${r.pass ? "pass" : "fail"}) batch #${t.id}: applied ${rw.applied}`);
+                } catch (e) { log(`applyReward err: ${String(e)}`); }
+                const next2 = r.pass
+                  ? `[usage-coach NEXT] task ${t.id}: PASS -> task_update(${t.id}, title, "completed", "PASS"), then proceed.`
+                  : `[usage-coach NEXT] task ${t.id}: FAIL -> if revisions < 2: task_update(${t.id}, title, "revising") + generate({prompt:"Apply feedback:\\n${formatCheckReport(r).slice(0, 500)}\\nTask: {title}"}); else: record_failure + investigate + verify + generalize, then task_update(${t.id}, title, "failed", "FAIL").`;
+                return { id: t.id, result: `[task ${t.id}] ${r.pass ? "PASS" : "FAIL"}\n(verified by ${r.results.length} deterministic check(s) — grader model skipped)\n${formatCheckReport(r)}\n${next2}` };
+              }
               const gradeTaskId = findActiveTaskId(ctx.sessionID, "grading");
               const out = await runModel(input.client, model, buildGradePrompt(t.prompt), ctx.directory,
                 gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : undefined);

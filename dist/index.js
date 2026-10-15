@@ -1,9 +1,9 @@
 // src/index.ts
-import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, appendFileSync as appendFileSync3, readFileSync as readFileSync2, existsSync as existsSync2 } from "fs";
+import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync2, appendFileSync as appendFileSync3, readFileSync as readFileSync3, existsSync as existsSync3 } from "fs";
 import { spawn, spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { homedir as homedir2 } from "os";
-import { join as join3, resolve, dirname as dirname2 } from "path";
+import { join as join4, resolve as resolve2, dirname as dirname2 } from "path";
 import { tool } from "@opencode-ai/plugin";
 
 // src/domain.ts
@@ -767,6 +767,145 @@ async function searchContext(query, frameworks, keyDeps, timeoutMs) {
   return response;
 }
 
+// src/grade-checks.ts
+import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync, statSync as statSync2 } from "fs";
+import { join as join3, relative, resolve } from "path";
+var SKIP_DIRS = /* @__PURE__ */ new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "coverage",
+  ".venv",
+  "__pycache__",
+  ".cache"
+]);
+var MAX_FILE_BYTES = 2 * 1024 * 1024;
+var MAX_WALK_FILES = 2e3;
+var MAX_WALK_DEPTH = 8;
+var TEXT_EXT = /* @__PURE__ */ new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".py",
+  ".go",
+  ".rs",
+  ".c",
+  ".h",
+  ".cpp",
+  ".sh",
+  ".md",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".txt",
+  ".html",
+  ".css",
+  ".sql"
+]);
+function listTextFiles(root, out = [], depth = 0) {
+  if (depth > MAX_WALK_DEPTH || out.length >= MAX_WALK_FILES) return out;
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith(".") || SKIP_DIRS.has(e.name)) continue;
+    const p = join3(root, e.name);
+    if (e.isDirectory()) listTextFiles(p, out, depth + 1);
+    else if (e.isFile()) {
+      const dot = e.name.lastIndexOf(".");
+      const ext = dot >= 0 ? e.name.slice(dot).toLowerCase() : "";
+      if (TEXT_EXT.has(ext)) out.push(p);
+      if (out.length >= MAX_WALK_FILES) break;
+    }
+  }
+  return out;
+}
+function countMatches(re, text) {
+  const flags = re.flags.includes("g") ? re.flags : re.flags + "g";
+  const m = text.match(new RegExp(re.source, flags));
+  return m ? m.length : 0;
+}
+function grepTargets(root, path) {
+  const target = resolve(root, path ?? ".");
+  if (!existsSync2(target)) return [];
+  const st = statSync2(target);
+  if (st.isFile()) return [target];
+  return listTextFiles(target);
+}
+function evalChecks(root, checks) {
+  const results = [];
+  for (const c of checks) {
+    if (c.type === "file-exists") {
+      const full = resolve(root, c.path);
+      const ok = existsSync2(full);
+      results.push({ check: c, pass: ok, detail: `${c.path}: ${ok ? "exists" : "MISSING"}` });
+    } else if (c.type === "grep" || c.type === "grep-absent") {
+      let re;
+      try {
+        re = new RegExp(c.pattern);
+      } catch (e) {
+        results.push({ check: c, pass: false, detail: `invalid regex ${JSON.stringify(c.pattern)}: ${String(e?.message ?? e).slice(0, 80)}` });
+        continue;
+      }
+      const targets = grepTargets(root, c.path);
+      let total = 0;
+      const hits = [];
+      for (const t of targets) {
+        let text;
+        try {
+          if (statSync2(t).size > MAX_FILE_BYTES) continue;
+          text = readFileSync2(t, "utf8");
+        } catch {
+          continue;
+        }
+        const n = countMatches(re, text);
+        if (n > 0) {
+          total += n;
+          if (hits.length < 5) hits.push(`${relative(root, t)}:${n}`);
+        }
+      }
+      if (targets.length === 0) {
+        results.push({ check: c, pass: false, detail: `path ${c.path ?? "."}: no scan targets found` });
+      } else if (c.type === "grep") {
+        const min = c.minCount ?? 1;
+        results.push({ check: c, pass: total >= min, detail: `pattern ${JSON.stringify(c.pattern)}: ${total} match(es), need >= ${min}${hits.length ? " \u2014 e.g. " + hits.join(", ") : ""}` });
+      } else {
+        results.push({ check: c, pass: total === 0, detail: `pattern ${JSON.stringify(c.pattern)}: ${total} match(es), need 0${hits.length ? " \u2014 e.g. " + hits.join(", ") : ""}` });
+      }
+    } else if (c.type === "line-count") {
+      const full = resolve(root, c.path);
+      if (!existsSync2(full) || !statSync2(full).isFile()) {
+        results.push({ check: c, pass: false, detail: `${c.path}: MISSING` });
+        continue;
+      }
+      let n;
+      try {
+        n = readFileSync2(full, "utf8").split("\n").filter((l) => l.trim()).length;
+      } catch {
+        results.push({ check: c, pass: false, detail: `${c.path}: unreadable` });
+        continue;
+      }
+      const minOk = c.min === void 0 || n >= c.min;
+      const maxOk = c.max === void 0 || n <= c.max;
+      results.push({ check: c, pass: minOk && maxOk, detail: `${c.path}: ${n} non-empty lines (min ${c.min ?? "-"}, max ${c.max ?? "-"})` });
+    } else {
+      results.push({ check: c, pass: false, detail: `unknown check type: ${c.type}` });
+    }
+  }
+  return { pass: results.length > 0 && results.every((r) => r.pass), results };
+}
+function formatCheckReport(r) {
+  return r.results.map((x) => `${x.pass ? "PASS" : "FAIL"} [${x.check.type}] ${x.detail}`).join("\n");
+}
+
 // src/index.ts
 var PLUGIN_NAME = "opencode-usage-coach";
 var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
@@ -791,7 +930,7 @@ var WATCHDOG_POLL_MS = Math.max(1e3, Number(process.env.UC_WATCHDOG_POLL_MS ?? 3
 var WALL_TIMEOUT_MS = Math.max(1, Number(process.env.UC_WALL_TIMEOUT_MIN ?? 30) || 30) * 60 * 1e3;
 var STALL_MS = Math.max(0, Number(process.env.UC_STALL_MIN ?? 12) || 0) * 60 * 1e3;
 var DEFAULT_MAX_QUESTIONS = Math.max(1, Math.round(Number(process.env.UC_MAX_QUESTIONS ?? 7)) || 7);
-var PIPE_LOG = join3(homedir2(), ".cache", "opencode-usage-coach", "pipeline.log");
+var PIPE_LOG = join4(homedir2(), ".cache", "opencode-usage-coach", "pipeline.log");
 function pipeLog(msg) {
   try {
     mkdirSync3(dirname2(PIPE_LOG), { recursive: true });
@@ -801,18 +940,18 @@ function pipeLog(msg) {
   }
 }
 pipeLog(`MODULE LOADED | node=${process.version} | pid=${process.pid}`);
-var STATE_DIR = join3(homedir2(), ".cache", "opencode-usage-coach");
-var STATE_FILE = join3(STATE_DIR, "state.json");
-var LOG_FILE = join3(STATE_DIR, "coach.log");
+var STATE_DIR = join4(homedir2(), ".cache", "opencode-usage-coach");
+var STATE_FILE = join4(STATE_DIR, "state.json");
+var LOG_FILE = join4(STATE_DIR, "coach.log");
 function projectStateDir(dir) {
-  const abs = resolve(dir || ".");
+  const abs = resolve2(dir || ".");
   const h = createHash("sha1").update(abs).digest("hex").slice(0, 12);
-  return join3(homedir2(), ".cache", "opencode-usage-coach", "projects", h);
+  return join4(homedir2(), ".cache", "opencode-usage-coach", "projects", h);
 }
 function setStateDir(dir) {
   STATE_DIR = process.env.UC_STATE_DIR ?? projectStateDir(dir);
-  STATE_FILE = join3(STATE_DIR, "state.json");
-  LOG_FILE = join3(STATE_DIR, "coach.log");
+  STATE_FILE = join4(STATE_DIR, "state.json");
+  LOG_FILE = join4(STATE_DIR, "coach.log");
 }
 var NOOP_HOOKS = {};
 function log(msg) {
@@ -830,22 +969,22 @@ function writeState(c) {
   }
 }
 function rulesFile() {
-  return join3(STATE_DIR, "rules.md");
+  return join4(STATE_DIR, "rules.md");
 }
 function failuresFile() {
-  return join3(STATE_DIR, "failures.ndjson");
+  return join4(STATE_DIR, "failures.ndjson");
 }
 function readRules() {
   try {
     const f = rulesFile();
-    if (!existsSync2(f)) return "";
-    return readFileSync2(f, "utf8").trim();
+    if (!existsSync3(f)) return "";
+    return readFileSync3(f, "utf8").trim();
   } catch {
     return "";
   }
 }
 function implNotesFile() {
-  return join3(STATE_DIR, "impl-notes.md");
+  return join4(STATE_DIR, "impl-notes.md");
 }
 var IMPL_NOTE_INSTRUCTION = `
 ## Implementation Notes (important!)
@@ -866,8 +1005,8 @@ If nothing notable happened, omit the block entirely. Do not fabricate notes.
 function readImplNotes(limit = 5) {
   try {
     const f = implNotesFile();
-    if (!existsSync2(f)) return "";
-    const content = readFileSync2(f, "utf8").trim();
+    if (!existsSync3(f)) return "";
+    const content = readFileSync3(f, "utf8").trim();
     if (!content) return "";
     const notes = content.split(/^## Note /m).filter(Boolean);
     const recent = notes.slice(-limit);
@@ -934,7 +1073,7 @@ function readImplNotesByGraph(keywords, limit = 5) {
     const noteTexts = neighborhood.filter((n) => n.source === "impl-note" || n.source === "generate").map((n) => String(n.props?.result ?? ""));
     if (noteTexts.length === 0) return readImplNotes(limit);
     const f = implNotesFile();
-    const fileContent = existsSync2(f) ? readFileSync2(f, "utf8") : "";
+    const fileContent = existsSync3(f) ? readFileSync3(f, "utf8") : "";
     if (!fileContent.trim()) return readImplNotes(limit);
     const entries = fileContent.split(/^## Note /m).filter(Boolean);
     const matched = entries.filter((e) => noteTexts.some((t) => t && e.includes(t.slice(0, 60)))).slice(0, limit);
@@ -1085,13 +1224,13 @@ function extractKeywords(text) {
   }
 }
 function harnessFile(sessionID) {
-  return join3(STATE_DIR, sessionID || "_default", "harness.json");
+  return join4(STATE_DIR, sessionID || "_default", "harness.json");
 }
 function readHarness(sessionID) {
   try {
     const f = harnessFile(sessionID);
-    if (!existsSync2(f)) return null;
-    return JSON.parse(readFileSync2(f, "utf8"));
+    if (!existsSync3(f)) return null;
+    return JSON.parse(readFileSync3(f, "utf8"));
   } catch {
     return null;
   }
@@ -1122,13 +1261,13 @@ function mutateHarness(sessionID, fn) {
   return next;
 }
 function interviewFile(sessionID) {
-  return join3(STATE_DIR, sessionID || "_default", "interview.json");
+  return join4(STATE_DIR, sessionID || "_default", "interview.json");
 }
 function readInterview(sessionID) {
   try {
     const f = interviewFile(sessionID);
-    if (!existsSync2(f)) return null;
-    return JSON.parse(readFileSync2(f, "utf8"));
+    if (!existsSync3(f)) return null;
+    return JSON.parse(readFileSync3(f, "utf8"));
   } catch {
     return null;
   }
@@ -1384,10 +1523,10 @@ function parseFileList(rawList, baseDir) {
     let testPattern;
     let testFramework;
     for (const mf of manifestFiles) {
-      const full = join3(baseDir, mf);
-      if (existsSync2(full)) {
+      const full = join4(baseDir, mf);
+      if (existsSync3(full)) {
         try {
-          const content = JSON.parse(readFileSync2(full, "utf8"));
+          const content = JSON.parse(readFileSync3(full, "utf8"));
           const depNames = Object.keys({ ...content.dependencies || {}, ...content.devDependencies || {} });
           keyDeps = [.../* @__PURE__ */ new Set([...keyDeps, ...depNames])].slice(0, 50);
           for (const [fw, sigs] of Object.entries(FRAMEWORK_SIG)) {
@@ -1719,24 +1858,24 @@ ${answers}`;
 function readHarnessCfg(dir) {
   const tryRead = (p) => {
     try {
-      if (existsSync2(p)) return JSON.parse(readFileSync2(p, "utf8"));
+      if (existsSync3(p)) return JSON.parse(readFileSync3(p, "utf8"));
     } catch {
     }
     return {};
   };
   return {
-    ...tryRead(join3(homedir2(), ".config", "opencode-usage-coach", "harness.config.json")),
-    ...tryRead(join3(dir, "harness.config.json"))
+    ...tryRead(join4(homedir2(), ".config", "opencode-usage-coach", "harness.config.json")),
+    ...tryRead(join4(dir, "harness.config.json"))
   };
 }
 function writeHarnessCfg(updates) {
-  const configDir = join3(homedir2(), ".config", "opencode-usage-coach");
-  const configPath = join3(configDir, "harness.config.json");
+  const configDir = join4(homedir2(), ".config", "opencode-usage-coach");
+  const configPath = join4(configDir, "harness.config.json");
   try {
     mkdirSync3(configDir, { recursive: true });
     const existing = (() => {
       try {
-        return JSON.parse(readFileSync2(configPath, "utf8"));
+        return JSON.parse(readFileSync3(configPath, "utf8"));
       } catch {
         return {};
       }
@@ -1762,8 +1901,8 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
   let lastProgressAt = Date.now();
   let lastPollOk = true;
   let signalTimeout;
-  const timeoutSignal = new Promise((resolve2) => {
-    signalTimeout = resolve2;
+  const timeoutSignal = new Promise((resolve3) => {
+    signalTimeout = resolve3;
   });
   try {
     const slash = model.indexOf("/");
@@ -1875,8 +2014,8 @@ async function runModel(client, model, prompt, directory, track, maxSteps = DEFA
 [usage-coach NEXT] re-run the stalled task alone via generate(), or split it.`;
       }
       log(`runModel(${model}): TIMED OUT after ${elapsed}s (${maxSteps} steps exceeded)`);
-      return `Task appears too large (exceeded ${maxSteps} steps). Consider splitting into smaller subtasks.
-[usage-coach NEXT] split the original task into smaller subtasks (each should complete within ${maxSteps} steps), then re-run generate for each subtask.`;
+      return `Task appears too large (exceeded ${maxSteps} steps, aborted after ${Math.round(elapsed)}s). Consider splitting into smaller subtasks.
+[usage-coach NEXT] split the original task into smaller subtasks (each should complete within ${maxSteps} steps), then re-run generate for each subtask. Rule of thumb from observed costs: split BEFORE starting when the task needs >1 output file or >1 distinct transformation \u2014 a failed oversized run costs the full step budget again on retry.`;
     }
     const parts = resp?.data?.parts ?? resp?.parts ?? [];
     const text = parts.filter((p) => p?.type === "text").map((p) => p?.text ?? "").join("");
@@ -1950,22 +2089,22 @@ function humanRemaining(iso) {
   }
 }
 function captureStdout(args) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     let out = "";
     let p;
     try {
       p = spawn("codexbar", args, { stdio: ["ignore", "pipe", "ignore"] });
     } catch {
-      return resolve2("");
+      return resolve3("");
     }
     p.stdout?.on("data", (d) => {
       out += d.toString();
     });
     p.on("error", (err) => {
       if (err.code === "ENOENT") codexbarMissing = true;
-      resolve2("");
+      resolve3("");
     });
-    p.on("close", () => resolve2(out));
+    p.on("close", () => resolve3(out));
   });
 }
 async function fetchEnabledProviders() {
@@ -2052,7 +2191,7 @@ function parseQuotaResponse(rawText) {
   }
 }
 function fetchQuota(provider) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     let out = "";
     let p;
     try {
@@ -2061,17 +2200,17 @@ function fetchQuota(provider) {
         stdio: ["ignore", "pipe", "ignore"]
       });
     } catch {
-      return resolve2(null);
+      return resolve3(null);
     }
     p.stdout?.on("data", (d) => {
       out += d.toString();
     });
     p.on("error", (err) => {
       if (err.code === "ENOENT") codexbarMissing = true;
-      resolve2(null);
+      resolve3(null);
     });
     p.on("close", () => {
-      resolve2(parseQuotaResponse(out));
+      resolve3(parseQuotaResponse(out));
     });
   });
 }
@@ -2984,9 +3123,36 @@ ${priorNotes}
           }
         }),
         grade: tool({
-          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line + a [usage-coach NEXT] directive. Falls back to generator if grader quota is out.",
-          args: { prompt: tool.schema.string() },
+          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line + a [usage-coach NEXT] directive. Falls back to generator if grader quota is out. For MECHANICAL tasks (conversions, extraction, scaffolds), pass `checks` instead \u2014 deterministic file/grep verification runs locally in milliseconds and the grader model is skipped entirely.",
+          args: {
+            prompt: tool.schema.string().describe("What is being graded (context for the verdict; shown in the result)."),
+            checks: tool.schema.array(tool.schema.object({
+              type: tool.schema.enum(["file-exists", "grep", "grep-absent", "line-count"]),
+              path: tool.schema.string().optional().describe("Relative path (file for file-exists/line-count; file OR dir for grep, default '.' = recursive scan skipping node_modules/.git/dist)."),
+              pattern: tool.schema.string().optional().describe("Regex for grep / grep-absent."),
+              minCount: tool.schema.number().optional().describe("grep: minimum total matches (default 1)."),
+              min: tool.schema.number().optional().describe("line-count: minimum non-empty lines."),
+              max: tool.schema.number().optional().describe("line-count: maximum non-empty lines.")
+            })).optional().describe("Deterministic checks \u2014 when present, ALL are evaluated locally and the verdict is computed without a model call. Use for mechanical verifications; keep model grading for judgment calls.")
+          },
           async execute(args, ctx) {
+            if (args.checks && args.checks.length > 0) {
+              const r = evalChecks(ctx.directory, args.checks);
+              try {
+                const gr2 = applyReward(r.pass ? "pass" : "fail", harnessTaskTitle(ctx.sessionID, findActiveTaskId(ctx.sessionID, "grading")));
+                log(`applyReward(${r.pass ? "pass" : "fail"}): applied ${gr2.applied}`);
+              } catch (e) {
+                log(`applyReward err: ${String(e)}`);
+              }
+              const next2 = r.pass ? `
+[usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).` : `
+[usage-coach NEXT] FAIL -> if revisions < 2: task_update(i, title, "revising", revisions+1) + generate({prompt: "Apply feedback:\\n{grade result}\\nTask: {title}"}); else: run the learning loop (record_failure -> investigate -> verify_diagnosis -> generalize), then task_update(i, title, "failed", "FAIL").`;
+              return `${r.pass ? "PASS" : "FAIL"}
+(verified by ${r.results.length} deterministic check(s) \u2014 grader model skipped)
+${formatCheckReport(r)}
+graded claim: ${args.prompt.slice(0, 300)}
+${next2}`;
+            }
             const cfg = readHarnessCfg(ctx.directory);
             const model = cfg.grader ?? cfg.generator;
             if (!model) return "FAIL\n(ERROR: no grader/generator model configured.)\n[usage-coach NEXT] configure grader in harness.config.json, then retry grade.";
@@ -3034,7 +3200,15 @@ The next generate call will automatically include the new rule.`;
           args: {
             tasks: tool.schema.array(tool.schema.object({
               id: tool.schema.number().describe("Task ID (must match the task_update ID)."),
-              prompt: tool.schema.string().describe("The grading prompt for this task (same format as grade()).")
+              prompt: tool.schema.string().describe("The grading prompt for this task (same format as grade())."),
+              checks: tool.schema.array(tool.schema.object({
+                type: tool.schema.enum(["file-exists", "grep", "grep-absent", "line-count"]),
+                path: tool.schema.string().optional(),
+                pattern: tool.schema.string().optional(),
+                minCount: tool.schema.number().optional(),
+                min: tool.schema.number().optional(),
+                max: tool.schema.number().optional()
+              })).optional().describe("Deterministic checks \u2014 when present, the model call is skipped (see grade()).")
             })).describe("One entry per task to grade. All run in parallel on GO.")
           },
           async execute(args, ctx) {
@@ -3053,6 +3227,21 @@ The next generate call will automatically include the new rule.`;
             }
             const limit = decision === "THROTTLE" ? 2 : args.tasks.length;
             const gradeOne = async (t) => {
+              if (t.checks && t.checks.length > 0) {
+                const r = evalChecks(ctx.directory, t.checks);
+                try {
+                  const title = harnessTaskTitle(ctx.sessionID, t.id);
+                  const rw = applyReward(r.pass ? "pass" : "fail", title ? `batch #${t.id} ${title}` : `batch #${t.id}`);
+                  log(`applyReward(${r.pass ? "pass" : "fail"}) batch #${t.id}: applied ${rw.applied}`);
+                } catch (e) {
+                  log(`applyReward err: ${String(e)}`);
+                }
+                const next2 = r.pass ? `[usage-coach NEXT] task ${t.id}: PASS -> task_update(${t.id}, title, "completed", "PASS"), then proceed.` : `[usage-coach NEXT] task ${t.id}: FAIL -> if revisions < 2: task_update(${t.id}, title, "revising") + generate({prompt:"Apply feedback:\\n${formatCheckReport(r).slice(0, 500)}\\nTask: {title}"}); else: record_failure + investigate + verify + generalize, then task_update(${t.id}, title, "failed", "FAIL").`;
+                return { id: t.id, result: `[task ${t.id}] ${r.pass ? "PASS" : "FAIL"}
+(verified by ${r.results.length} deterministic check(s) \u2014 grader model skipped)
+${formatCheckReport(r)}
+${next2}` };
+              }
               const gradeTaskId = findActiveTaskId(ctx.sessionID, "grading");
               const out = await runModel(
                 input.client,
