@@ -655,3 +655,16 @@ curated ones — intended end state of the redesign).
 
 ### Fixed
 - `runModel` now waits for the agent loop — polls `session.status` until idle before reading the final assistant message. (`session.prompt` returns only the first response; tool-use loops continue server-side, so file writes now complete.)
+
+## [0.19.1] - 2026-10-20
+
+### Fixed
+- **TUI panel ported to the OpenCode V2 terminal.** The V1 `{ tui }` plugin
+  (api.slots.register sidebar_footer) does not load in the V2 terminal client —
+  the usage panel silently disappeared after the host upgraded to v2.x.
+  `tui.tsx` is now a V2 CLI plugin (`Plugin.define` from `@opencode/plugin/tui`,
+  `context.ui.slot({ append: "sidebar.footer" })`, keymap-layer Alt+H toggle,
+  router-probed per-session harness lookup). Rendering JSX and `tui-logic.ts`
+  are reused unchanged; theme tokens are resolved defensively across the V1
+  flat-record and V2 semantic-token shapes (unstyled fallback keeps the panel
+  readable). `@opencode/plugin/tui` added to the TUI externals.
