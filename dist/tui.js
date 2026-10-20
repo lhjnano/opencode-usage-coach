@@ -1,4 +1,5 @@
 // src/tui.tsx
+import { memo as _$memo } from "@opentui/solid";
 import { insert as _$insert } from "@opentui/solid";
 import { setProp as _$setProp } from "@opentui/solid";
 import { effect as _$effect } from "@opentui/solid";
@@ -290,7 +291,12 @@ var tui_default = Plugin.define({
         return "";
       }
     };
+    let firstRenderLogged = false;
     const panel = (slotProps) => {
+      if (!firstRenderLogged) {
+        firstRenderLogged = true;
+        tlog(`panel first render (slot invoked, collapsed=${collapsed()})`);
+      }
       if (collapsed()) {
         return (() => {
           var _el$ = _$createElement("box"), _el$2 = _$createElement("text");
@@ -548,27 +554,118 @@ var tui_default = Plugin.define({
       })();
     };
     const disposers = [];
+    const addSlot = (placement) => {
+      try {
+        const reg = context.ui.slot({
+          append: placement,
+          render: (slotProps) => {
+            try {
+              return panel(slotProps);
+            } catch (e) {
+              tlog(`slot render err: ${String(e)}`);
+              return (() => {
+                var _el$68 = _$createElement("text");
+                _$insertNode(_el$68, _$createTextNode(`usage-coach`));
+                return _el$68;
+              })();
+            }
+          }
+        });
+        if (typeof reg === "function") disposers.push(reg);
+        else if (reg && typeof reg.dispose === "function") disposers.push(() => reg.dispose());
+        tlog(`${placement} slot registered`);
+      } catch (e) {
+        tlog(`${placement} slot register err: ${String(e)}`);
+      }
+    };
+    addSlot("sidebar.footer");
     try {
-      const reg = context.ui.slot({
-        append: "sidebar.footer",
+      const reg2 = context.ui.slot({
+        append: "home.footer.status",
         render: (slotProps) => {
           try {
-            return panel(slotProps);
-          } catch (e) {
-            tlog(`slot render err: ${String(e)}`);
+            if (collapsed()) return (() => {
+              var _el$70 = _$createElement("text");
+              _$insertNode(_el$70, _$createTextNode(`uc(hidden)`));
+              _$effect((_$p) => _$setProp(_el$70, "style", st("textMuted"), _$p));
+              return _el$70;
+            })();
+            const s = getState();
+            if (!s) return (() => {
+              var _el$72 = _$createElement("text");
+              _$insertNode(_el$72, _$createTextNode(`usage-coach: ...`));
+              return _el$72;
+            })();
+            const dKey = decisionThemeKey(s.decision);
+            const modelShort = s.model ? s.model.split("/").pop() ?? s.model : "";
+            if (s.isFree) return (() => {
+              var _el$74 = _$createElement("box"), _el$75 = _$createElement("text"), _el$77 = _$createElement("text"), _el$78 = _$createTextNode(` `);
+              _$insertNode(_el$74, _el$75);
+              _$insertNode(_el$74, _el$77);
+              _$setProp(_el$74, "flexDirection", "row");
+              _$insertNode(_el$75, _$createTextNode(`uc [free]`));
+              _$insertNode(_el$77, _el$78);
+              _$insert(_el$77, modelShort, null);
+              _$effect((_p$) => {
+                var _v$13 = st(dKey), _v$14 = st("textMuted");
+                _v$13 !== _p$.e && (_p$.e = _$setProp(_el$75, "style", _v$13, _p$.e));
+                _v$14 !== _p$.t && (_p$.t = _$setProp(_el$77, "style", _v$14, _p$.t));
+                return _p$;
+              }, {
+                e: void 0,
+                t: void 0
+              });
+              return _el$74;
+            })();
+            const pct = s.fiveHour >= 0 ? s.fiveHour : s.weekly;
+            const tag = s.fiveHour >= 0 ? "5h" : "1w";
             return (() => {
-              var _el$68 = _$createElement("text");
-              _$insertNode(_el$68, _$createTextNode(`usage-coach`));
-              return _el$68;
+              var _el$79 = _$createElement("box"), _el$80 = _$createElement("text"), _el$81 = _$createTextNode(`uc [`), _el$82 = _$createTextNode(`]`), _el$83 = _$createElement("text"), _el$84 = _$createTextNode(` `), _el$85 = _$createTextNode(` `), _el$86 = _$createTextNode(` `), _el$87 = _$createElement("text"), _el$88 = _$createElement("text"), _el$89 = _$createTextNode(` `);
+              _$insertNode(_el$79, _el$80);
+              _$insertNode(_el$79, _el$83);
+              _$insertNode(_el$79, _el$87);
+              _$insertNode(_el$79, _el$88);
+              _$setProp(_el$79, "flexDirection", "row");
+              _$insertNode(_el$80, _el$81);
+              _$insertNode(_el$80, _el$82);
+              _$insert(_el$80, () => TAG[s.decision], _el$82);
+              _$insertNode(_el$83, _el$84);
+              _$insertNode(_el$83, _el$85);
+              _$insertNode(_el$83, _el$86);
+              _$insert(_el$83, modelShort, _el$85);
+              _$insert(_el$83, tag, _el$86);
+              _$insert(_el$87, () => pct >= 0 ? barFill(pct) : "", null);
+              _$insert(_el$87, () => pct >= 0 ? barEmpty(pct) : "", null);
+              _$insertNode(_el$88, _el$89);
+              _$insert(_el$88, pct >= 0 ? `${pct}%` : "", null);
+              _$effect((_p$) => {
+                var _v$15 = st(dKey), _v$16 = st("textMuted"), _v$17 = st("text");
+                _v$15 !== _p$.e && (_p$.e = _$setProp(_el$80, "style", _v$15, _p$.e));
+                _v$16 !== _p$.t && (_p$.t = _$setProp(_el$83, "style", _v$16, _p$.t));
+                _v$17 !== _p$.a && (_p$.a = _$setProp(_el$87, "style", _v$17, _p$.a));
+                return _p$;
+              }, {
+                e: void 0,
+                t: void 0,
+                a: void 0
+              });
+              return _el$79;
+            })();
+          } catch (e) {
+            tlog(`footer render err: ${String(e)}`);
+            return (() => {
+              var _el$90 = _$createElement("text");
+              _$insertNode(_el$90, _$createTextNode(`usage-coach`));
+              return _el$90;
             })();
           }
         }
       });
-      if (typeof reg === "function") disposers.push(reg);
-      else if (reg && typeof reg.dispose === "function") disposers.push(() => reg.dispose());
-      tlog("sidebar.footer slot registered");
+      if (typeof reg2 === "function") disposers.push(reg2);
+      else if (reg2 && typeof reg2.dispose === "function") disposers.push(() => reg2.dispose());
+      tlog("home.footer.status slot registered");
     } catch (e) {
-      tlog(`slot register err: ${String(e)}`);
+      tlog(`home.footer.status register err: ${String(e)}`);
     }
     return () => {
       clearInterval(timer);

@@ -180,7 +180,9 @@ export default Plugin.define({
     };
 
     // panel — one line per item, Solid JSX exactly like the V1 renderer.
+    let firstRenderLogged = false;
     const panel = (slotProps: any) => {
+      if (!firstRenderLogged) { firstRenderLogged = true; tlog(`panel first render (slot invoked, collapsed=${collapsed()})`); }
       if (collapsed()) {
         return <box><text style={st("textMuted")}>usage-coach (hidden — Alt+H)</text></box>;
       }
@@ -235,15 +237,38 @@ export default Plugin.define({
 
     // Sidebar footer — the V2 name for the V1 sidebar_footer slot.
     const disposers: Array<() => void> = [];
+    const addSlot = (placement: string) => {
+      try {
+        const reg = context.ui.slot({ append: placement, render: (slotProps: any) => {
+          try { return panel(slotProps); }
+          catch (e) { tlog(`slot render err: ${String(e)}`); return <text>usage-coach</text>; }
+        } });
+        if (typeof reg === "function") disposers.push(reg);
+        else if (reg && typeof reg.dispose === "function") disposers.push(() => reg.dispose());
+        tlog(`${placement} slot registered`);
+      } catch (e) { tlog(`${placement} slot register err: ${String(e)}`); }
+    };
+    addSlot("sidebar.footer");
+    // Bottom status bar fallback — visible even when the sidebar is hidden
+    // (session.sidebar=auto collapses it); single-line compact variant.
     try {
-      const reg = context.ui.slot({ append: "sidebar.footer", render: (slotProps: any) => {
-        try { return panel(slotProps); }
-        catch (e) { tlog(`slot render err: ${String(e)}`); return <text>usage-coach</text>; }
+      const reg2 = context.ui.slot({ append: "home.footer.status", render: (slotProps: any) => {
+        try {
+          if (collapsed()) return <text style={st("textMuted")}>uc(hidden)</text>;
+          const s = getState();
+          if (!s) return <text>usage-coach: ...</text>;
+          const dKey = decisionThemeKey(s.decision);
+          const modelShort = s.model ? (s.model.split("/").pop() ?? s.model) : "";
+          if (s.isFree) return <box flexDirection="row"><text style={st(dKey)}>uc [free]</text><text style={st("textMuted")}> {modelShort}</text></box>;
+          const pct = s.fiveHour >= 0 ? s.fiveHour : s.weekly;
+          const tag = s.fiveHour >= 0 ? "5h" : "1w";
+          return <box flexDirection="row"><text style={st(dKey)}>uc [{TAG[s.decision]}]</text><text style={st("textMuted")}> {modelShort} {tag} </text><text style={st("text")}>{pct >= 0 ? barFill(pct) : ""}{pct >= 0 ? barEmpty(pct) : ""}</text><text> {pct >= 0 ? `${pct}%` : ""}</text></box>;
+        } catch (e) { tlog(`footer render err: ${String(e)}`); return <text>usage-coach</text>; }
       } });
-      if (typeof reg === "function") disposers.push(reg);
-      else if (reg && typeof reg.dispose === "function") disposers.push(() => reg.dispose());
-      tlog("sidebar.footer slot registered");
-    } catch (e) { tlog(`slot register err: ${String(e)}`); }
+      if (typeof reg2 === "function") disposers.push(reg2);
+      else if (reg2 && typeof reg2.dispose === "function") disposers.push(() => reg2.dispose());
+      tlog("home.footer.status slot registered");
+    } catch (e) { tlog(`home.footer.status register err: ${String(e)}`); }
 
     return () => {
       clearInterval(timer);

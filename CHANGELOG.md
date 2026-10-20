@@ -668,3 +668,20 @@ curated ones — intended end state of the redesign).
   are reused unchanged; theme tokens are resolved defensively across the V1
   flat-record and V2 semantic-token shapes (unstyled fallback keeps the panel
   readable). `@opencode/plugin/tui` added to the TUI externals.
+
+## [0.19.2] - 2026-10-20
+
+### Fixed
+- **TUI panel visibility under the OpenCode V2 terminal.** The plugin now also
+  registers a compact one-line variant on the `home.footer.status` bottom
+  status bar (always visible, even when `session.sidebar: auto` collapses the
+  sidebar), alongside the full `sidebar.footer` panel. First-render and slot
+  registration markers land in `tui-loaded.txt` so load vs render failures are
+  distinguishable from the log alone.
+
+### Changed
+- **Plugin installation layout**: the V2 host discovers server+TUI entrypoints
+  as a directory (`<global-config>/plugins/opencode-usage-coach/{index,tui}.js`),
+  replacing the flat single-file bundle. cli.json no longer needs a plugins
+  entry — the terminal loads the TUI entrypoint from the server's active
+  plugin list.
