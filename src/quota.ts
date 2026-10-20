@@ -53,6 +53,10 @@ export function isCodexbarMissing(): boolean { return codexbarMissing; }
 /** Test-only: reset the codexbarMissing flag for test isolation. */
 export function __resetCodexbarMissing(): void { codexbarMissing = false; }
 
+/** Test-only: force the codexbarMissing flag (regression repro for CI, where no
+ *  codexbar binary exists and an ENOENT from ANY test flips it process-wide). */
+export function __setCodexbarMissing(v: boolean): void { codexbarMissing = v; }
+
 /** spawn helper that captures stdout (never leaks to TUI). */
 function captureStdout(args: string[]): Promise<string> {
   return new Promise((resolve) => {
@@ -273,6 +277,12 @@ export function createQuotaMachine(opts: {
   const agentOf = opts.getAgent ?? (() => "");
   const doFetch = opts.fetchQuota ?? ((provider: string) => fetchQuotaWithRetry(provider));
   const persist = opts.stateWriter ?? ((c: any) => writeState(c));
+  // DI hermeticity: when a fetchQuota is injected (tests / embedding), the machine
+  // must be independent of the codexbar runtime — the module-level codexbarMissing
+  // short-circuit and the real fetchProvidersCoach spawn are bypassed. Without this,
+  // an ENOENT from any other test flips codexbarMissing and refresh() silently
+  // never calls the injected fetch (observed as 8 CI-only 15s timeouts).
+  const injected = !!opts.fetchQuota;
   // Provider + lighter model defaults live per-machine (computed by the adapter
   // at init from env > config, mirroring the V1 closure's PROVIDER/LIGHTER).
 
@@ -289,7 +299,7 @@ export function createQuotaMachine(opts: {
   const refreshBackground = () => {
     try {
       if (refreshing) return;
-      if (codexbarMissing) {
+      if (codexbarMissing && !injected) {
         last = { decision: "GO", advice: "codexbar not installed — running in GO-only mode (no quota sensing).", weekly: -3, monthly: -3, fiveHour: -3 };
         lastFetchedAt = Date.now();
         refreshing = false;
@@ -318,7 +328,7 @@ export function createQuotaMachine(opts: {
           last = coach(effectiveQ, LIGHTER); lastFetchedAt = Date.now();
           // also fetch per-provider coach view (best-effort, non-blocking on failure)
           let providers: ProviderCoach[] = [];
-          try { providers = await fetchProvidersCoach(); } catch { /* */ }
+          if (!injected) { try { providers = await fetchProvidersCoach(); } catch { /* */ } }
           // If primary fetch failed (all windows < 0) but providers have real data,
           // restore the top-level from providers[0] so the TUI/advice show real numbers.
           if (providers.length > 0 && last.weekly < 0 && last.fiveHour < 0) {

@@ -2604,6 +2604,7 @@ function createQuotaMachine(opts) {
   const agentOf = opts.getAgent ?? (() => "");
   const doFetch = opts.fetchQuota ?? ((provider) => fetchQuotaWithRetry(provider));
   const persist = opts.stateWriter ?? ((c) => writeState(c));
+  const injected = !!opts.fetchQuota;
   let last = null;
   let lastKnownQuota = null;
   let lastFetchedAt = 0;
@@ -2614,7 +2615,7 @@ function createQuotaMachine(opts) {
   const refreshBackground = () => {
     try {
       if (refreshing) return;
-      if (codexbarMissing) {
+      if (codexbarMissing && !injected) {
         last = { decision: "GO", advice: "codexbar not installed \u2014 running in GO-only mode (no quota sensing).", weekly: -3, monthly: -3, fiveHour: -3 };
         lastFetchedAt = Date.now();
         refreshing = false;
@@ -2639,9 +2640,11 @@ function createQuotaMachine(opts) {
           last = coach(effectiveQ, LIGHTER);
           lastFetchedAt = Date.now();
           let providers = [];
-          try {
-            providers = await fetchProvidersCoach();
-          } catch {
+          if (!injected) {
+            try {
+              providers = await fetchProvidersCoach();
+            } catch {
+            }
           }
           if (providers.length > 0 && last.weekly < 0 && last.fiveHour < 0) {
             const p0 = providers[0];

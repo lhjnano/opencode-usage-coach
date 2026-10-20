@@ -241,3 +241,26 @@ test("fetch resolves null → GO 'quota unavailable' sentinel (weekly -2)", asyn
   assert.equal(c.decision, "GO");
   assert.ok(c.advice.includes("quota unavailable"), `unavailable advice: ${c.advice}`);
 });
+
+// ── DI hermeticity regression (CI-only failure repro) ────────────────────────
+// On CI there is no codexbar binary: an ENOENT spawn in ANY test file flips the
+// module-level codexbarMissing flag process-wide. Before the fix, that flag made
+// refresh() short-circuit BEFORE calling the injected fetchQuota — every decision
+// test then waited 15s and timed out. Injected machines must be immune.
+
+test("injected machine ignores codexbarMissing (CI regression)", async () => {
+  const { __setCodexbarMissing, __resetCodexbarMissing } = await import("../src/quota.js");
+  __setCodexbarMissing(true);
+  try {
+    const fq = fetchQueue();
+    const m = machine(fq, stateSpy());
+    m.refresh();
+    fq.resolveNext(makeQuota(96, 10, 30));
+    await until(() => m.current().weekly === 96, 3000);
+    const c = m.current();
+    assert.equal(c.decision, "STOP", "injected fetch must run despite codexbarMissing=true");
+    assert.equal(fq.providers.length, 1, "exactly one injected fetch");
+  } finally {
+    __resetCodexbarMissing();
+  }
+});
