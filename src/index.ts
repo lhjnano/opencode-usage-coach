@@ -11,18 +11,33 @@
 // Local load: .opencode/plugins/ or ~/.config/opencode/plugins/. Single file required.
 
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { tool } from "@opencode-ai/plugin";
-import { initDomain, queryDomain, queryDomainGraph, saveInvestigationResult, evictStale, evictSharedStale, sweepDeadEdges, addDomainEdge, readNodes, readEdges, logDomainInjection, applyReward } from "./domain.js";
+// evalChecks/formatCheckReport (grade-checks), webSearch (web-search), and
+// queryDomain/logDomainInjection/applyReward (domain) are consumed by the tool
+// bodies, which now live in tool-defs.ts.
+import { initDomain, queryDomainGraph, saveInvestigationResult, evictStale, evictSharedStale, sweepDeadEdges, addDomainEdge, readNodes, readEdges } from "./domain.js";
 import type { DomainNode } from "./domain.js";
-import { searchContext as webSearch, type WebResult } from "./web-search.js";
-import { evalChecks, formatCheckReport, type GradeCheck } from "./grade-checks.js";
+import type { WebResult } from "./web-search.js";
+import { makeV1SessionOps } from "./v1-session.js";
+import { convertSchema, type SchemaLibLike } from "./schema-convert.js";
+import { buildToolDefs, type ToolHost } from "./tool-defs.js";
+import type { Runtime, SessionOps } from "./rt.js";
+// The quota state machine (coach/codexbar fetch/TTL refresh) now lives in
+// quota.ts and is shared with the V2 adapter (v2.ts). The functions below are
+// re-exported at the bottom of this file so existing `from "./index.js"`
+// imports (tests, tool-defs.ts) keep working unchanged.
+import { createQuotaMachine, type Coaching, type Decision } from "./quota.js";
+// V2 adapter — imported ONLY for the v2Setup FUNCTION DECLARATION (hoisted at
+// module instantiation, unlike a const). The default `dual` export below
+// references it without calling into v2.ts, which keeps the deferred
+// index ↔ v2 import cycle safe in BOTH evaluation orders (index-first: dist;
+// v2-first: test/v2-adapter.test.ts imports src/v2.js before src/index.js).
+import { v2Setup } from "./v2.js";
 
-const PLUGIN_NAME = "opencode-usage-coach";
-const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
+export const PLUGIN_NAME = "opencode-usage-coach";
 
 // Step-limit enforcement for sub-sessions: prevents runaway tasks from burning quota.
 // Each generate/generate_batch call creates a sub-session whose agent loop is monitored;
@@ -96,16 +111,16 @@ function setStateDir(dir: string) {
   LOG_FILE = join(STATE_DIR, "coach.log");
 }
 
-type QuotaWindow = { resetDescription?: string; usedPercent?: number; resetsAt?: string; windowMinutes?: number };
-type Quota = { weekly: QuotaWindow | null; monthly: QuotaWindow | null; fiveHour: QuotaWindow | null };
-type Decision = "GO" | "THROTTLE" | "STOP";
-type Coaching = { decision: Decision; advice: string; weekly: number; monthly: number; fiveHour: number; model?: string; provider?: string; isFree?: boolean };
+// Quota domain types (Quota/QuotaWindow/Decision/Coaching) live in quota.ts and
+// are re-exported at the bottom of this file.
 
 const NOOP_HOOKS = {}; // returned on init failure so opencode keeps working
 
 // Always log to file (not gated on UC_DEBUG) — essential for runtime diagnosis.
 function log(msg: string) { try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`); } catch { /* */ } }
-function writeState(c: Coaching) { try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(STATE_FILE, JSON.stringify({ ...c, updatedAt: new Date().toISOString() })); } catch { /* */ } }
+// Exported for quota.ts (the quota machine's default stateWriter) — same
+// behavior as when it lived next to the V1 closure.
+export function writeState(c: Coaching) { try { mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(STATE_FILE, JSON.stringify({ ...c, updatedAt: new Date().toISOString() })); } catch { /* */ } }
 
 // Learning loop — accumulated rules from past failures (Stage 5: reference / Stage 1: record).
 // rules.md is per-project (under STATE_DIR). generate prepends rules to its prompt so the
@@ -438,14 +453,16 @@ function formatCompleteOutput(state: InterviewState): string {
 // Generate a structured summary from the Q&A pairs via runModel, persist to
 // interview.json + domain DB (design §9.1/§9.2). model may be null on quota
 // STOP / misconfiguration — falls back to a deterministic Q&A listing.
-async function completeInterview(state: InterviewState, sessionID: string, client: any, model: string | null, directory: string): Promise<string> {
+// signal (additive, V2): forwarded to runModel so a cancelled tool call also
+// cancels the summary sub-session.
+export async function completeInterview(state: InterviewState, sessionID: string, session: SessionOps, model: string | null, directory: string, signal?: AbortSignal): Promise<string> {
   if (state.phase === "complete") return formatCompleteOutput(state);
   const pairs = state.answers.map((a, i) => `Q${i + 1}: ${a.questionText}\nA: ${a.answer}`).join("\n\n");
   let summary = "";
   const constraints: Record<string, string> = {};
   if (model) {
     const sumPrompt = `Summarize this reverse interview as actionable constraints for implementation.\n\nQ&A pairs:\n${pairs || "(none)"}\n\nOutput JSON ONLY (no markdown fences, no prose):\n{"summary":"human-readable bullet list of resolved decisions","constraints":{"key":"value"}}`;
-    const out = await runModel(client, model, sumPrompt, directory);
+    const out = await runModel(session, model, sumPrompt, directory, undefined, undefined, signal);
     if (!out.startsWith("ERROR:") && !out.startsWith("Task appears too large")) {
       try {
         let s = out.trim();
@@ -1041,7 +1058,9 @@ function writeHarnessCfg(updates: HarnessCfg): string {
 //   1. Estimates step count from session.messages (assistant turns) for TUI display.
 //   2. Enforces maxSteps: if exceeded, aborts the session (step-limit timeout).
 // When `track` is provided, the poller also writes live progress to harness.json.
-async function runModel(client: any, model: string, prompt: string, directory: string, track?: { sessionID: string; taskId: number }, maxSteps: number = DEFAULT_MAX_STEPS): Promise<string> {
+// All session ops go through the version-agnostic SessionOps facade (see rt.ts) —
+// runModel never touches the raw V1 client.
+async function runModel(session: SessionOps, model: string, prompt: string, directory: string, track?: { sessionID: string; taskId: number }, maxSteps: number = DEFAULT_MAX_STEPS, signal?: AbortSignal): Promise<string> {
   const t0 = Date.now();
   const subStart = Date.now();
   let poller: ReturnType<typeof setInterval> | null = null;
@@ -1058,14 +1077,38 @@ async function runModel(client: any, model: string, prompt: string, directory: s
   // Deferred promise: resolves when the step limit is exceeded (races against prompt).
   let signalTimeout!: () => void;
   const timeoutSignal = new Promise<void>((resolve) => { signalTimeout = resolve; });
+  // AbortSignal cancellation (additive, V2): mirrors the wall-clock timeout path —
+  // flip timedOut, abort the sub-session, resolve the race. `subId` guard: the
+  // signal may fire before session.create resolves (nothing to abort yet; the
+  // timedOut branch / finally block still clean up whatever gets created).
+  const onAbort = () => {
+    if (timedOut) return;
+    timedOut = true;
+    log(`runModel(${model}): SIGNAL aborted, aborting session ${subId}`);
+    try { if (subId) session.abort(subId); } catch { /* */ }
+    signalTimeout();
+  };
   try {
+    // Pre-aborted signal: bail before creating anything — no sub-session, no cleanup needed.
+    if (signal?.aborted) return "ERROR: cancelled before start (signal already aborted).";
+    signal?.addEventListener("abort", onAbort, { once: true });
     const slash = model.indexOf("/");
     const providerID = slash >= 0 ? model.slice(0, slash) : model;
     const modelID = slash >= 0 ? model.slice(slash + 1) : "";
-    const s: any = await client.session.create({ body: { title: "uc-harness-sub" }, query: { directory } });
+    // Sub-session creation via the facade. The facade THROWS `session.create returned
+    // no id (...)` when the response carries no id — convert that back into the exact
+    // user-visible ERROR string the direct-client code used to return. Any other
+    // rejection (transport failure) propagates to the outer catch
+    // (`ERROR: runModel exception ...`), exactly as before.
+    let id: string;
+    try {
+      id = await session.create(directory, "uc-harness-sub");
+    } catch (e) {
+      if (!(e instanceof Error && e.message.startsWith("session.create returned no id"))) throw e;
+      log(`runModel(${model}): session.create ${Date.now() - t0}ms`);
+      return `ERROR: ${e.message}`;
+    }
     log(`runModel(${model}): session.create ${Date.now() - t0}ms`);
-    const id = s?.data?.info?.id ?? s?.data?.id ?? s?.id;
-    if (!id) return `ERROR: session.create returned no id (response: ${JSON.stringify(s?.data ?? s).slice(0, 200)})`;
     subId = id;
     log(`runModel(${model}): session ${id} created, sending prompt (${prompt.length} chars), max_steps=${maxSteps}`);
     // Poller: every WATCHDOG_POLL_MS, count steps from messages, enforce step limit,
@@ -1076,11 +1119,10 @@ async function runModel(client: any, model: string, prompt: string, directory: s
         let step = 0;
         let lastTs = new Date().toISOString();
         try {
-          const msgs: any = await client.session.messages?.({ path: { id } });
+          const msgList: any[] = await session.messages(id);
           // After await: re-check pollerDone — the finally block may have run
           // while we were waiting for the messages API response.
           if (pollerDone) return;
-          const msgList: any[] = Array.isArray(msgs?.data) ? msgs.data : Array.isArray(msgs) ? msgs : [];
           if (msgList.length) {
             // Count assistant turns as steps (each assistant message = one loop iteration).
             step = msgList.filter((m: any) => {
@@ -1103,7 +1145,7 @@ async function runModel(client: any, model: string, prompt: string, directory: s
         if (step > maxSteps) {
           log(`runModel(${model}): STEP LIMIT exceeded (${step} > ${maxSteps}), aborting session ${id}`);
           timedOut = true;
-          try { await client.session.abort?.({ path: { id } }); } catch { /* */ }
+          try { await session.abort(id); } catch { /* */ }
           signalTimeout();
           return;
         }
@@ -1113,7 +1155,7 @@ async function runModel(client: any, model: string, prompt: string, directory: s
           stalled = true;
           timedOut = true;
           log(`runModel(${model}): STALLED — no progress for ${Math.round((Date.now() - lastProgressAt) / 1000)}s (step=${step}, maxSteps=${maxSteps}), aborting session ${id}`);
-          try { await client.session.abort?.({ path: { id } }); } catch { /* */ }
+          try { await session.abort(id); } catch { /* */ }
           signalTimeout();
           return;
         }
@@ -1134,17 +1176,14 @@ async function runModel(client: any, model: string, prompt: string, directory: s
       if (!timedOut) {
         timedOut = true;
         log(`runModel(${model}): WALL-CLOCK timeout after ${WALL_TIMEOUT_MS / 1000}s, aborting session ${id}`);
-        try { client.session.abort?.({ path: { id } }); } catch { /* */ }
+        try { session.abort(id); } catch { /* */ }
         signalTimeout();
       }
     }, WALL_TIMEOUT_MS);
     // Race: prompt completes normally vs step-limit/wall-clock timeout.
     // Wrap prompt with .then(onFulfilled, onRejected) so that aborting the session
     // (which causes prompt to reject) never produces an unhandled promise rejection.
-    const promptP: Promise<any> = client.session.prompt({
-      path: { id },
-      body: { model: { providerID, modelID }, parts: [{ type: "text", text: prompt }] },
-    }).then(
+    const promptP: Promise<any> = session.prompt(id, providerID, modelID, prompt).then(
       (r: any) => r,
       () => null, // abort causes rejection -> return null (handled via timedOut flag)
     );
@@ -1155,10 +1194,10 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     // Step-limit timeout / stall: the task is too large or wedged — tell the caller.
     if (timedOut) {
       try {
-        const summary: any = await client.session.summarize?.({ path: { id } });
+        const summary: any = await session.summarize?.(id);
         log(`runModel(${model}): TIMED OUT summary: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`);
       } catch { /* */ }
-      try { client.session.delete?.({ path: { id } }); } catch { /* */ }
+      try { session.delete(id); } catch { /* */ }
       subId = null;
       if (stalled) {
         return `ERROR: stalled — no message-stream progress for ${Math.round(STALL_MS / 60000)} min (step ${lastStepSeen}/${maxSteps}). The sub-session was wedged (observed today as the 837s no-output case). Retry this task individually with generate(); if it stalls again, split it.\n[usage-coach NEXT] re-run the stalled task alone via generate(), or split it.`;
@@ -1173,8 +1212,8 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     // Fire-and-forget: summarize + delete are cleanup/diagnostic, NOT on the critical path.
     // Previously these were awaited, causing the harness to stall after the model finished.
     const cleanupStart = Date.now();
-    try { client.session.summarize?.({ path: { id } }).then((summary: any) => log(`runModel(${model}): summary ${Date.now() - cleanupStart}ms: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`)).catch(() => {}); } catch { /* */ }
-    try { client.session.delete?.({ path: { id } }).catch(() => {}); } catch { /* */ }
+    try { if (session.summarize) session.summarize(id).then((summary: any) => log(`runModel(${model}): summary ${Date.now() - cleanupStart}ms: ${JSON.stringify(summary?.data ?? summary).slice(0, 300)}`)).catch(() => {}); } catch { /* */ }
+    try { session.delete(id).catch(() => {}); } catch { /* */ }
     subId = null;
     log(`runModel(${model}): done ${elapsed}s, ${text.length} chars (cleanup dispatched)`);
     return text.trim() || `ERROR: no assistant text in prompt response after ${elapsed}s (parts: ${parts.length}, types: ${parts.map((p: any) => p?.type).join(",")})`;
@@ -1188,287 +1227,81 @@ async function runModel(client: any, model: string, prompt: string, directory: s
     pollerDone = true;
     if (poller) clearInterval(poller);
     if (wallTimer) clearTimeout(wallTimer);
+    signal?.removeEventListener("abort", onAbort);
     if (track) { try { clearSubSession(track.sessionID, track.taskId); } catch { /* */ } }
     // Fire-and-forget delete — no need to block the return on session cleanup.
-    if (subId) { try { client.session.delete?.({ path: { id: subId } }).catch(() => {}); } catch { /* */ } }
+    if (subId) { try { session.delete(subId).catch(() => {}); } catch { /* */ } }
   }
 }
 
 // Agent-mode gating — harness tools + quota coaching are restricted to these agent
 // modes (UC_HARNESS_AGENT, comma-separated). Other modes (e.g. Agent-Factory-
 // Coordinator) stay fully clean: no tool gating, no system-prompt injection.
-const HARNESS_AGENTS = (process.env.UC_HARNESS_AGENT ?? "Usage-Coach-Harness")
+export const HARNESS_AGENTS = (process.env.UC_HARNESS_AGENT ?? "Usage-Coach-Harness")
   .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 
-// Quota thresholds (override via env). Provider + lighter model come from config/env (see init).
-const num = (e: string, d: number) => { try { const v = Number(process.env[e]); return Number.isFinite(v) && v >= 0 ? v : d; } catch { return d; } };
-const STOP_5H = num("UC_STOP_5H", 92), THR_5H = num("UC_THROTTLE_5H", 70);
-const STOP_WK = num("UC_STOP_WEEKLY", 95), THR_WK = num("UC_THROTTLE_WEEKLY", 85);
-const STOP_MO = num("UC_STOP_MONTHLY", 98);
+// Quota thresholds (STOP_5H/THR_5H/STOP_WK/THR_WK/STOP_MO), the codexbar fetch
+// layer (captureStdout/fetchQuota/fetchQuotaWithRetry/fetchProvidersCoach),
+// coach()/providerAdvice()/humanRemaining()/parseQuotaResponse(),
+// isFreeModel/providerToCodexbar, LOADING and the quota machine itself now live
+// in quota.ts (re-exported below; behavior identical).
 // Domain-DB worm (GC) thresholds — override via env. Time-based + size-based eviction.
-const WORM_MAX_AGE_DAYS = num("UC_WORM_MAX_AGE_DAYS", 180);
-const WORM_MAX_NODES = num("UC_WORM_MAX_NODES", 100000);
+const num = (e: string, d: number) => { try { const v = Number(process.env[e]); return Number.isFinite(v) && v >= 0 ? v : d; } catch { return d; } };
+export const WORM_MAX_AGE_DAYS = num("UC_WORM_MAX_AGE_DAYS", 180);
+export const WORM_MAX_NODES = num("UC_WORM_MAX_NODES", 100000);
 // Shared-layer worm defaults: tighter than the project layer — the shared DB is the
 // cross-project accumulation point (2,128 nodes at wiring time; 212 already past 60d).
-const SHARED_WORM_MAX_AGE_DAYS = num("UC_SHARED_WORM_MAX_AGE_DAYS", 60);
-const SHARED_WORM_MAX_NODES = num("UC_SHARED_WORM_MAX_NODES", 3000);
+export const SHARED_WORM_MAX_AGE_DAYS = num("UC_SHARED_WORM_MAX_AGE_DAYS", 60);
+export const SHARED_WORM_MAX_NODES = num("UC_SHARED_WORM_MAX_NODES", 3000);
 
-function humanRemaining(iso?: string): string {
-  try {
-    if (!iso) return "";
-    const ms = new Date(iso).getTime();
-    if (Number.isNaN(ms)) return "";
-    const mins = Math.floor((ms - Date.now()) / 60000);
-    if (mins < 0) return "resets soon";
-    if (mins < 60) return `resets in ${mins}m`;
-    if (mins < 1440) return `resets in ${Math.floor(mins / 60)}h ${mins % 60}m`;
-    return `${Math.floor(mins / 1440)}d left`;
-  } catch { return ""; }
-}
-
-type ProviderCoach = { id: string; name: string; fiveHour: number; weekly: number; fiveHourReset: string; weeklyReset: string; advice: string };
-
-/** spawn helper that captures stdout (never leaks to TUI). */
-function captureStdout(args: string[]): Promise<string> {
-  return new Promise((resolve) => {
-    let out = "";
-    let p;
-    try { p = spawn("codexbar", args, { stdio: ["ignore", "pipe", "ignore"] }); }
-    catch { return resolve(""); }
-    p.stdout?.on("data", (d) => { out += d.toString(); });
-    p.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT") codexbarMissing = true;
-      resolve("");
-    });
-    p.on("close", () => resolve(out));
-  });
-}
-
-/** enabled provider ids from `codexbar config providers`. */
-async function fetchEnabledProviders(): Promise<string[]> {
-  if (codexbarMissing) return [];
-  const out = await captureStdout(["config", "providers"]);
-  const ids: string[] = [];
-  for (const line of out.split("\n")) {
-    const m = line.match(/^\s*([a-zA-Z0-9_-]+):\s*enabled/);
-    if (m) ids.push(m[1]);
-  }
-  return ids;
-}
-
-/** per-provider coaching advice: big vs small task guidance based on 5h + weekly capacity. */
-function providerAdvice(h5: number | null, wk: number | null): string {
-  const S5H = STOP_5H, SWK = STOP_WK, T5H = THR_5H, TWK = THR_WK;
-  if ((h5 !== null && h5 >= S5H) || (wk !== null && wk >= SWK)) return "STOP — finish current only";
-  if (h5 !== null && wk !== null && h5 >= T5H && wk >= TWK) return "small tasks only — big ones will hit both limits";
-  if (h5 !== null && h5 >= T5H) return "small tasks only — 5h window nearly full, big tasks after reset";
-  if (wk !== null && wk >= TWK) return "small tasks only — big ones will strain late-week";
-  if ((h5 !== null && h5 >= 50) || (wk !== null && wk >= 50)) return "moderate tasks OK — save big ones for headroom";
-  return "big tasks OK — short & long limits comfortable";
-}
-
-/** fetch quota + advice for all enabled providers (coach view). */
-async function fetchProvidersCoach(): Promise<ProviderCoach[]> {
-  const ids = await fetchEnabledProviders();
-  const results = await Promise.all(ids.map(async (id) => {
-    try {
-      const out = await captureStdout(["usage", "--provider", id, "--json"]);
-      const q = parseQuotaResponse(out);
-      if (!q) return null;
-      const h5 = q.fiveHour ? Math.round(q.fiveHour.usedPercent ?? 0) : null;
-      const wk = q.weekly ? Math.round(q.weekly.usedPercent ?? 0) : null;
-      return {
-        id, name: id,
-        fiveHour: h5 ?? -1, weekly: wk ?? -1,
-        fiveHourReset: q.fiveHour ? humanRemaining(q.fiveHour.resetsAt) : "",
-        weeklyReset: q.weekly ? humanRemaining(q.weekly.resetsAt) : "",
-        advice: providerAdvice(h5, wk),
-      } as ProviderCoach;
-    } catch { return null; }
-  }));
-  return results.filter(Boolean) as ProviderCoach[];
-}
-
-/** Parse raw codexbar --json output into a Quota object. Pure function — no I/O.
- *  Classifies windows by windowMinutes/resetDescription, falling back to slot
- *  position (primary/secondary/tertiary) for legacy data without those fields. */
-export function parseQuotaResponse(rawText: string): Quota | null {
-  try {
-    const text = (rawText || "").trim();
-    if (!text || text === "[]") return null;
-    const u = (JSON.parse(text)[0]?.usage) as { primary?: QuotaWindow; secondary?: QuotaWindow; tertiary?: QuotaWindow } | undefined;
-    if (!u) return null;
-
-    const result: Quota = { weekly: null, monthly: null, fiveHour: null };
-    const entries = [
-      { key: "primary", slot: u.primary },
-      { key: "secondary", slot: u.secondary },
-      { key: "tertiary", slot: u.tertiary },
-    ].filter((e) => e.slot != null);
-
-    for (const { key, slot } of entries) {
-      const mins = slot!.windowMinutes ?? 0;
-      const desc = String(slot!.resetDescription ?? "").toLowerCase();
-
-      if (mins === 300 || desc.includes("5 hour") || desc.includes("5h")) {
-        result.fiveHour = slot!;
-      } else if (mins === 10080 || desc.includes("week")) {
-        result.weekly = slot!;
-      } else if (desc.includes("month")) {
-        result.monthly = slot!;
-      } else if (mins > 0 && mins <= 360) {
-        result.fiveHour = slot!;
-      } else if (mins > 360 && mins <= 14400) {
-        result.weekly = slot!;
-      } else if (mins > 14400) {
-        result.monthly = slot!;
-      } else if (key === "primary") {
-        result.weekly = slot!;
-      } else if (key === "secondary") {
-        result.monthly = slot!;
-      } else if (key === "tertiary") {
-        result.fiveHour = slot!;
-      }
-    }
-
-    return result;
-  } catch { return null; }
-}
-
-// spawn codexbar — capture stdout in a pipe only, never leak to parent stdio (TUI).
-// (opencode $ BunShell displays command output in the TUI, so $ must not be used here.)
-// provider="" omits --provider so codexbar uses its default.
-function fetchQuota(provider: string): Promise<Quota | null> {
-  return new Promise((resolve) => {
-    let out = "";
-    let p;
-    try {
-      const args = provider ? ["usage", "--provider", provider, "--json"] : ["usage", "--json"];
-      p = spawn("codexbar", args, {
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-    } catch { return resolve(null); }
-    p.stdout?.on("data", (d) => { out += d.toString(); });
-    p.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT") codexbarMissing = true;
-      resolve(null);
-    });
-    p.on("close", () => {
-      resolve(parseQuotaResponse(out));
-    });
-  });
-}
-
-/** fetchQuota with retry: max 3 attempts with 1s, 2s delays between failures. */
-export async function fetchQuotaWithRetry(provider: string, maxRetries = 3): Promise<Quota | null> {
-  if (codexbarMissing) return null;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const q = await fetchQuota(provider);
-    if (q) return q;
-    if (attempt < maxRetries - 1) {
-      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-    }
-  }
-  return null;
-}
-
-function coach(q: Quota | null, lighter: string): Coaching {
-  if (!q) return { decision: "GO", advice: "quota unavailable — retrying. proceeding cautiously.", weekly: -2, monthly: -2, fiveHour: -2 };
-  const wk = q.weekly ? Math.round(q.weekly.usedPercent ?? 0) : null;
-  const mo = q.monthly ? Math.round(q.monthly.usedPercent ?? 0) : null;
-  const h5 = q.fiveHour ? Math.round(q.fiveHour.usedPercent ?? 0) : null;
-  if ((wk !== null && Number.isNaN(wk)) || (mo !== null && Number.isNaN(mo)) || (h5 !== null && Number.isNaN(h5))) {
-    const sWk = wk !== null && !Number.isNaN(wk) ? wk : 0;
-    const sMo = mo !== null && !Number.isNaN(mo) ? mo : 0;
-    const sH5 = h5 !== null && !Number.isNaN(h5) ? h5 : 0;
-    return { decision: "THROTTLE", advice: "invalid quota data — proceeding with caution. switch to lighter model if available.", weekly: sWk, monthly: sMo, fiveHour: sH5 };
-  }
-  const wkR = q.weekly ? humanRemaining(q.weekly.resetsAt) : "";
-  const h5R = q.fiveHour ? humanRemaining(q.fiveHour.resetsAt) : "";
-  const stop = (r: string): Coaching => ({ decision: "STOP", advice: `STOP recommend — ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
-  const thr = (r: string): Coaching => ({ decision: "THROTTLE", advice: `Throttle recommend — ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
-  if (h5 !== null && h5 >= STOP_5H) return stop(`5h window ${h5}% (${h5R})`);
-  if (wk !== null && wk >= STOP_WK) return stop(`weekly ${wk}% (${wkR})`);
-  if (mo !== null && mo >= STOP_MO) return stop(`monthly ${mo}%`);
-  if (h5 !== null && h5 >= THR_5H) return thr(`5h window ${h5}% (${h5R})`);
-  if (wk !== null && wk >= THR_WK) return thr(`weekly ${wk}% (${wkR})`);
-  const parts: string[] = [];
-  if (wk !== null) parts.push(`weekly ${wk}%`);
-  if (h5 !== null) parts.push(`5h ${h5}%`);
-  if (mo !== null) parts.push(`monthly ${mo}%`);
-  const summary = parts.length > 0 ? parts.join(" · ") : "no quota limits detected";
-  const resetInfo = h5R ? ` 5h window ${h5R}.` : wkR ? ` weekly ${wkR}.` : "";
-  return { decision: "GO", advice: `Comfortable — ${summary}. proceed.${resetInfo}`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 };
-}
+// (humanRemaining / ProviderCoach / captureStdout / fetchEnabledProviders /
+//  providerAdvice / fetchProvidersCoach / parseQuotaResponse / fetchQuota /
+//  fetchQuotaWithRetry / coach / isFreeModel / providerToCodexbar / LOADING /
+//  codexbarMissing + accessors all moved to quota.ts — re-exported below.)
 
 // Resolve the current session's agent name + model + provider via the SDK client.
-// Cached per sessionID (60s TTL). Also detects model changes (triggers quota refresh).
+// Cached per sessionID (60s TTL). Model-change detection moved into
+// QuotaMachine.setModel() — callers feed the returned {model, provider} into the
+// machine, which flips `modelChanged` (forces the next quota refresh).
+export type AgentInfo = { agent: string; model: string; provider: string };
 const agentCache = new Map<string, { agent: string; model: string; provider: string; ts: number }>();
-// Global: last-known model/provider (updated by resolveAgent, read by refreshBackground)
-let currentModel = "";
-let currentProvider = "";
+// Last-known agent name (updated by the execute.before hooks, read via writeState payload)
 let currentAgent = "";
-let modelChanged = false; // set by resolveAgent on model change, cleared by refreshBackground
-let codexbarMissing = false; // set true on ENOENT — skip all future codexbar spawns
 
-/** Test accessor for the codexbarMissing flag. */
-export function isCodexbarMissing(): boolean { return codexbarMissing; }
+const EMPTY_AGENT: AgentInfo = { agent: "", model: "", provider: "" };
 
-/** Test-only: reset the codexbarMissing flag for test isolation. */
-export function __resetCodexbarMissing(): void { codexbarMissing = false; }
-
-function isFreeModel(model: string, provider: string): boolean {
-  if (!model && !provider) return false;
-  if (provider === "opencode") return true;
-  if (model.toLowerCase().includes("free")) return true;
-  return false;
-}
-
-// Map opencode providerID (e.g. "zai-coding-plan") to codexbar provider name (e.g. "zai").
-function providerToCodexbar(provider: string): string {
-  if (!provider) return "";
-  const first = provider.split("-")[0];
-  return first || provider; // fallback to full provider if first segment is empty (e.g. "-openai")
-}
-
-async function resolveAgent(client: any, sessionID: string): Promise<string> {
-  if (!sessionID) return "";
+export async function resolveAgent(session: SessionOps, sessionID: string): Promise<AgentInfo> {
+  if (!sessionID) return EMPTY_AGENT;
   const hit = agentCache.get(sessionID);
   if (hit && Date.now() - hit.ts < 60000) {
-    currentModel = hit.model;
-    currentProvider = hit.provider;
-    return hit.agent;
+    return { agent: hit.agent, model: hit.model, provider: hit.provider };
   }
   try {
-    const s: any = await client.session.get({ path: { id: sessionID } });
+    // The facade already unwraps `data.info ?? data ?? info ?? s` (null when empty).
+    const info: any = await session.get(sessionID);
     // Debug: dump the raw session object structure to find model/provider fields
-    log(`resolveAgent raw session: ${JSON.stringify(s?.data?.info ?? s?.data ?? s?.info ?? s).slice(0, 500)}`);
-    const info = s?.data?.info ?? s?.data ?? s?.info ?? s;
+    log(`resolveAgent raw session: ${JSON.stringify(info).slice(0, 500)}`);
     const agent = String(info?.agent ?? "");
     // model might be an object like { id: "...", providerID: "..." } or a string
     const rawModel = info?.model;
     const model = typeof rawModel === "string" ? rawModel : (rawModel?.id ?? rawModel?.modelID ?? rawModel?.name ?? "");
     const rawProvider = info?.providerID ?? info?.provider ?? (typeof rawModel === "object" ? rawModel?.providerID ?? rawModel?.provider : "");
     const provider = typeof rawProvider === "string" ? rawProvider : (rawProvider?.id ?? "");
-    // Detect model change
-    if (currentModel && model && currentModel !== model) {
-      log(`MODEL CHANGED: ${currentModel} → ${model} (provider: ${currentProvider} → ${provider})`);
-      modelChanged = true;
-    }
     agentCache.set(sessionID, { agent, model, provider, ts: Date.now() });
-    currentModel = model;
-    currentProvider = provider;
-    return agent;
-  } catch (e) { log(`resolveAgent err: ${String(e)}`); return ""; }
+    return { agent, model, provider };
+  } catch (e) { log(`resolveAgent err: ${String(e)}`); return EMPTY_AGENT; }
 }
-function isHarnessAgent(agent: string): boolean {
+export function isHarnessAgent(agent: string): boolean {
   if (!agent) return false;
   return HARNESS_AGENTS.includes(agent.toLowerCase());
 }
 
-const LOADING: Coaching = { decision: "GO", advice: "quota loading…", weekly: -1, monthly: -1, fiveHour: -1 };
-
-export default async function UsageCoachPlugin(input: {
+// V1 plugin factory (opencode ≤1.x hosts). Kept as the DEFAULT legacy entry; the
+// dual default export (bottom of this file) layers the V2 adapter on top. The
+// quota state machine (last/lastFetchedAt/refreshing/current/modelChanged,
+// refreshBackground/current) now lives in quota.ts — this closure is a thin
+// consumer, identical in behavior to the pre-extraction code.
+export async function UsageCoachPlugin(input: {
   project: unknown; client: unknown;
   $: (s: TemplateStringsArray, ...v: unknown[]) => Promise<{ stdout?: { toString(): string } | string }>;
   directory: string; worktree: string;
@@ -1478,6 +1311,10 @@ export default async function UsageCoachPlugin(input: {
   try {
     setStateDir(input.directory); // per-directory state isolation
     initDomain(STATE_DIR); // domain DB shares the same per-project state dir
+    // Version-agnostic runtime: ALL session ops below route through the SessionOps
+    // facade instead of touching the V1 client directly. The V2 migration replaces
+    // this one line (a ctx-based adapter), not the call sites.
+    const rt: Runtime = { directory: input.directory, session: makeV1SessionOps(input.client) };
     // Provider + lighter model: env > config > empty (codexbar picks its default).
     // No hardcoded provider — this plugin is provider-agnostic.
     const cfg0 = readHarnessCfg(input.directory);
@@ -1485,75 +1322,41 @@ export default async function UsageCoachPlugin(input: {
     // UC_AUTOLINK env var — the domain gate (autoLinkKeywords) reads env, so we project
     // the cfg value onto process.env at load time. When cfg is unset, env alone controls.
     if (cfg0.domainAutoLink !== undefined) process.env.UC_AUTOLINK = cfg0.domainAutoLink ? "1" : "0";
-    const PROVIDER = process.env.UC_PROVIDER ?? cfg0.provider ?? "";
-    const LIGHTER = process.env.UC_LIGHTER_MODEL ?? cfg0.lighterModel ?? "a lighter model";
-    let last: Coaching | null = null;
-    let lastKnownQuota: Quota | null = null; // persists across refresh cycles for retry fallback
-    let lastFetchedAt = 0;
-    let refreshing = false;
+    // Quota machine: owns the SENSE→DECIDE cycle (codexbar fetch, TTL dedup,
+    // free-model short-circuit, providers coach view, state.json writes).
+    const quota = createQuotaMachine({
+      directory: input.directory,
+      provider: process.env.UC_PROVIDER ?? cfg0.provider ?? "",
+      lighter: process.env.UC_LIGHTER_MODEL ?? cfg0.lighterModel ?? "a lighter model",
+      getAgent: () => currentAgent,
+    });
 
-    // Background refresh: never awaited. Skips re-call within TTL.
-    // Also triggered on model change (lastFetchedAt reset by caller).
-    const refreshBackground = () => {
-      try {
-        if (refreshing) return;
-        if (codexbarMissing) {
-          last = { decision: "GO", advice: "codexbar not installed — running in GO-only mode (no quota sensing).", weekly: -3, monthly: -3, fiveHour: -3 };
-          lastFetchedAt = Date.now();
-          refreshing = false;
-          return;
-        }
-        if (last && !modelChanged && Date.now() - lastFetchedAt < TTL_MS) return;
-        refreshing = true;
-        modelChanged = false; // consumed
-
-        // Free model short-circuit: no quota to track.
-        if (isFreeModel(currentModel, currentProvider)) {
-          last = { decision: "GO", advice: `${currentModel || currentProvider || "free model"} — no quota limit.`, weekly: -1, monthly: -1, fiveHour: -1, model: currentModel, provider: currentProvider, isFree: true };
-          lastFetchedAt = Date.now();
-          writeState({ ...last, providers: [], model: currentModel, provider: currentProvider, isFree: true, agent: currentAgent, updatedAt: new Date().toISOString() } as any);
-          log(`FREE | model=${currentModel} provider=${currentProvider}`);
-          refreshing = false;
-          return;
-        }
-
-        // Paid model: fetch quota for the ACTIVE provider (detected from session), mapped to codexbar name.
-        const activeProvider = providerToCodexbar(currentProvider) || PROVIDER;
-        fetchQuotaWithRetry(activeProvider).then(async (q) => {
-          try {
-            if (q) lastKnownQuota = q; // cache for retry fallback
-            const effectiveQ = q ?? lastKnownQuota; // fall back to last known good
-            last = coach(effectiveQ, LIGHTER); lastFetchedAt = Date.now();
-            // also fetch per-provider coach view (best-effort, non-blocking on failure)
-            let providers: ProviderCoach[] = [];
-            try { providers = await fetchProvidersCoach(); } catch { /* */ }
-            // If primary fetch failed (all windows < 0) but providers have real data,
-            // restore the top-level from providers[0] so the TUI/advice show real numbers.
-            if (providers.length > 0 && last.weekly < 0 && last.fiveHour < 0) {
-              const p0 = providers[0];
-              const newWeekly = p0.weekly >= 0 ? p0.weekly : last.weekly;
-              const newFiveHour = p0.fiveHour >= 0 ? p0.fiveHour : last.fiveHour;
-              const newDecision = (newWeekly >= STOP_WK || newFiveHour >= STOP_5H) ? "STOP" : (newWeekly >= THR_WK || newFiveHour >= THR_5H) ? "THROTTLE" : "GO";
-              last = { ...last, weekly: newWeekly, fiveHour: newFiveHour, advice: p0.advice, decision: newDecision };
-            }
-            writeState({ ...last, providers, model: currentModel, provider: currentProvider, isFree: false, agent: currentAgent, updatedAt: new Date().toISOString() } as any);
-            log(`${last.decision} | weekly=${last.weekly}% 5h=${last.fiveHour}% | providers=${providers.length}`);
-          }
-          catch (e) { log(`refresh-in-then err: ${String(e)}`); }
-        }).catch((e) => { log(`fetchQuotaWithRetry err: ${String(e)}`); }).finally(() => { refreshing = false; });
-      } catch (e) { log(`refreshBackground err: ${String(e)}`); }
-    };
-
-    // Sync current value: never throws. On error returns LOADING (GO).
-    const current = (): Coaching => {
-      try { if (!last) refreshBackground(); return last ?? LOADING; }
-      catch { return LOADING; }
-    };
+    // ToolHost — the version-agnostic bridge tool-defs.ts executes against.
+    // Tools only ever see the quota machinery through this interface.
+    const host: ToolHost = { rt, current: quota.current, refresh: quota.refresh };
+    // Rebuild the V1 tool map from the shared definitions: JSON Schema args are
+    // converted to `tool.schema` (zod) via schema-convert; the V2 adapter will
+    // consume the same defs directly. This loop is the ONLY V1-specific wiring.
+    const defs = buildToolDefs();
+    const toolMap: Record<string, any> = {};
+    for (const def of defs) {
+      toolMap[def.name] = tool({
+        description: def.description,
+        // zod's generic builder signatures are not statically assignable to the
+        // structural SchemaLibLike (method bivariance does not span generics),
+        // but the runtime shapes line up exactly: every builder returns a
+        // chainable node with .describe()/.optional(). Hence the local cast.
+        args: convertSchema(def.name, def.schema, tool.schema as unknown as SchemaLibLike),
+        async execute(args: any, ctx: any) {
+          return def.execute(args, { sessionID: ctx?.sessionID, directory: ctx?.directory ?? rt.directory }, host);
+        },
+      });
+    }
 
     return {
       event: async ({ event }: { event: { type: string } }) => {
         try {
-          if (event.type === "session.created" || event.type === "session.idle") refreshBackground();
+          if (event.type === "session.created" || event.type === "session.idle") quota.refresh();
           // Worm (GC): run the domain-DB eviction on idle. Cheap no-op when nothing is stale.
           // evictStale = project layer (UC_WORM_*), evictSharedStale = shared layer
           // (UC_SHARED_WORM_*, default 60d/3000) — fixes the "shared grows unbounded"
@@ -1567,20 +1370,21 @@ export default async function UsageCoachPlugin(input: {
       // Then hard-gate harness tools by agent mode + quota STOP.
       "tool.execute.before": async (_input: { tool: string; sessionID: string; callID: string }) => {
         // Detect model + agent on every tool call (bash, read, write, etc.) — not just harness tools.
-        const agent = await resolveAgent(input.client, _input.sessionID);
-        currentAgent = agent;
-        refreshBackground(); // picks up model changes immediately
+        const info = await resolveAgent(rt.session, _input.sessionID);
+        currentAgent = info.agent;
+        quota.setModel(info.model, info.provider);
+        quota.refresh(); // picks up model changes immediately
 
         const harnessTools = ["unknown_scan", "question", "generate", "generate_batch", "grade", "grade_batch", "investigate", "verify_diagnosis", "generalize", "harness_start", "task_update", "harness_done", "record_failure", "reverse_interview"];
         if (!harnessTools.includes(_input.tool)) return; // only harness tools are gated below
-        if (!isHarnessAgent(agent)) {
-          throw new Error(`[${PLUGIN_NAME}] '${_input.tool}' is restricted to agent mode ${JSON.stringify(HARNESS_AGENTS)} (current: ${JSON.stringify(agent || "unknown")}). Switch to that agent mode to use it.`);
+        if (!isHarnessAgent(info.agent)) {
+          throw new Error(`[${PLUGIN_NAME}] '${_input.tool}' is restricted to agent mode ${JSON.stringify(HARNESS_AGENTS)} (current: ${JSON.stringify(info.agent || "unknown")}). Switch to that agent mode to use it.`);
         }
         // (2) quota gate: STOP blocks quota-consuming harness tools.
         let decision: Decision;
-        try { decision = current().decision; } catch { decision = "GO"; } // safe default
+        try { decision = quota.current().decision; } catch { decision = "GO"; } // safe default
         if (decision === "STOP") {
-          throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${current().advice}`);
+          throw new Error(`[${PLUGIN_NAME}] blocked: quota limit exceeded. ${quota.current().advice}`);
         }
       },
 
@@ -1589,11 +1393,12 @@ export default async function UsageCoachPlugin(input: {
       "experimental.chat.system.transform": async (_input: { sessionID?: string }, output: { system: string[] }) => {
         try {
           if (_input.sessionID) {
-            const agent = await resolveAgent(input.client, _input.sessionID);
-            refreshBackground(); // picks up model changes immediately
-            if (!isHarnessAgent(agent)) return; // not harness mode — don't inject
+            const info = await resolveAgent(rt.session, _input.sessionID);
+            quota.setModel(info.model, info.provider);
+            quota.refresh(); // picks up model changes immediately
+            if (!isHarnessAgent(info.agent)) return; // not harness mode — don't inject
           }
-          const c = current();
+          const c = quota.current();
           let instruction = "";
           if (c.decision === "STOP") instruction = `[${PLUGIN_NAME}] QUOTA limit exceeded. ${c.advice} Stop making further tool calls, finish the in-progress work, then report the quota status to the user.`;
           else if (c.decision === "THROTTLE") instruction = `[${PLUGIN_NAME}] ${c.advice} Hold off on long/heavy tasks.`;
@@ -1609,971 +1414,10 @@ export default async function UsageCoachPlugin(input: {
       },
 
       // Custom tools for the harness agent mode — report status to the panel.
-      tool: {
-        harness_start: tool({
-          description: "Start the harness: register the total task count on the panel. Call once when the harness loop begins. IMPORTANT: each generate/generate_batch sub-session is step-limited (default 30). If any task seems too large, split it into smaller subtasks BEFORE starting — oversized tasks will timeout.",
-          args: { name: tool.schema.string(), total: tool.schema.number() },
-          async execute(args: { name: string; total: number }, ctx: any) {
-            writeHarness(ctx.sessionID, { name: args.name, total: args.total, current: 0, tasks: [], usage: {}, active: true, scanRequired: true, startedAt: new Date().toISOString() });
-            return `Harness '${args.name}' started (${args.total} tasks).
-
-⚠ DIAGNOSIS GATE — unknown_scan is REQUIRED before generate/generate_batch.
-  unknown_scan({ prompt: "<user request>", tasks: [{id:1, title:"..."}, ...] })
-  If you skip it, generate will inject a ⚠ warning into the sub-session prompt.
-  Review the report: if QUESTIONS are flagged → call question() to present them
-  to the user BEFORE generate (it is enforced — generate will block with a
-  warning until answers are recorded). If TASK REFINEMENTS are suggested →
-  apply via task_update. Unknown unknowns found will be automatically injected
-  into generate prompts as context.
-
-STEP LIMIT (default ${DEFAULT_MAX_STEPS}): each generate call creates a sub-session that is automatically aborted if it exceeds ${DEFAULT_MAX_STEPS} assistant steps. Before starting the loop, review each task: can it be completed in a focused, single-pass effort? If a task seems too broad (multiple files, multiple features, open-ended research), SPLIT it now into 2-3 smaller subtasks. A timeout wastes quota — split upfront.
-
-DETERMINISTIC LOOP — first classify the tasks:
-  INDEPENDENT = task B does NOT need task A's output  ->  use PATH A (parallel, faster)
-  DEPENDENT   = task B needs task A's output          ->  use PATH B (sequential)
-
-PATH A — INDEPENDENT (parallel via generate_batch + grade_batch):
-  1. task_update(1..${args.total}, title, "generating")
-  2. generate_batch({tasks: [{id:1, prompt:"Task: <title1>. Perform it."}, ...]})  -> all results + NEXT
-  3. task_update(1..${args.total}, title, "grading")
-  4. grade_batch({tasks: [{id:1, prompt:"Evaluate... PASS/FAIL first line. Task: <title1>"}, ...]})  -> all verdicts + per-task NEXT
-  5. for each i: PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or task_update(i, title, "failed", "FAIL")
-  Note: grade_batch runs all grades IN PARALLEL — much faster than grading one-by-one.
-  After revisions, you can grade_batch the revised tasks together too.
-
-PATH B — DEPENDENT (sequential — one task at a time):
-  Optional: task_update(1..N, title, "pending")  ← pre-register all tasks first
-  for i in 1..${args.total}:
-    1. task_update(i, title, "generating")
-    2. generate({prompt:"Task: <title>. Perform it."})  -> work + NEXT
-    3. task_update(i, title, "grading")
-    4. grade(...)  -> verdict + NEXT
-    5. PASS -> task_update(i, title, "completed", "PASS"); FAIL -> revise (up to 2x) or failed
-  Note: use single grade() here — tasks are dependent, grading is one at a time.
-
-Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns. Do NOT improvise the sequence.`;
-          },
-        }),
-        unknown_scan: tool({
-          description: "Pre-flight gap analysis: call AFTER harness_start, BEFORE generate. Scans the codebase against the user's request to find blind spots (unknown unknowns) that could waste 30+ steps if discovered late. Returns identified unknowns + task split suggestions + user confirmation questions. Writes results to harness.json for TUI display.",
-          args: {
-            prompt: tool.schema.string().describe("The user's original request (the full prompt that triggered the harness)."),
-            tasks: tool.schema.array(tool.schema.object({ id: tool.schema.number(), title: tool.schema.string() })).optional().describe("Tasks registered via harness_start (id + title). If omitted, a single task derived from the prompt is assumed."),
-            skip_scan: tool.schema.boolean().optional().describe("true: skip codebase scan and do prompt analysis only (default false; auto-skips for dirs with <5 files)."),
-          },
-          async execute(args: { prompt: string; tasks?: Array<{ id: number; title: string }>; skip_scan?: boolean }, ctx: any) {
-            const tasks = args.tasks && args.tasks.length > 0
-              ? args.tasks
-              : [{ id: 1, title: args.prompt.slice(0, 80) }];
-
-            // ── PHASE 1 — Codebase Profile (deterministic, via spawn — NOT input.$ which leaks to TUI) ──
-            let profile: CodebaseProfile;
-            if (args.skip_scan) {
-              profile = { skipped: true, reason: "skip_scan requested", language: "unknown", frameworks: [], structure: [], manifestFiles: [], keyDeps: [], configFiles: [], totalFiles: 0 };
-            } else {
-              try {
-                // Use spawnSync (not input.$ / BunShell) — BunShell leaks stdout to the TUI.
-                const dir = ctx.directory || ".";
-                const result = spawnSync("find", [
-                  dir, "-maxdepth", "4", "-type", "f",
-                  "-not", "-path", "*/node_modules/*",
-                  "-not", "-path", "*/.git/*",
-                  "-not", "-path", "*/dist/*",
-                  "-not", "-path", "*/.cache/*",
-                ], { encoding: "utf8", timeout: 10000, maxBuffer: 1024 * 1024 });
-                const fileList = result.stdout || "";
-                profile = parseFileList(fileList, ctx.directory);
-                if (profile.totalFiles < 5) {
-                  profile = { ...profile, skipped: true, reason: `directory nearly empty (${profile.totalFiles} files)` };
-                }
-              } catch (e) {
-                profile = { skipped: true, reason: `scan error: ${String(e).slice(0, 100)}`, language: "unknown", frameworks: [], structure: [], manifestFiles: [], keyDeps: [], configFiles: [], totalFiles: 0 };
-              }
-            }
-
-            // ── PHASE 2 — Domain DB Query (graph-enhanced, maxDepth=2) ──
-            let domainNodes: any[] = [];
-            let domainHits = 0;
-            try {
-              const combined = `${args.prompt} ${tasks.map((t) => t.title).join(" ")}`;
-              const kw = extractKeywords(combined);
-              if (kw.length) {
-                const graph = queryDomainGraph(kw, 2);
-                domainNodes = graph.nodes || [];
-                domainHits = domainNodes.length;
-              }
-            } catch (e) { log(`unknown_scan domain query err: ${String(e)}`); }
-
-            // ── PHASE 2.5 — Web Search (3-tier: official docs → GitHub issues → code) ──
-            let webResults: WebResult[] = [];
-            let docRefs: Array<{ name: string; url: string }> = [];
-            try {
-              const searchQuery = `${args.prompt} ${tasks.map((t) => t.title).join(" ")}`.slice(0, 256);
-              const webResp = await webSearch(searchQuery, profile.frameworks, profile.keyDeps);
-              webResults = webResp.results;
-              docRefs = webResp.docRefs;
-              if (webResp.error) log(`unknown_scan web search: ${webResp.error}`);
-              log(`unknown_scan web search: ${webResults.length} results, ${docRefs.length} doc refs`);
-            } catch (e) { log(`unknown_scan web search err: ${String(e).slice(0, 200)}`); }
-
-            // ── PHASE 3 — Gap Analysis (model-assisted, quota-aware) ──
-            const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) {
-              const result: UnknownScanResult = {
-                scannedAt: new Date().toISOString(), codebaseProfile: profile,
-                knownKnowns: [], knownUnknowns: [], unknownKnowns: [], unknownUnknowns: [],
-                questions: [], taskRefinements: [], domainHits, domainMisses: 0,
-                rawAnalysis: "ERROR: no generator configured",
-              };
-              writeUnknownScan(ctx.sessionID, result);
-              return formatReport(result) + '\n\nERROR: no generator model configured. Set "generator" in harness.config.json for model-assisted analysis.';
-            }
-            let decision = "GO"; try { decision = current().decision; } catch { /* */ }
-            if (decision === "STOP") {
-              const result: UnknownScanResult = {
-                scannedAt: new Date().toISOString(), codebaseProfile: profile,
-                knownKnowns: [], knownUnknowns: [], unknownKnowns: [], unknownUnknowns: [],
-                questions: [], taskRefinements: [], domainHits, domainMisses: 0,
-                rawAnalysis: "quota STOP — model analysis skipped",
-              };
-              writeUnknownScan(ctx.sessionID, result);
-              return formatReport(result) + "\n\n[usage-coach] quota STOP — model-assisted analysis skipped. Proceed with caution.";
-            }
-            const throttle = decision === "THROTTLE" && cfg.lighterModel;
-            const model = throttle ? cfg.lighterModel! : cfg.generator;
-            const gapPrompt = buildGapPrompt(args.prompt, tasks, profile, domainNodes, webResults, docRefs);
-            const raw = await runModel(input.client, model, gapPrompt, ctx.directory, undefined, 15);
-
-            // ── PHASE 3b — Parse model output ──
-            const result = parseGapAnalysis(raw, profile, domainHits);
-            result.webResults = webResults;
-            result.docRefs = docRefs;
-
-            // ── PHASE 4 — Domain DB Store (new findings) ──
-            try {
-              for (const uk of result.unknownKnowns.slice(0, 5)) {
-                const kw = extractKeywords(uk.finding);
-                if (kw.length) saveInvestigationResult(kw, uk.finding, "unknown_scan");
-              }
-              for (const uu of result.unknownUnknowns.slice(0, 3)) {
-                const kw = extractKeywords(uu.finding);
-                if (kw.length) saveInvestigationResult(kw, `${uu.finding} (impact: ${uu.impact})`, "unknown_scan");
-              }
-            } catch (e) { log(`unknown_scan save err: ${String(e)}`); }
-
-            // ── PHASE 5 — Persist + Return ──
-            writeUnknownScan(ctx.sessionID, result);
-            return formatReport(result);
-          },
-        }),
-        question: tool({
-          description: "Present unknown_scan questions to the user. REQUIRED after unknown_scan finds questions — call BEFORE generate. First call (no answers) returns the questions formatted for presentation. Present them to the user, then call again with their answers.",
-          args: {
-            answers: tool.schema.record(tool.schema.string(), tool.schema.string()).optional().describe("User's answers keyed by question ID (e.g. {\"Q1\": \"yes\", \"Q2\": \"node\"}). Omit on first call to get the questions."),
-          },
-          async execute(args: { answers?: Record<string, string> }, ctx: any) {
-            const h = readHarness(ctx.sessionID);
-            if (!h || !h.unknownScan || !h.unknownScan.questions?.length) {
-              return "No questions from unknown_scan. [usage-coach NEXT] proceed to generate.";
-            }
-            const questions = h.unknownScan.questions;
-
-            // First call: no answers → present questions to the user
-            if (!args.answers) {
-              const lines = [`unknown_scan found ${questions.length} question(s) that need user input before proceeding:\n`];
-              questions.forEach((q) => {
-                lines.push(`[${q.id}] ${q.question}`);
-              });
-              lines.push("\nPresent ALL of these questions to the user. Collect their answers, then call question({ answers: { \"" + questions[0].id + "\": \"...\" } }) with ALL answers.");
-              lines.push("[usage-coach NEXT] Present the questions above to the user verbatim. After they respond, call question({answers:{...}}) to record answers, then proceed to generate.");
-              return lines.join("\n");
-            }
-
-            // Second call: answers provided → store them
-            h.questionsResolved = true;
-            h.questionAnswers = args.answers;
-            writeHarness(ctx.sessionID, h);
-
-            const answered = Object.keys(args.answers).length;
-            const lines = [`Questions resolved (${answered}/${questions.length} answered).\n`];
-            questions.forEach((q) => {
-              const ans = args.answers![q.id];
-              if (ans) lines.push(`  ${q.id}: ${q.question}\n  → ${ans}`);
-            });
-            lines.push("\n[usage-coach NEXT] Answers recorded. Proceed to generate — they will be injected into the sub-session prompt.");
-            return lines.join("\n");
-          },
-        }),
-        task_update: tool({
-          description: "Update a harness task's status on the panel. Call whenever a task transitions to generating/grading/revising/completed/failed.",
-          args: {
-            id: tool.schema.number(),
-            title: tool.schema.string(),
-            status: tool.schema.string().describe("pending | generating | grading | revising | completed | failed | timed_out"),
-            revisions: tool.schema.number().optional(),
-            score: tool.schema.string().optional().describe("PASS | FAIL"),
-            model: tool.schema.string().optional(),
-          },
-          async execute(args: { id: number; title: string; status: string; revisions?: number; score?: string; model?: string }, ctx: any) {
-            const VALID_STATUSES = ["pending", "generating", "grading", "revising", "completed", "failed", "timed_out", "halted_quota"];
-            // Default to "generating" if status is missing/invalid — keeps the harness moving
-            // instead of blocking with an error that the model has to retry.
-            const status = args.status && VALID_STATUSES.includes(args.status) ? args.status : "generating";
-            const cfg = readHarnessCfg(ctx.directory);
-            const h = readHarness(ctx.sessionID) ?? { name: "batch", total: 0, current: 0, tasks: [], usage: {}, active: true };
-            h.tasks = h.tasks.filter((x: any) => x.id !== args.id);
-            // Model is required for quota tracking. Auto-fill from config.generator if not provided.
-            const model = args.model || cfg.generator || "";
-            if (!model) return `ERROR: task ${args.id} has no model and no generator configured. Set "generator" in harness.config.json.`;
-            h.tasks.push({ id: args.id, title: args.title, status, model, revisions: args.revisions ?? 0, score: args.score ?? null, startedAt: new Date().toISOString() });
-            if (args.id > h.current) h.current = args.id;
-            writeHarness(ctx.sessionID, h);
-            return `task ${args.id} -> ${status}${args.score ? ` (${args.score})` : ""}`;
-          },
-        }),
-        harness_done: tool({
-          description: "Mark the harness as complete — call when the loop ends.",
-          args: {},
-          async execute(_args: any, ctx: any) {
-            const h = readHarness(ctx.sessionID);
-            if (h) { h.current = h.total; h.active = false; writeHarness(ctx.sessionID, h); }
-            return "Harness complete.";
-          },
-        }),
-        record_failure: tool({
-          description: "Stage 1 (RECORD) of the learning loop. Append a failure record to failures.ndjson for later root-cause analysis.",
-          args: {
-            task: tool.schema.string(),
-            prompt: tool.schema.string(),
-            gradeResult: tool.schema.string(),
-            model: tool.schema.string().optional(),
-            revisions: tool.schema.number().optional(),
-          },
-          async execute(args: { task: string; prompt: string; gradeResult: string; model?: string; revisions?: number }, _ctx: any) {
-            const rec = { ts: new Date().toISOString(), task: args.task, prompt: args.prompt, gradeResult: args.gradeResult, model: args.model, revisions: args.revisions };
-            try { mkdirSync(STATE_DIR, { recursive: true }); appendFileSync(failuresFile(), JSON.stringify(rec) + "\n"); } catch (e) { log(`record_failure err: ${String(e)}`); }
-            return `Failure recorded. [usage-coach NEXT] call investigate({failure: ${JSON.stringify(rec)}}) to find the root cause.`;
-          },
-        }),
-        investigate: tool({
-          description: "Stage 2 (INVESTIGATE) of the learning loop. Run the generator to analyze the ROOT CAUSE of a failure (not just the symptom).",
-          args: {
-            task: tool.schema.string(),
-            prompt: tool.schema.string(),
-            gradeResult: tool.schema.string(),
-            model: tool.schema.string().optional(),
-          },
-          async execute(args: { task: string; prompt: string; gradeResult: string; model?: string }, ctx: any) {
-            const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json).";
-            // Query domain DB for known facts before analyzing root cause.
-            let domainPrefix = "";
-            let keywords: string[] = [];
-            let domainEmpty = true;
-            try {
-              keywords = extractKeywords(`${args.task} ${args.gradeResult}`);
-              if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes ?? 12 });
-                // Injection provenance — record even on miss (nodeIds: []) so recall has a denominator.
-                logDomainInjection(keywords, nodes.map((n) => n.id));
-                if ((nodes && nodes.length) || (edges && edges.length)) {
-                  domainEmpty = false;
-                  domainPrefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n`;
-                }
-              }
-            } catch (e) { log(`investigate domain query err: ${String(e)}`); }
-            const rcaPrompt = `A task failed. Analyze the ROOT CAUSE (not just the symptom).\nTask: ${args.task}\nWhat was expected (from grade): ${args.gradeResult}\nRead relevant files in the directory if needed.\nOutput a structured root cause:\ncategory: (one of: constraint-violation, missing-context, tool-misuse, model-limitation, other)\nexplanation: <why it failed>\nevidence: <file/line or specific quote>`;
-            const invTaskId = findActiveTaskId(ctx.sessionID, "revising");
-            const out = await runModel(input.client, cfg.generator, domainPrefix + rcaPrompt, ctx.directory,
-              invTaskId ? { sessionID: ctx.sessionID, taskId: invTaskId } : undefined);
-            // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty.
-            if (domainEmpty && keywords.length) {
-              try { saveInvestigationResult(keywords, out, "investigate"); } catch (e) { log(`investigate save err: ${String(e)}`); }
-            }
-            return out + "\n[usage-coach NEXT] call verify_diagnosis with this diagnosis.";
-          },
-        }),
-        verify_diagnosis: tool({
-          description: "Stage 3 (VERIFY) of the learning loop. Run the grader to check whether a diagnosis is CORRECT and ACTIONABLE (leads to a useful rule). Returns PASS/FAIL + a [usage-coach NEXT] directive.",
-          args: {
-            diagnosis: tool.schema.string(),
-            task: tool.schema.string(),
-            gradeResult: tool.schema.string(),
-          },
-          async execute(args: { diagnosis: string; task: string; gradeResult: string }, ctx: any) {
-            const cfg = readHarnessCfg(ctx.directory);
-            const model = cfg.grader ?? cfg.generator;
-            if (!model) return "FAIL\n(ERROR: no grader/generator model configured.)\n[usage-coach NEXT] configure grader in harness.config.json, then retry verify_diagnosis.";
-            const verifyPrompt = `Verify this root-cause analysis for a failure.\nTask: ${args.task}\nGrade feedback: ${args.gradeResult}\nDiagnosis: ${args.diagnosis}\nIs the diagnosis CORRECT and ACTIONABLE (leads to a useful rule)?\nOutput PASS (the diagnosis is right) or FAIL (re-investigate needed), then reason.`;
-            const verTaskId = findActiveTaskId(ctx.sessionID, "revising");
-            const out = await runModel(input.client, model, verifyPrompt, ctx.directory,
-              verTaskId ? { sessionID: ctx.sessionID, taskId: verTaskId } : undefined);
-            let verdict = "FAIL";
-            if (!out.startsWith("ERROR:")) {
-              const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
-              if (/^pass\b/i.test(f)) verdict = "PASS";
-              else verdict = "FAIL";
-            }
-            const next = verdict === "PASS"
-              ? `\n[usage-coach NEXT] call generalize with this verified diagnosis.`
-              : `\n[usage-coach NEXT] FAIL — re-investigate the root cause.`;
-            return out + "\n" + next;
-          },
-        }),
-        generalize: tool({
-          description: "Stage 4 (GENERALIZE) of the learning loop. Run the generator to turn a verified root cause into a reusable rule and append it to rules.md, so the next generate call includes it. Returns the rule text and a [usage-coach NEXT] directive.",
-          args: {
-            diagnosis: tool.schema.string(),
-            task: tool.schema.string(),
-          },
-          async execute(args: { diagnosis: string; task: string }, ctx: any) {
-            const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json).";
-            const genPrompt = `Turn this verified root cause into a GENERAL, REUSABLE rule for future tasks of this kind.\nDiagnosis: ${args.diagnosis}\nFailed task: ${args.task}\nOutput a single rule in the form: 'For <task-type> tasks, always <check/do X> because <reason>.'\nKeep it concrete and actionable.`;
-            const genRuleTaskId = findActiveTaskId(ctx.sessionID, "revising");
-            const out = await runModel(input.client, cfg.generator, genPrompt, ctx.directory,
-              genRuleTaskId ? { sessionID: ctx.sessionID, taskId: genRuleTaskId } : undefined);
-            const rule = out;
-            try {
-              const date = new Date().toISOString().slice(0, 10);
-              mkdirSync(STATE_DIR, { recursive: true });
-              appendFileSync(rulesFile(), `## Rule (${date})\n${rule}\nOrigin: ${args.task}\n\n`);
-            } catch (e) { log(`generalize err: ${String(e)}`); }
-            return `${rule}\n[usage-coach NEXT] rule saved to rules.md. The next generate call will include it. Call task_update for the original failed task -> failed, then proceed.`;
-          },
-        }),
-        // Per-role model execution (config-driven, quota-aware, same server, no deadlock).
-        // P1: quota decision drives model selection + concurrency.
-        generate: tool({
-          description: "Run the GENERATOR model on a prompt. Quota-aware: on THROTTLE, auto-switches to lighterModel if configured. Returns the model's text response. Step-limited: aborts after max_steps (default 30) to prevent runaway tasks.",
-          args: { prompt: tool.schema.string(), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps before timeout (default 30). Increase for complex tasks, decrease to fail fast on scope creep.") },
-          async execute(args: { prompt: string; max_steps?: number }, ctx: any) {
-            const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) {
-              const h = readHarness(ctx.sessionID);
-              if (h) { h.active = false; writeHarness(ctx.sessionID, h); }
-              return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json). HARNESS TERMINATED — configure a generator model, then restart the harness.";
-            }
-            let decision = "GO"; try { decision = current().decision; } catch { /* */ }
-            const throttle = decision === "THROTTLE" && cfg.lighterModel;
-            const model = throttle ? cfg.lighterModel! : cfg.generator;
-            // Stage 5 (reference): inject accumulated rules from past failures into the prompt.
-            const rules = readRules();
-            let prefix = rules ? `Lessons learned from previous failures (apply where relevant):\n${rules}\n\n---\n\n` : "";
-            // Also inject known facts from the domain DB (same project scope).
-            let keywords: string[] = [];
-            let domainEmpty = true;
-            let domainNodeCount = 0;
-            let domainEdgeCount = 0;
-            try {
-              keywords = extractKeywords(args.prompt);
-              if (keywords.length) {
-                const { nodes, edges } = queryDomain(keywords, { maxNodes: cfg.domainMaxNodes ?? 12 });
-                // Injection provenance — record even on miss (nodeIds: []) so recall has a denominator.
-                logDomainInjection(keywords, nodes.map((n) => n.id));
-                if ((nodes && nodes.length) || (edges && edges.length)) {
-                  domainEmpty = false;
-                  domainNodeCount = nodes.length;
-                  domainEdgeCount = edges.length;
-                  prefix = `Known facts from domain DB: ${JSON.stringify({ nodes, edges })}. Use these if relevant.\n\n---\n\n` + prefix;
-                  log(`generate domain HIT: ${nodes.length} nodes, ${edges.length} edges (kw=[${keywords.join(",")}])`);
-                } else {
-                  log(`generate domain MISS: 0 nodes (kw=[${keywords.join(",")}])`);
-                }
-              }
-            } catch (e) { log(`generate domain query err: ${String(e)}`); }
-            // Inject prior impl-notes (graph-matched for this task, fallback to last-5).
-            let notesLines = 0;
-            try {
-              const priorNotes = keywords.length ? readImplNotesByGraph(keywords, 5) : readImplNotes(5);
-              if (priorNotes) {
-                notesLines = priorNotes.split("\n").filter(Boolean).length;
-                prefix = `Notes from previous runs (context for this task):\n${priorNotes}\n\n---\n\n` + prefix;
-              }
-            } catch (e) { log(`generate impl-notes read err: ${String(e)}`); }
-            // Append the impl-notes writing instruction so the sub-session emits a <impl-notes> block.
-            prefix += IMPL_NOTE_INSTRUCTION;
-            // ── Diagnosis gate: warn if unknown_scan was required but not done ──
-            const gate = checkScanGate(ctx.sessionID);
-            if (gate.warning) {
-              prefix = `${gate.warning}\n\n---\n\n` + prefix;
-            }
-            // ── Scan findings injection: if scan WAS done, inject the summary so the
-            // sub-session knows about blind spots without manual copying. ──
-            if (gate.summary) {
-              prefix = `Pre-flight scan findings (from unknown_scan — heed these):\n${gate.summary}\n\n---\n\n` + prefix;
-            }
-            const genTaskId = findActiveTaskId(ctx.sessionID, "generating");
-            const maxSteps = resolveMaxSteps(cfg, args.max_steps);
-            // Record injected knowledge stats for effectiveness tracking.
-            const injected = {
-              rules: rules ? rules.split("\n").filter(Boolean).length : 0,
-              implNotes: notesLines,
-              domainNodes: domainNodeCount,
-              domainEdges: domainEdgeCount,
-              hasScanFindings: !!(gate.summary),
-            };
-            if (genTaskId) {
-              try { mutateHarness(ctx.sessionID, (h) => {
-                const t = h.tasks.find((x: any) => x.id === genTaskId);
-                if (t) t.injected = injected;
-              }); } catch { /* */ }
-            }
-            const out = await runModel(input.client, model, prefix + args.prompt, ctx.directory,
-              genTaskId ? { sessionID: ctx.sessionID, taskId: genTaskId } : undefined, maxSteps);
-            // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty
-            // AND the output is not a timeout/error message.
-            const isTimeoutOrError = out.startsWith("Task appears too large") || out.startsWith("ERROR:");
-            if (domainEmpty && keywords.length && !isTimeoutOrError) {
-              try { saveInvestigationResult(keywords, out, "generate"); } catch (e) { log(`generate save err: ${String(e)}`); }
-            }
-            // Extract + persist impl-notes from sub-session output (optional — no block = no-op).
-            if (!isTimeoutOrError) {
-              try {
-                const { notes } = extractImplNotes(out);
-                if (notes) {
-                  appendImplNotes(notes, args.prompt);
-                  if (keywords.length) {
-                    const noteNodeId = saveInvestigationResult(keywords, notes, "impl-note", 0.5);
-                    if (noteNodeId) linkImplNoteToDomain(noteNodeId, notes);
-                  }
-                }
-              } catch (e) { log(`generate impl-notes extract err: ${String(e)}`); }
-            }
-            // On timeout, the output already carries its own [usage-coach NEXT] directive.
-            if (out.startsWith("Task appears too large")) return out;
-            return out + (throttle ? `\n[usage-coach] quota THROTTLE — used lighter model ${cfg.lighterModel}` : "") + `\n[usage-coach NEXT] call task_update(i, title, "grading"), then grade to evaluate this work.`;
-          },
-        }),
-        generate_batch: tool({
-          description: "Run the GENERATOR model on MULTIPLE tasks. Quota-aware: GO = full parallel; THROTTLE = lighter model + concurrency capped at 2; STOP = refused. Use for INDEPENDENT tasks. Step-limited: each sub-session aborts after max_steps (default 30). Resilient: failed tasks are retried sequentially (once); if retry also fails, re-run them individually with generate(). Each task may declare files it will modify via `files: string[]` — overlapping files across tasks force sequential execution (limit=1).",
-          args: { tasks: tool.schema.array(tool.schema.object({
-            id: tool.schema.number(),
-            prompt: tool.schema.string(),
-            files: tool.schema.array(tool.schema.string()).optional().describe('Files this task will MODIFY. Required when tasks might touch the same files — overlapping files force sequential execution.'),
-          })), max_steps: tool.schema.number().optional().describe("Maximum sub-session steps per task before timeout (default 30).") },
-          async execute(args: { tasks: BatchTask[]; max_steps?: number }, ctx: any) {
-            const cfg = readHarnessCfg(ctx.directory);
-            if (!cfg.generator) {
-              const h = readHarness(ctx.sessionID);
-              if (h) { h.active = false; writeHarness(ctx.sessionID, h); }
-              return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json). HARNESS TERMINATED — configure a generator model, then restart the harness.";
-            }
-            let decision = "GO"; try { decision = current().decision; } catch { /* */ }
-            if (decision === "STOP") return "ERROR: quota STOP — halt the harness loop now. Call task_update(current, \"halted_quota\") and stop.";
-            const throttle = decision === "THROTTLE" && cfg.lighterModel;
-            const model = throttle ? cfg.lighterModel! : cfg.generator;
-            // GO: run all in parallel. THROTTLE: cap concurrency at 2 to avoid spiking quota.
-            // File overlap between tasks forces sequential (limit=1) — the strongest constraint.
-            const limit = resolveBatchLimit(args.tasks, decision);
-            if (limit === 1 && args.tasks.length > 1) log(`generate_batch: file overlap detected, forcing sequential (limit=1)`);
-            // Shared prefix components (rules + prior impl-notes) computed once for all tasks.
-            const rules = readRules();
-            const priorNotes = readImplNotes(5);
-            const maxSteps = resolveMaxSteps(cfg, args.max_steps);
-
-            // ── Diagnosis gate (shared by all tasks in this batch) ──
-            const gate = checkScanGate(ctx.sessionID);
-            const gatePrefix = gate.warning
-              ? `${gate.warning}\n\n---\n\n`
-              : (gate.summary ? `Pre-flight scan findings (from unknown_scan — heed these):\n${gate.summary}\n\n---\n\n` : "");
-
-            // Inner runner: execute a single task's runModel + impl-notes extraction.
-            // Returns { id, result } on success, or { id, error } on rejection.
-            const runOne = async (t: BatchTask): Promise<{ id: number; result: string }> => {
-              let prefix = gatePrefix;
-              prefix += rules ? `Lessons learned from previous failures (apply where relevant):\n${rules}\n\n---\n\n` : "";
-              if (priorNotes) prefix = `Notes from previous runs (context for this task):\n${priorNotes}\n\n---\n\n` + prefix;
-              prefix += IMPL_NOTE_INSTRUCTION;
-              const r = await runModel(input.client, model, prefix + t.prompt, ctx.directory,
-                { sessionID: ctx.sessionID, taskId: t.id }, maxSteps);
-              // Extract + persist impl-notes (optional — no block = no-op).
-              const isTimeoutOrError = r.startsWith("Task appears too large") || r.startsWith("ERROR:");
-              if (!isTimeoutOrError) {
-                try {
-                  const { notes } = extractImplNotes(r);
-                  if (notes) {
-                    appendImplNotes(notes, t.prompt);
-                    const kw = extractKeywords(t.prompt);
-                    if (kw.length) {
-                      const noteNodeId = saveInvestigationResult(kw, notes, "impl-note", 0.5);
-                      if (noteNodeId) linkImplNoteToDomain(noteNodeId, notes);
-                    }
-                  }
-                } catch (e) { log(`generate_batch impl-notes extract err: ${String(e)}`); }
-              }
-              return { id: t.id, result: r };
-            };
-
-            // Process tasks in concurrency-limited batches using Promise.allSettled
-            // (not Promise.all — one rejection must not kill the entire batch).
-            const results: string[] = [];
-            const failed: Array<{ id: number; prompt: string; files?: string[]; error: string }> = [];
-
-            for (let i = 0; i < args.tasks.length; i += limit) {
-              const batch = args.tasks.slice(i, i + limit);
-              const settled = await Promise.allSettled(batch.map((t) => runOne(t)));
-              for (let j = 0; j < settled.length; j++) {
-                const s = settled[j];
-                const t = batch[j];
-                if (s.status === "fulfilled") {
-                  results.push(`[task ${s.value.id}] ${s.value.result}`);
-                } else {
-                  const err = String(s.reason ?? "unknown rejection");
-                  log(`generate_batch task ${t.id} REJECTED: ${err}`);
-                  failed.push({ id: t.id, prompt: t.prompt, files: t.files, error: err });
-                }
-              }
-            }
-
-            // ── Automatic retry for rejected tasks (sequential, one at a time) ──
-            if (failed.length > 0) {
-              log(`generate_batch: retrying ${failed.length} failed task(s) sequentially`);
-              for (const f of failed) {
-                try {
-                  const r = await runOne(f);
-                  results.push(`[task ${r.id}] (retry) ${r.result}`);
-                } catch (e2) {
-                  const err2 = String(e2 ?? "unknown rejection on retry");
-                  log(`generate_batch task ${f.id} retry ALSO FAILED: ${err2}`);
-                  results.push(`[task ${f.id}] ERROR: task failed on both batch and retry. Error: ${err2}`);
-                }
-              }
-            }
-
-            const failedCount = results.filter((r) => r.includes("ERROR:")).length;
-            const note = throttle ? `\n[usage-coach] quota THROTTLE — lighter model ${cfg.lighterModel}, concurrency capped at ${limit}` : "";
-            // If any task still failed after retry, tell the orchestrator to fall back to sequential generate.
-            const failNext = failedCount > 0
-              ? `\n[usage-coach NEXT] ${failedCount} task(s) failed even after retry. Re-run each failed task individually with generate() (sequential), NOT generate_batch. This isolates failures and avoids batch-level abort.`
-              : "";
-            return results.join("\n\n") + note + failNext;
-          },
-        }),
-        grade: tool({
-          description: "Run the GRADER model on a prompt. Returns PASS/FAIL on the first line + a [usage-coach NEXT] directive. Falls back to generator if grader quota is out. For MECHANICAL tasks (conversions, extraction, scaffolds), pass `checks` instead — deterministic file/grep verification runs locally in milliseconds and the grader model is skipped entirely.",
-          args: {
-            prompt: tool.schema.string().describe("What is being graded (context for the verdict; shown in the result)."),
-            checks: tool.schema.array(tool.schema.object({
-              type: tool.schema.enum(["file-exists", "grep", "grep-absent", "line-count"]),
-              path: tool.schema.string().optional().describe("Relative path (file for file-exists/line-count; file OR dir for grep, default '.' = recursive scan skipping node_modules/.git/dist)."),
-              pattern: tool.schema.string().optional().describe("Regex for grep / grep-absent."),
-              minCount: tool.schema.number().optional().describe("grep: minimum total matches (default 1)."),
-              min: tool.schema.number().optional().describe("line-count: minimum non-empty lines."),
-              max: tool.schema.number().optional().describe("line-count: maximum non-empty lines."),
-            })).optional().describe("Deterministic checks — when present, ALL are evaluated locally and the verdict is computed without a model call. Use for mechanical verifications; keep model grading for judgment calls."),
-          },
-          async execute(args: { prompt: string; checks?: Array<Record<string, any>> }, ctx: any) {
-            // Deterministic path (v0.18.0): checks replace the grader-model round-trip.
-            if (args.checks && args.checks.length > 0) {
-              const r = evalChecks(ctx.directory, args.checks as unknown as GradeCheck[]);
-              // Reward loop: a deterministic verdict is a CLEAR verdict — pay it too.
-              try {
-                const gr2 = applyReward(r.pass ? "pass" : "fail", harnessTaskTitle(ctx.sessionID, findActiveTaskId(ctx.sessionID, "grading")));
-                log(`applyReward(${r.pass ? "pass" : "fail"}): applied ${gr2.applied}`);
-              } catch (e) { log(`applyReward err: ${String(e)}`); }
-              const next2 = r.pass
-                ? `\n[usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).`
-                : `\n[usage-coach NEXT] FAIL -> if revisions < 2: task_update(i, title, "revising", revisions+1) + generate({prompt: "Apply feedback:\\n{grade result}\\nTask: {title}"}); else: run the learning loop (record_failure -> investigate -> verify_diagnosis -> generalize), then task_update(i, title, "failed", "FAIL").`;
-              return `${r.pass ? "PASS" : "FAIL"}\n(verified by ${r.results.length} deterministic check(s) — grader model skipped)\n${formatCheckReport(r)}\ngraded claim: ${args.prompt.slice(0, 300)}\n${next2}`;
-            }
-            const cfg = readHarnessCfg(ctx.directory);
-            const model = cfg.grader ?? cfg.generator;
-            if (!model) return "FAIL\n(ERROR: no grader/generator model configured.)\n[usage-coach NEXT] configure grader in harness.config.json, then retry grade.";
-            const gradeTaskId = findActiveTaskId(ctx.sessionID, "grading");
-            const out = await runModel(input.client, model, buildGradePrompt(args.prompt), ctx.directory,
-              gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : undefined);
-            // Determine verdict from the first non-empty line.
-            let verdict = "FAIL";
-            let verdictClear = false; // true only when the line explicitly matched pass/fail
-            if (!out.startsWith("ERROR:")) {
-              const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
-              if (/^pass\b/i.test(f)) { verdict = "PASS"; verdictClear = true; }
-              else if (/^fail\b/i.test(f)) { verdict = "FAIL"; verdictClear = true; }
-              else verdict = "FAIL"; // no clear verdict -> FAIL to trigger a revise
-            }
-            // Reward closed loop (v0.16.0): a CLEAR verdict pays confidence ±δ on the
-            // generate-phase injections (applyReward drains every unclaimed injection).
-            // Unclear verdicts (ERROR: / no pass-fail match) pay nothing — no reward.
-            // Best-effort: a reward bug must never break grading.
-            if (verdictClear) {
-              try {
-                const r = applyReward(verdict === "PASS" ? "pass" : "fail", harnessTaskTitle(ctx.sessionID, gradeTaskId));
-                log(`applyReward(${verdict.toLowerCase()}): applied ${r.applied}`);
-              } catch (e) { log(`applyReward err: ${String(e)}`); }
-            }
-            const next = verdict === "PASS"
-              ? `\n[usage-coach NEXT] PASS -> call task_update(i, title, "completed", "PASS"), then proceed to next task (or harness_done if last).`
-              : `\n[usage-coach NEXT] FAIL -> if revisions < 2: task_update(i, title, "revising", revisions+1) + generate({prompt: "Apply feedback:\\n{grade result}\\nTask: {title}"}); else: run the learning loop before failing —\n  1. record_failure({task, prompt, gradeResult, model, revisions})\n  2. investigate({task, prompt, gradeResult}) -> diagnosis\n  3. verify_diagnosis({diagnosis, task, gradeResult}) -> if PASS: generalize({diagnosis, task}) (saves rule to rules.md)\n  4. task_update(i, title, "failed", "FAIL") -> next task.\nThe next generate call will automatically include the new rule.`;
-            return out + "\n" + next;
-          },
-        }),
-        grade_batch: tool({
-          description: "Run the GRADER model on MULTIPLE tasks IN PARALLEL. Quota-aware: GO = full parallel; THROTTLE = concurrency capped at 2; STOP = refused. Use after generate_batch returns results for all INDEPENDENT tasks — grade them all at once instead of one-by-one. Each result includes a per-task PASS/FAIL verdict + NEXT directive. Resilient: failed grades are retried sequentially (once).",
-          args: {
-            tasks: tool.schema.array(tool.schema.object({
-              id: tool.schema.number().describe("Task ID (must match the task_update ID)."),
-              prompt: tool.schema.string().describe("The grading prompt for this task (same format as grade())."),
-              checks: tool.schema.array(tool.schema.object({
-                type: tool.schema.enum(["file-exists", "grep", "grep-absent", "line-count"]),
-                path: tool.schema.string().optional(),
-                pattern: tool.schema.string().optional(),
-                minCount: tool.schema.number().optional(),
-                min: tool.schema.number().optional(),
-                max: tool.schema.number().optional(),
-              })).optional().describe("Deterministic checks — when present, the model call is skipped (see grade())."),
-            })).describe("One entry per task to grade. All run in parallel on GO."),
-          },
-          async execute(args: { tasks: Array<{ id: number; prompt: string; checks?: Array<Record<string, any>> }> }, ctx: any) {
-            const cfg = readHarnessCfg(ctx.directory);
-            const model = cfg.grader ?? cfg.generator;
-            if (!model) {
-              return "ERROR: no grader/generator model configured. Set \"grader\" or \"generator\" in harness.config.json.";
-            }
-
-            // ── Quota gate ──
-            let decision = "GO"; try { decision = current().decision; } catch { /* */ }
-            if (decision === "STOP") {
-              return "ERROR: quota STOP — halt the harness loop now. Call task_update(current, \"halted_quota\") and stop.";
-            }
-            // GO: grade all in parallel. THROTTLE: cap at 2 to avoid quota spike.
-            const limit = decision === "THROTTLE" ? 2 : args.tasks.length;
-
-            // ── Inner runner: grade a single task ──
-            const gradeOne = async (t: { id: number; prompt: string; checks?: Array<Record<string, any>> }): Promise<{ id: number; result: string }> => {
-              // Deterministic path (v0.18.0): checks replace the grader-model round-trip.
-              if (t.checks && t.checks.length > 0) {
-                const r = evalChecks(ctx.directory, t.checks as unknown as GradeCheck[]);
-                try {
-                  const title = harnessTaskTitle(ctx.sessionID, t.id);
-                  const rw = applyReward(r.pass ? "pass" : "fail", title ? `batch #${t.id} ${title}` : `batch #${t.id}`);
-                  log(`applyReward(${r.pass ? "pass" : "fail"}) batch #${t.id}: applied ${rw.applied}`);
-                } catch (e) { log(`applyReward err: ${String(e)}`); }
-                const next2 = r.pass
-                  ? `[usage-coach NEXT] task ${t.id}: PASS -> task_update(${t.id}, title, "completed", "PASS"), then proceed.`
-                  : `[usage-coach NEXT] task ${t.id}: FAIL -> if revisions < 2: task_update(${t.id}, title, "revising") + generate({prompt:"Apply feedback:\\n${formatCheckReport(r).slice(0, 500)}\\nTask: {title}"}); else: record_failure + investigate + verify + generalize, then task_update(${t.id}, title, "failed", "FAIL").`;
-                return { id: t.id, result: `[task ${t.id}] ${r.pass ? "PASS" : "FAIL"}\n(verified by ${r.results.length} deterministic check(s) — grader model skipped)\n${formatCheckReport(r)}\n${next2}` };
-              }
-              const gradeTaskId = findActiveTaskId(ctx.sessionID, "grading");
-              const out = await runModel(input.client, model, buildGradePrompt(t.prompt), ctx.directory,
-                gradeTaskId ? { sessionID: ctx.sessionID, taskId: gradeTaskId } : undefined);
-
-              // Parse verdict from first non-empty line
-              let verdict = "FAIL";
-              let verdictClear = false; // true only when the line explicitly matched pass/fail
-              if (!out.startsWith("ERROR:")) {
-                const f = (out.split("\n").find((l) => l.trim()) ?? "").trim();
-                if (/^pass\b/i.test(f)) { verdict = "PASS"; verdictClear = true; }
-                else if (/^fail\b/i.test(f)) { verdict = "FAIL"; verdictClear = true; }
-              }
-              // Reward closed loop (v0.16.0): pay per-task verdict, note = "batch #<id> <title>".
-              // applyReward's drain is one synchronous read-check-append block, so batch tasks
-              // resolved in any order stay consistent — the FIRST reward call drains ALL
-              // unclaimed injections; later calls in the same batch drain nothing and append
-              // no reward record. Best-effort like grade().
-              if (verdictClear) {
-                try {
-                  const title = harnessTaskTitle(ctx.sessionID, t.id);
-                  const r = applyReward(verdict === "PASS" ? "pass" : "fail", title ? `batch #${t.id} ${title}` : `batch #${t.id}`);
-                  log(`applyReward(${verdict.toLowerCase()}) batch #${t.id}: applied ${r.applied}`);
-                } catch (e) { log(`applyReward err: ${String(e)}`); }
-              }
-
-              const next = verdict === "PASS"
-                ? `[usage-coach NEXT] task ${t.id}: PASS -> task_update(${t.id}, title, "completed", "PASS"), then proceed.`
-                : `[usage-coach NEXT] task ${t.id}: FAIL -> if revisions < 2: task_update(${t.id}, title, "revising") + generate({prompt:"Apply feedback:\\n${out.slice(0, 500)}\\nTask: {title}"}); else: record_failure + investigate + verify + generalize, then task_update(${t.id}, title, "failed", "FAIL").`;
-
-              return { id: t.id, result: `[task ${t.id}] ${verdict}\n${out}\n${next}` };
-            };
-
-            // ── Parallel execution with concurrency cap ──
-            const results: string[] = [];
-            const failed: Array<{ id: number; prompt: string; error: string }> = [];
-
-            for (let i = 0; i < args.tasks.length; i += limit) {
-              const batch = args.tasks.slice(i, i + limit);
-              const settled = await Promise.allSettled(batch.map((t) => gradeOne(t)));
-              for (let j = 0; j < settled.length; j++) {
-                const s = settled[j];
-                const t = batch[j];
-                if (s.status === "fulfilled") {
-                  results.push(s.value.result);
-                } else {
-                  const err = String(s.reason ?? "unknown rejection");
-                  log(`grade_batch task ${t.id} REJECTED: ${err}`);
-                  failed.push({ id: t.id, prompt: t.prompt, error: err });
-                }
-              }
-            }
-
-            // ── Retry failed grades sequentially ──
-            if (failed.length > 0) {
-              log(`grade_batch: retrying ${failed.length} failed grade(s) sequentially`);
-              for (const f of failed) {
-                try {
-                  const r = await gradeOne(f);
-                  results.push(r.result.replace(`[task ${r.id}]`, `[task ${r.id}] (retry)`));
-                } catch (e2) {
-                  const err2 = String(e2 ?? "unknown rejection on retry");
-                  log(`grade_batch task ${f.id} retry ALSO FAILED: ${err2}`);
-                  results.push(`[task ${f.id}] FAIL\n(ERROR: grade failed on both batch and retry: ${err2})\n[usage-coach NEXT] task ${f.id}: grade error — re-run grade() individually for this task.`);
-                }
-              }
-            }
-
-            const throttleNote = decision === "THROTTLE"
-              ? `\n[usage-coach] quota THROTTLE — grader concurrency capped at ${limit}.`
-              : "";
-            const passCount = results.filter((r) => /\[task \d+\] PASS/.test(r)).length;
-            const summary = `\n[usage-coach] Graded ${results.length} task(s): ${passCount} PASS, ${results.length - passCount} FAIL.`;
-            return results.join("\n\n") + summary + throttleNote;
-          },
-        }),
-        reverse_interview: tool({
-          description: "Reverse interview: identify ambiguities in the task and ask the user " +
-            "one question at a time, highest design-impact first. Call WITHOUT answer to start " +
-            "or get the next question. Call WITH answer to record the user's response and advance. " +
-            "Returns the next question or a completion summary. ALWAYS present the question to the " +
-            "user verbatim — do NOT answer it yourself.",
-          args: {
-            task: tool.schema.string().describe(
-              "The current task description (what the user asked for)."
-            ),
-            context: tool.schema.string().optional().describe(
-              "Additional context from unknown_scan, codebase exploration, or prior turns. " +
-              "Injected into the question-generation prompt for better prioritization."
-            ),
-            answer: tool.schema.string().optional().describe(
-              "The user's response to the previous question. Omit on the first call " +
-              "(or when there is no answer to record)."
-            ),
-            force_complete: tool.schema.boolean().optional().describe(
-              "Force the interview to end now and return the summary. Use when the user " +
-              "says 'that's enough' or 'just proceed'."
-            ),
-          },
-          async execute(args: { task: string; context?: string; answer?: string; force_complete?: boolean }, ctx: any) {
-            const sessionID = ctx.sessionID;
-            const cfg = readHarnessCfg(ctx.directory);
-            // Throttle-aware model resolver (shared by planning + completion).
-            const resolveModel = (): string | null => {
-              if (!cfg.generator) return null;
-              let decision = "GO"; try { decision = current().decision; } catch { /* */ }
-              const throttle = decision === "THROTTLE" && cfg.lighterModel;
-              return throttle ? cfg.lighterModel! : cfg.generator;
-            };
-            let state = readInterview(sessionID);
-
-            // --- FORCED COMPLETION (user said "that's enough") ---
-            if (args.force_complete) {
-              if (state && state.phase !== "complete") {
-                return await completeInterview(state, sessionID, input.client, resolveModel(), ctx.directory);
-              }
-              return "No active interview to complete.\n[usage-coach NEXT] proceed to harness_start → generate.";
-            }
-
-            // --- RECORD ANSWER (if provided, against an in-progress interview) ---
-            if (args.answer !== undefined && args.answer !== null &&
-                state && state.phase === "asking" && state.currentIndex < state.questions.length) {
-              const q = state.questions[state.currentIndex];
-              state.answers.push({
-                questionId: q.id, questionText: q.text,
-                answer: String(args.answer), ts: new Date().toISOString(),
-              });
-              state.currentIndex++;
-              writeInterview(sessionID, state);
-              // All questions answered or hard cap reached -> complete.
-              const maxQ = state.maxQuestions;
-              if (state.currentIndex >= state.questions.length || state.answers.length >= maxQ) {
-                return await completeInterview(state, sessionID, input.client, resolveModel(), ctx.directory);
-              }
-            }
-
-            // --- START NEW INTERVIEW (no prior state, or previous one complete) ---
-            if (!state || state.phase === "complete") {
-              if (!cfg.generator) return "ERROR: no generator model configured. Set \"generator\" in harness.config.json (see harness.config.example.json).\n[usage-coach NEXT] proceed to harness_start → generate using best-effort assumptions.";
-              const model = resolveModel()!;
-              const userRequest = args.task;
-              const mQ = DEFAULT_MAX_QUESTIONS;
-
-              // Domain knowledge lookup via graph traversal (design §6.4/§6.5).
-              let graphNodes: DomainNode[] = [];
-              try {
-                const keywords = extractKeywords(args.task + " " + (args.context ?? ""));
-                if (keywords.length) {
-                  const g = queryDomainGraph(keywords, 2);
-                  graphNodes = g.nodes || [];
-                }
-              } catch (e) { log(`reverse_interview domain query err: ${String(e)}`); }
-
-              const domainSection = graphNodes.length
-                ? `\nDomain knowledge (from local graph DB — do NOT ask about things already known):\n${
-                    graphNodes.slice(0, 20).map((n) =>
-                      `- [d${n.distance ?? 9}] ${n.name} (${n.type}): ${String(n.props?.result ?? JSON.stringify(n.props)).slice(0, 150)}`
-                    ).join("\n")
-                  }\n`
-                : "";
-
-              const planningPrompt = `You are a senior architect conducting a reverse interview.
-Analyze this task and identify the TOP ambiguities that, if left unresolved, would lead to the WRONG implementation.
-
-Task: ${args.task}
-User request: ${userRequest}
-Additional context: ${args.context ?? "none"}${domainSection}
-
-Rules:
-1. Focus on questions whose answers CHANGE THE ARCHITECTURE or SCOPE.
-   "What database?" is high-impact. "Variable naming?" is low-impact — exclude it.
-2. Maximum ${mQ} questions.
-3. Rank by design impact: critical > high > medium > low.
-4. For each question, explain WHY it matters (the consequence of guessing wrong).
-5. Categorize each: architecture | scope | constraint | preference | constraint-env | tradeoff.
-6. For each question, name the core CONCEPT it targets (a single word/phrase).
-
-Output JSON ONLY (no markdown fences, no prose):
-{"questions":[{"text":"the question (concise, specific)","why":"what goes wrong if we guess","priority":"critical|high|medium|low","category":"architecture|scope|constraint|preference|constraint-env|tradeoff","optional":true,"concept":"single-word-concept"}]}
-If the task is already well-specified with no significant ambiguities, return {"questions":[]}.`;
-
-              const out = await runModel(input.client, model, planningPrompt, ctx.directory);
-
-              // Quota/error guard — abandon gracefully, let the harness proceed.
-              if (out.startsWith("ERROR:") || out.startsWith("Task appears too large")) {
-                return `Cannot generate interview questions: ${out}\n[usage-coach NEXT] proceed to harness_start → generate using best-effort assumptions, or wait for quota reset and retry reverse_interview.`;
-              }
-
-              const parsed = parseInterviewQuestions(out, mQ, graphNodes);
-              if (parsed.length === 0) {
-                // No ambiguities found — record a completed interview and short-circuit.
-                state = {
-                  id: `int_${Date.now().toString(36)}`,
-                  task: args.task, userRequest,
-                  startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-                  questions: [], answers: [], currentIndex: 0,
-                  phase: "complete", maxQuestions: mQ,
-                  summary: "No significant ambiguities found. The task appears well-specified.",
-                };
-                writeInterview(sessionID, state);
-                return "No significant ambiguities found — the task appears well-specified.\n[usage-coach NEXT] proceed directly to harness_start → generate.";
-              }
-
-              state = {
-                id: `int_${Date.now().toString(36)}`,
-                task: args.task, userRequest,
-                startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-                questions: parsed, answers: [], currentIndex: 0,
-                phase: "asking", maxQuestions: mQ,
-              };
-              writeInterview(sessionID, state);
-            }
-
-            // --- ASK NEXT QUESTION ---
-            const q = state!.questions[state!.currentIndex];
-            const total = state!.questions.length;
-            const qNum = state!.currentIndex + 1;
-            return formatQuestionOutput(qNum, total, q);
-          },
-        }),
-
-        coach_config: tool({
-          description: 'View or update harness model configuration (generator, grader, lighterModel, provider, maxSteps, domainMaxNodes). Call with no args to view current config. Pass any combination of fields to update. Example: coach_config({ generator: "anthropic/claude-sonnet-4-20250514", grader: "opencode/mimo-v2.5-free", maxSteps: 15 })',
-          args: {
-            generator: tool.schema.string().optional(),
-            grader: tool.schema.string().optional(),
-            lighterModel: tool.schema.string().optional(),
-            provider: tool.schema.string().optional(),
-            maxSteps: tool.schema.number().optional().describe("Max steps per generate/grade sub-session (default 30). Lower = faster but may timeout on complex tasks."),
-            domainMaxNodes: tool.schema.number().optional().describe("Max domain DB nodes injected into a generate prompt (default 12). Lower keeps prompts small; 0 or unset uses the default."),
-          },
-          async execute(args: { generator?: string; grader?: string; lighterModel?: string; provider?: string; maxSteps?: number; domainMaxNodes?: number }, ctx: any) {
-            const dir = (ctx as any)?.directory ?? input.directory;
-            const current = readHarnessCfg(dir);
-
-            // If no args → view mode
-            const hasUpdates = args.generator !== undefined || args.grader !== undefined ||
-                               args.lighterModel !== undefined || args.provider !== undefined ||
-                               args.maxSteps !== undefined || args.domainMaxNodes !== undefined;
-            if (!hasUpdates) {
-              const envOverrides: string[] = [];
-              if (process.env.UC_PROVIDER) envOverrides.push(`UC_PROVIDER=${process.env.UC_PROVIDER}`);
-              if (process.env.UC_LIGHTER_MODEL) envOverrides.push(`UC_LIGHTER_MODEL=${process.env.UC_LIGHTER_MODEL}`);
-              if (process.env.UC_MAX_STEPS) envOverrides.push(`UC_MAX_STEPS=${process.env.UC_MAX_STEPS}`);
-              return [
-                `Harness Configuration`,
-                `═══════════════════════════════════════════════`,
-                `  generator:     ${current.generator ?? "(not set — harness won't work!)"}`,
-                `  grader:        ${current.grader ?? "(defaults to generator)"}`,
-                `  lighterModel:  ${current.lighterModel ?? "(not set — no THROTTLE fallback)"}`,
-                `  provider:      ${current.provider ?? "(auto-detected from model)"}`,
-                `  maxSteps:      ${current.maxSteps ?? 30}  (env: UC_MAX_STEPS)`,
-                `═══════════════════════════════════════════════`,
-                envOverrides.length > 0 ? `\nEnvironment overrides (take precedence):\n  ${envOverrides.join("\n  ")}` : "",
-                `\nConfig file: ~/.config/opencode-usage-coach/harness.config.json`,
-                `\nTo update, call: coach_config({ generator: "provider/model-id", maxSteps: 15, ... })`,
-              ].filter(Boolean).join("\n");
-            }
-
-            // Build updates object (only fields that were provided)
-            const updates: HarnessCfg = {};
-            if (args.generator !== undefined) updates.generator = args.generator.trim();
-            if (args.grader !== undefined) updates.grader = args.grader.trim();
-            if (args.lighterModel !== undefined) updates.lighterModel = args.lighterModel.trim();
-            if (args.provider !== undefined) updates.provider = args.provider.trim();
-            if (args.maxSteps !== undefined) updates.maxSteps = args.maxSteps;
-            if (args.domainMaxNodes !== undefined) updates.domainMaxNodes = args.domainMaxNodes;
-
-            const writtenPath = writeHarnessCfg(updates);
-            const updated = readHarnessCfg(dir);
-
-            return [
-              `✅ Harness config updated successfully!`,
-              `═══════════════════════════════════════════════`,
-              `  generator:     ${updated.generator ?? "(not set)"}`,
-              `  grader:        ${updated.grader ?? "(defaults to generator)"}`,
-              `  lighterModel:  ${updated.lighterModel ?? "(not set)"}`,
-              `  provider:      ${updated.provider ?? "(auto-detected)"}`,
-              `  maxSteps:      ${updated.maxSteps ?? 30}`,
-              `  domainMaxNodes: ${updated.domainMaxNodes ?? "(default 12)"}`,
-              `═══════════════════════════════════════════════`,
-              `\nSaved to: ${writtenPath}`,
-              `\nNote: Changes take effect immediately for new generate/grade calls.`,
-              `       A running harness will pick up the new config on the next tool call.`,
-            ].join("\n");
-          },
-        }),
-
-        coach_analyze: tool({
-          description: "Analyze knowledge injection effectiveness — compares grade PASS rates for tasks WITH injected knowledge (rules, impl-notes, domain DB, scan findings) vs WITHOUT. Run after 20+ harness tasks to see if accumulated knowledge actually helps.",
-          args: {},
-          async execute(_args: Record<string, never>, ctx: any) {
-            const a = analyzeInjection(ctx.sessionID);
-            const lines = [
-              "═══ Knowledge Injection Effectiveness ═══",
-              `Total graded tasks: ${a.total} (PASS: ${a.passed}, FAIL: ${a.failed})`,
-              "",
-              `With injection:    ${a.withInjection.total} tasks → ${a.withInjection.passRate}% PASS`,
-              `Without injection: ${a.withoutInjection.total} tasks → ${a.withoutInjection.passRate}% PASS`,
-              "",
-              "By category (PASS rate when injected):",
-            ];
-            for (const [cat, d] of Object.entries(a.byCategory)) {
-              const rate = d.total > 0 ? Math.round(d.passed * 100 / d.total) : 0;
-              lines.push(`  ${cat}: ${d.passed}/${d.total} = ${rate}%`);
-            }
-            const delta = a.withInjection.passRate - a.withoutInjection.passRate;
-            if (a.withInjection.total > 0 && a.withoutInjection.total > 0) {
-              lines.push("");
-              lines.push(delta > 0
-                ? `→ Injection helps: +${delta}% PASS rate with knowledge injection.`
-                : delta < 0
-                ? `→ Injection HURTS: ${delta}% PASS rate. Injected knowledge may be noise.`
-                : `→ No measurable difference (${delta}%).`);
-            } else {
-              lines.push("", "→ Need more data (both groups need 5+ tasks).");
-            }
-            return lines.join("\n");
-          },
-        }),
-      },
+      // Definitions (bodies included) live in tool-defs.ts — version-agnostic and
+      // shared with the V2 adapter. This map only adapts them to the V1
+      // tool() shape: JSON Schema args are converted via schema-convert.
+      tool: toolMap,
     };
   } catch (e) {
     // Init failure: return no-op so opencode keeps working.
@@ -2583,16 +1427,41 @@ If the task is already well-specified with no significant ambiguities, return {"
   }
 }
 
+// ── Dual default export ──────────────────────────────────────────────────────
+// One artifact serves both hosts: V2 hosts load the default export and call
+// .setup(ctx); V1 1.18.29+ hosts call .server(). `setup` is the v2Setup
+// function declaration from v2.ts (referenced, not called, at module scope) so
+// the index ↔ v2 import cycle stays safe in either evaluation order.
+const dual: any = { id: "opencode-usage-coach", setup: v2Setup, server: UsageCoachPlugin };
+export default dual;
+
 export { UsageCoachPlugin as server };
 
-// ── Named exports for unit testing ──────────────────────────────────────────
+// ── Named exports for unit testing + tool-defs.ts ───────────────────────────
+// The second group is consumed by tool-defs.ts (the version-agnostic tool
+// definitions). STATE_DIR is exported as a live `let` binding so tool bodies
+// observe setStateDir() calls.
 export {
-  coach, parseFileList, extractKeywords, extractImplNotes,
-  detectLanguage, buildScanSummary, parseGapAnalysis, providerAdvice,
-  buildGapPrompt, formatReport, isFreeModel, providerToCodexbar,
-  isHarnessAgent, humanRemaining, buildGradePrompt, normalizeFilePath, resolveBatchLimit,
+  parseFileList, extractKeywords, extractImplNotes,
+  detectLanguage, buildScanSummary, parseGapAnalysis,
+  buildGapPrompt, formatReport,
+  buildGradePrompt, normalizeFilePath, resolveBatchLimit,
   setStateDir, readHarness, writeHarness, readRules,
   checkScanGate, updateSubSession, clearSubSession, findActiveTaskId,
   readHarnessCfg, writeHarnessCfg,
+  // ── shared with tool-defs.ts ──
+  runModel, writeUnknownScan, mutateHarness, harnessTaskTitle, analyzeInjection,
+  readInterview, writeInterview, parseInterviewQuestions, formatQuestionOutput,
+  readImplNotes, readImplNotesByGraph, appendImplNotes, linkImplNoteToDomain,
+  rulesFile, failuresFile, log, resolveMaxSteps,
+  STATE_DIR, DEFAULT_MAX_STEPS, DEFAULT_MAX_QUESTIONS, IMPL_NOTE_INSTRUCTION,
 };
-export type { Quota, Coaching, CodebaseProfile, UnknownScanResult, HarnessJson };
+// Quota domain: moved to quota.ts, re-exported so every existing
+// `from "./index.js"` import (tests, tool-defs.ts, v2.ts) keeps working.
+export {
+  coach, providerAdvice, humanRemaining, parseQuotaResponse, fetchQuotaWithRetry,
+  isCodexbarMissing, __resetCodexbarMissing, isFreeModel, providerToCodexbar,
+  createQuotaMachine,
+} from "./quota.js";
+export type { Quota, QuotaWindow, Decision } from "./quota.js";
+export type { CodebaseProfile, UnknownScanResult, HarnessJson, BatchTask, HarnessCfg };

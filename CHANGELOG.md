@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-09-30
+
+### Added
+- **OpenCode V2 support (dual-version plugin).** The package now serves both hosts from
+  one bundle: V2 loads `default.setup()` (new `@opencode/plugin` API — `Plugin.define`,
+  `ctx.tool.transform` with JSON Schema, `ctx.tool.hook("execute.before")`,
+  `ctx.session.hook("context"/"compaction"/"title")` for coaching injection, event
+  subscription with cleanup), while V1 keeps using `server()` / the named
+  `UsageCoachPlugin` factory exactly as before. Tool definitions, descriptions, JSON
+  Schemas, and execute bodies live in a version-agnostic `tool-defs.ts` single source;
+  session operations route through a `SessionOps` facade with `v1-session.ts` /
+  `v2-session.ts` adapters (the V2 adapter restores the V1 completion contract via
+  switchModel → prompt → wait → context).
+- **Cancellation for sub-sessions.** `runModel` accepts an `AbortSignal` (V2 tool
+  executors receive `context.signal` and all 9 generate/grade/investigate call sites
+  thread it through): a stopped session now aborts its harness sub-session immediately
+  instead of grinding to the wall clock.
+- **`generateText` fast path (V2).** One-shot text generation without a session is
+  exposed on the SessionOps facade (V2 `ctx.generate.text`), replacing the V1
+  summarize+delete cleanup round-trip where available.
+
+### Changed
+- Quota state machine (codexbar fetch, thresholds, coach decisions, TTL dedup,
+  model-change invalidation) extracted to `src/quota.ts` as `createQuotaMachine()`,
+  shared by both adapters. Behavior preserved; one documented micro-difference: a
+  resolveAgent cache hit with a *different* model now invalidates the quota TTL
+  (previously only cache misses did).
+
 ## [0.18.0] - 2026-09-30
 
 ### Added
