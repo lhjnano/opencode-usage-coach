@@ -1,5 +1,5 @@
 // src/index.ts
-import { mkdirSync as mkdirSync4, writeFileSync as writeFileSync2, appendFileSync as appendFileSync4, readFileSync as readFileSync3, existsSync as existsSync3 } from "fs";
+import { mkdirSync as mkdirSync4, writeFileSync as writeFileSync2, appendFileSync as appendFileSync4, readFileSync as readFileSync3, existsSync as existsSync3, statSync as statSync3 } from "fs";
 import { createHash } from "crypto";
 import { homedir as homedir2 } from "os";
 import { join as join4, resolve as resolve2, dirname as dirname2 } from "path";
@@ -826,6 +826,11 @@ var TOOL_SCHEMAS = {
         max_steps: {
           type: "number",
           description: "Maximum sub-session steps before timeout (default 30). Increase for complex tasks, decrease to fail fast on scope creep."
+        },
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "Files this task will CREATE or MODIFY (relative paths). Declaring them lets the watchdog treat file changes as live progress, so healthy long single-turn generations are not aborted as stalls (UC-6)."
         }
       },
       required: ["prompt"],
@@ -1843,7 +1848,8 @@ ${gate.summary}
           call.directory ?? host.rt.directory,
           genTaskId ? { sessionID: call.sessionID, taskId: genTaskId } : void 0,
           maxSteps,
-          call.signal
+          call.signal,
+          args.files
         );
         const isTimeoutOrError = out.startsWith("Task appears too large") || out.startsWith("ERROR:");
         if (domainEmpty && keywords.length && !isTimeoutOrError) {
@@ -1933,7 +1939,8 @@ ${priorNotes}
             call.directory ?? host.rt.directory,
             { sessionID: call.sessionID, taskId: t.id },
             maxSteps,
-            call.signal
+            call.signal,
+            t.files
           );
           const isTimeoutOrError = r.startsWith("Task appears too large") || r.startsWith("ERROR:");
           if (!isTimeoutOrError) {
@@ -3904,7 +3911,7 @@ function summarizeMsgs(msgs, now = Date.now()) {
     return `sig-err:${String(e?.message ?? e).slice(0, 60)}`;
   }
 }
-async function runModel(session, model, prompt, directory, track, maxSteps = DEFAULT_MAX_STEPS, signal) {
+async function runModel(session, model, prompt, directory, track, maxSteps = DEFAULT_MAX_STEPS, signal, watchFiles) {
   const t0 = Date.now();
   const subStart = Date.now();
   let poller = null;
@@ -3918,6 +3925,8 @@ async function runModel(session, model, prompt, directory, track, maxSteps = DEF
   let lastProgressAt = Date.now();
   let lastPollOk = true;
   let lastSig = "(no poll)";
+  const resolvedWatch = (watchFiles ?? []).map((f) => resolve2(directory, f));
+  let lastWatchSig = -1;
   let signalTimeout;
   const timeoutSignal = new Promise((resolve3) => {
     signalTimeout = resolve3;
@@ -3977,6 +3986,23 @@ async function runModel(session, model, prompt, directory, track, maxSteps = DEF
           lastStepSeen = step;
           lastTsSeen = lastTs;
           lastProgressAt = Date.now();
+        }
+        if (resolvedWatch.length > 0) {
+          let watchSig = -1;
+          for (const wf of resolvedWatch) {
+            try {
+              const m = statSync3(wf).mtimeMs;
+              if (m > watchSig) watchSig = m;
+            } catch {
+            }
+          }
+          if (watchSig !== lastWatchSig) {
+            if (lastWatchSig !== -1) {
+              lastProgressAt = Date.now();
+              log(`runModel(${model}): UC-6 file progress (watch max-mtime changed) \u2014 stall baseline reset, ${resolvedWatch.length} file(s) watched`);
+            }
+            lastWatchSig = watchSig;
+          }
         }
         if (step > maxSteps) {
           log(`runModel(${model}): STEP LIMIT exceeded (${step} > ${maxSteps}, elapsed ${Math.round((Date.now() - subStart) / 1e3)}s), aborting session ${id}`);

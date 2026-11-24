@@ -202,6 +202,12 @@ export const TOOL_SCHEMAS: Record<string, ToolSchema> = {
           description:
             "Maximum sub-session steps before timeout (default 30). Increase for complex tasks, decrease to fail fast on scope creep.",
         },
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Files this task will CREATE or MODIFY (relative paths). Declaring them lets the watchdog treat file changes as live progress, so healthy long single-turn generations are not aborted as stalls (UC-6).",
+        },
       },
       required: ["prompt"],
       additionalProperties: false,

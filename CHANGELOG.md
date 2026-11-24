@@ -740,3 +740,17 @@ Both changes originate from the performance-analysis ledger (사실 33~36 ·
   and diffing the transcript: 39kB reasoning materialized only at the end).
   Observable progress = item-count changes (per completed turn); single-turn
   marathons remain a blind spot (next: event-stream/log-endpoint micro-signals).
+
+## [0.19.6] - 2026-11-24
+
+### Added
+- **UC-6 file-mtime progress signal (사실 40)** — when a task declares its
+  output files (`generate.files`, new optional; `generate_batch` tasks already
+  declare `files`), the watchdog treats max-mtime changes on those files as
+  live progress: each change resets the stall baseline, so a healthy marathon
+  single-turn generation that keeps writing files survives past UC_STALL_MIN
+  instead of being aborted as a stall. This closes the observation gap proven
+  by the channel probe: during a marathon turn NO API channel moves (context
+  items, /log seq all frozen) — side effects are the only live signal.
+  Progress resets are logged (`UC-6 file progress` lines). Undeclared-file
+  tasks remain covered by the transcript-based stall only.

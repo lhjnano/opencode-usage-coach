@@ -457,7 +457,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           }); } catch { /* */ }
         }
         const out = await runModel(host.rt.session, model, prefix + args.prompt, call.directory ?? host.rt.directory,
-          genTaskId ? { sessionID: call.sessionID!, taskId: genTaskId } : undefined, maxSteps, call.signal);
+          genTaskId ? { sessionID: call.sessionID!, taskId: genTaskId } : undefined, maxSteps, call.signal, (args as any).files);
         // Investigate-if-unknown, then store: only persist the finding when the domain DB was empty
         // AND the output is not a timeout/error message.
         const isTimeoutOrError = out.startsWith("Task appears too large") || out.startsWith("ERROR:");
@@ -521,7 +521,7 @@ Then: harness_done(). Follow the [usage-coach NEXT] directive each tool returns.
           if (priorNotes) prefix = `Notes from previous runs (context for this task):\n${priorNotes}\n\n---\n\n` + prefix;
           prefix += IMPL_NOTE_INSTRUCTION;
           const r = await runModel(host.rt.session, model, prefix + t.prompt, call.directory ?? host.rt.directory,
-            { sessionID: call.sessionID!, taskId: t.id }, maxSteps, call.signal);
+            { sessionID: call.sessionID!, taskId: t.id }, maxSteps, call.signal, t.files);
           // Extract + persist impl-notes (optional — no block = no-op).
           const isTimeoutOrError = r.startsWith("Task appears too large") || r.startsWith("ERROR:");
           if (!isTimeoutOrError) {

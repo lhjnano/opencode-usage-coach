@@ -10,7 +10,7 @@
 //
 // Local load: .opencode/plugins/ or ~/.config/opencode/plugins/. Single file required.
 
-import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -1097,7 +1097,7 @@ export function summarizeMsgs(msgs: any[], now: number = Date.now()): string {
   }
 }
 
-async function runModel(session: SessionOps, model: string, prompt: string, directory: string, track?: { sessionID: string; taskId: number }, maxSteps: number = DEFAULT_MAX_STEPS, signal?: AbortSignal): Promise<string> {
+async function runModel(session: SessionOps, model: string, prompt: string, directory: string, track?: { sessionID: string; taskId: number }, maxSteps: number = DEFAULT_MAX_STEPS, signal?: AbortSignal, watchFiles?: string[]): Promise<string> {
   const t0 = Date.now();
   const subStart = Date.now();
   let poller: ReturnType<typeof setInterval> | null = null;
@@ -1114,6 +1114,12 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
   // UC-1: last observed message-stream signature, refreshed by the poller and
   // dumped on WALL-CLOCK / STALLED aborts (the hang evidence the watchdog lacked).
   let lastSig = "(no poll)";
+  // UC-6 (사실 40): during a single marathon turn NO API channel moves — the only
+  // live signal is side effects. When the task declares its output files, their
+  // max-mtime becomes a progress signal: a change resets the stall baseline, so a
+  // healthy marathon that keeps touching files survives past STALL_MIN.
+  const resolvedWatch = (watchFiles ?? []).map((f) => resolve(directory, f));
+  let lastWatchSig = -1;
   // Deferred promise: resolves when the step limit is exceeded (races against prompt).
   let signalTimeout!: () => void;
   const timeoutSignal = new Promise<void>((resolve) => { signalTimeout = resolve; });
@@ -1188,6 +1194,24 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
           lastStepSeen = step;
           lastTsSeen = lastTs;
           lastProgressAt = Date.now();
+        }
+        // UC-6: declared-file side effects count as progress even when the
+        // transcript is frozen (marathon single turn — 사실 40).
+        if (resolvedWatch.length > 0) {
+          let watchSig = -1;
+          for (const wf of resolvedWatch) {
+            try {
+              const m = statSync(wf).mtimeMs;
+              if (m > watchSig) watchSig = m;
+            } catch { /* not created yet — its later creation flips the signature */ }
+          }
+          if (watchSig !== lastWatchSig) {
+            if (lastWatchSig !== -1) {
+              lastProgressAt = Date.now();
+              log(`runModel(${model}): UC-6 file progress (watch max-mtime changed) — stall baseline reset, ${resolvedWatch.length} file(s) watched`);
+            }
+            lastWatchSig = watchSig;
+          }
         }
         // Step-limit enforcement: abort the sub-session if it exceeds maxSteps.
         if (step > maxSteps) {
