@@ -1065,18 +1065,18 @@ export function summarizeMsgs(msgs: any[], now: number = Date.now()): string {
   // watchdog could NOT see at abort time — whether the stream ever produced text.
   try {
     const list = Array.isArray(msgs) ? msgs : [];
-    const roles = list.map((m: any) => String(m?.role ?? m?.info?.role ?? "?"));
+    const roles = list.map((m: any) => String(m?.role ?? m?.info?.role ?? m?.type ?? "?"));
+    const partsOf = (m: any): any[] => (Array.isArray(m?.parts) ? m.parts : Array.isArray(m?.info?.parts) ? m.info.parts : Array.isArray(m?.content) ? m.content : []);
     const nAssistant = roles.filter((r) => r === "assistant").length;
     const textMsgs = list.filter((m: any) => {
-      if (String(m?.role ?? m?.info?.role ?? "?") !== "assistant") return false;
-      const parts: any[] = Array.isArray(m?.parts) ? m.parts : Array.isArray(m?.info?.parts) ? m.info.parts : [];
-      return parts.some((p: any) => p?.type === "text" && String(p?.text ?? "").length > 0);
+      if (String(m?.role ?? m?.info?.role ?? m?.type ?? "?") !== "assistant") return false;
+      return partsOf(m).some((p: any) => p?.type === "text" && String(p?.text ?? "").length > 0);
     }).length;
     const last = list[list.length - 1];
     let lastDesc = "none";
     let tsAge = -1;
     if (last) {
-      const parts: any[] = Array.isArray(last?.parts) ? last.parts : Array.isArray(last?.info?.parts) ? last.info.parts : [];
+      const parts: any[] = partsOf(last);
       const byType = new Map<string, { n: number; b: number }>();
       for (const p of parts) {
         const t = String(p?.type ?? "?");
@@ -1087,8 +1087,8 @@ export function summarizeMsgs(msgs: any[], now: number = Date.now()): string {
       }
       const pDesc = [...byType.entries()].map(([t, r]) => `${t}x${r.n}${(t === "text" || t === "reasoning") ? `(${r.b >= 1024 ? (r.b / 1024).toFixed(1) + "kB" : r.b + "b"})` : ""}`).join(",") || "noparts";
       lastDesc = `${roles[roles.length - 1] ?? "?"}[${pDesc}]`;
-      const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
-      const t = ts ? Date.parse(String(ts)) : NaN;
+      const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt ?? last?.time?.created;
+      const t = ts !== undefined && ts !== null && ts !== "" ? Date.parse(typeof ts === "number" ? new Date(ts).toISOString() : String(ts)) : NaN;
       if (!Number.isNaN(t)) tsAge = Math.max(0, Math.round((now - t) / 1000));
     }
     return `n=${list.length} asst=${nAssistant} textMsgs=${textMsgs}/${nAssistant} last=${lastDesc} tsAge=${tsAge}s`;
@@ -1157,7 +1157,10 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
       if (timedOut || pollerDone) return; // already timed out or cleaned up — skip
       try {
         let step = 0;
-        let lastTs = new Date().toISOString();
+        // Stall-detection fix (사실 38): the default must NOT refresh per poll — a
+        // shape where no ts is found made lastTs change every 3s ("progress" always
+        // true), which is the root cause of STALLED=0 on the V2 message shape.
+        let lastTs = "";
         try {
           const msgList: any[] = await session.messages(id);
           // After await: re-check pollerDone — the finally block may have run
@@ -1165,14 +1168,18 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
           if (pollerDone) return;
           if (msgList.length) {
             // Count assistant turns as steps (each assistant message = one loop iteration).
+            // Role probe covers both shapes: V1 `role`/`info.role`, V2 `type`.
             step = msgList.filter((m: any) => {
-              const role = m?.role ?? m?.info?.role;
+              const role = m?.role ?? m?.info?.role ?? m?.type;
               return role === "assistant";
             }).length;
             lastSig = summarizeMsgs(msgList);
             const last = msgList[msgList.length - 1];
-            const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
-            if (ts) lastTs = String(ts);
+            // ts probe covers V1 `ts`/`info.updatedAt` and V2 `time.created` (ms epoch).
+            const rawTs = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt ?? last?.time?.created;
+            if (rawTs !== undefined && rawTs !== null && rawTs !== "") {
+              lastTs = typeof rawTs === "number" ? new Date(rawTs).toISOString() : String(rawTs);
+            }
             lastPollOk = true; // endpoint responded — stall detection is trustworthy again
           }
         } catch { lastPollOk = false; /* messages endpoint unavailable — step stays 0 */ }

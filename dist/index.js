@@ -2724,9 +2724,9 @@ function makeV2SessionOps(ctx) {
       const list = Array.isArray(msgs) ? msgs.slice() : Array.isArray(msgs?.data) ? msgs.data.slice() : [];
       for (let i = list.length - 1; i >= 0; i--) {
         const m = list[i];
-        const role = m?.role ?? m?.info?.role;
+        const role = m?.role ?? m?.info?.role ?? m?.type;
         if (role !== "assistant") continue;
-        const parts = m?.parts ?? m?.info?.parts;
+        const parts = m?.parts ?? m?.info?.parts ?? m?.content;
         if (Array.isArray(parts)) return { data: { parts } };
         return { data: { parts: [{ type: "text", text: extractText(m) }] } };
       }
@@ -2734,9 +2734,15 @@ function makeV2SessionOps(ctx) {
     },
     async messages(id) {
       const msgs = await ctx.session.context({ sessionID: id });
-      if (Array.isArray(msgs)) return msgs.slice();
-      if (Array.isArray(msgs?.data)) return msgs.data.slice();
-      return [];
+      const raw = Array.isArray(msgs) ? msgs.slice() : Array.isArray(msgs?.data) ? msgs.data.slice() : [];
+      return raw.map((m) => {
+        if (m && (m.role !== void 0 || m.info?.role !== void 0)) return m;
+        if (m && (m.type !== void 0 || m.content !== void 0)) {
+          const ts = m.time?.created !== void 0 ? new Date(m.time.created).toISOString() : void 0;
+          return { ...m, role: m.type, parts: Array.isArray(m.content) ? m.content : void 0, ts };
+        }
+        return m;
+      });
     },
     async abort(id) {
       try {
@@ -3867,18 +3873,18 @@ function writeHarnessCfg(updates) {
 function summarizeMsgs(msgs, now = Date.now()) {
   try {
     const list = Array.isArray(msgs) ? msgs : [];
-    const roles = list.map((m) => String(m?.role ?? m?.info?.role ?? "?"));
+    const roles = list.map((m) => String(m?.role ?? m?.info?.role ?? m?.type ?? "?"));
+    const partsOf = (m) => Array.isArray(m?.parts) ? m.parts : Array.isArray(m?.info?.parts) ? m.info.parts : Array.isArray(m?.content) ? m.content : [];
     const nAssistant = roles.filter((r) => r === "assistant").length;
     const textMsgs = list.filter((m) => {
-      if (String(m?.role ?? m?.info?.role ?? "?") !== "assistant") return false;
-      const parts = Array.isArray(m?.parts) ? m.parts : Array.isArray(m?.info?.parts) ? m.info.parts : [];
-      return parts.some((p) => p?.type === "text" && String(p?.text ?? "").length > 0);
+      if (String(m?.role ?? m?.info?.role ?? m?.type ?? "?") !== "assistant") return false;
+      return partsOf(m).some((p) => p?.type === "text" && String(p?.text ?? "").length > 0);
     }).length;
     const last = list[list.length - 1];
     let lastDesc = "none";
     let tsAge = -1;
     if (last) {
-      const parts = Array.isArray(last?.parts) ? last.parts : Array.isArray(last?.info?.parts) ? last.info.parts : [];
+      const parts = partsOf(last);
       const byType = /* @__PURE__ */ new Map();
       for (const p of parts) {
         const t2 = String(p?.type ?? "?");
@@ -3889,8 +3895,8 @@ function summarizeMsgs(msgs, now = Date.now()) {
       }
       const pDesc = [...byType.entries()].map(([t2, r]) => `${t2}x${r.n}${t2 === "text" || t2 === "reasoning" ? `(${r.b >= 1024 ? (r.b / 1024).toFixed(1) + "kB" : r.b + "b"})` : ""}`).join(",") || "noparts";
       lastDesc = `${roles[roles.length - 1] ?? "?"}[${pDesc}]`;
-      const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
-      const t = ts ? Date.parse(String(ts)) : NaN;
+      const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt ?? last?.time?.created;
+      const t = ts !== void 0 && ts !== null && ts !== "" ? Date.parse(typeof ts === "number" ? new Date(ts).toISOString() : String(ts)) : NaN;
       if (!Number.isNaN(t)) tsAge = Math.max(0, Math.round((now - t) / 1e3));
     }
     return `n=${list.length} asst=${nAssistant} textMsgs=${textMsgs}/${nAssistant} last=${lastDesc} tsAge=${tsAge}s`;
@@ -3947,19 +3953,21 @@ async function runModel(session, model, prompt, directory, track, maxSteps = DEF
       if (timedOut || pollerDone) return;
       try {
         let step = 0;
-        let lastTs = (/* @__PURE__ */ new Date()).toISOString();
+        let lastTs = "";
         try {
           const msgList = await session.messages(id);
           if (pollerDone) return;
           if (msgList.length) {
             step = msgList.filter((m) => {
-              const role = m?.role ?? m?.info?.role;
+              const role = m?.role ?? m?.info?.role ?? m?.type;
               return role === "assistant";
             }).length;
             lastSig = summarizeMsgs(msgList);
             const last = msgList[msgList.length - 1];
-            const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
-            if (ts) lastTs = String(ts);
+            const rawTs = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt ?? last?.time?.created;
+            if (rawTs !== void 0 && rawTs !== null && rawTs !== "") {
+              lastTs = typeof rawTs === "number" ? new Date(rawTs).toISOString() : String(rawTs);
+            }
             lastPollOk = true;
           }
         } catch {

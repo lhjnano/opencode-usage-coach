@@ -1,6 +1,6 @@
 {
   "name": "opencode-usage-coach",
-  "version": "0.19.4",
+  "version": "0.19.5",
   "description": "opencode closed-loop usage coach — quota SENSE -> coaching DECIDE -> loop ACT + TUI integration",
   "type": "module",
   "main": "./dist/index.js",
@@ -51,6 +51,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@opencode-ai/plugin": "*",
+    "@opencode/client": "^2.4.1",
     "@opencode/plugin": "^2.1.0",
     "@opentui/core": ">=0.4.0",
     "@opentui/solid": ">=0.4.0",

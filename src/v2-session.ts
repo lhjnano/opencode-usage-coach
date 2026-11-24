@@ -49,11 +49,13 @@ export function makeV2SessionOps(ctx: V2Ctx): SessionOps {
         : Array.isArray(msgs?.data) ? msgs.data.slice()
         : [];
       // Find the LAST assistant message — iterate from the end.
+      // Role probe covers V1 `role`/`info.role` and V2 `type`; parts probe covers
+      // `parts`/`info.parts` and V2 `content` (사실 38 — V2 context shape).
       for (let i = list.length - 1; i >= 0; i--) {
         const m: any = list[i];
-        const role = m?.role ?? m?.info?.role;
+        const role = m?.role ?? m?.info?.role ?? m?.type;
         if (role !== "assistant") continue;
-        const parts = m?.parts ?? m?.info?.parts;
+        const parts = m?.parts ?? m?.info?.parts ?? m?.content;
         if (Array.isArray(parts)) return { data: { parts } };
         // No parts array — synthesize a single text part from common fields.
         return { data: { parts: [{ type: "text", text: extractText(m) }] } };
@@ -63,9 +65,21 @@ export function makeV2SessionOps(ctx: V2Ctx): SessionOps {
     },
     async messages(id: string): Promise<any[]> {
       const msgs: any = await ctx.session.context({ sessionID: id });
-      if (Array.isArray(msgs)) return msgs.slice(); // readonly → mutable copy
-      if (Array.isArray(msgs?.data)) return msgs.data.slice();
-      return [];
+      const raw: any[] = Array.isArray(msgs) ? msgs.slice() // readonly → mutable copy
+        : Array.isArray(msgs?.data) ? msgs.data.slice()
+        : [];
+      // Shape normalization (사실 38): the V2 context endpoint returns
+      // {type, content, time:{created}} items. The poller/summarizer probe
+      // role/parts/ts — normalize V2 items into that canonical shape so step
+      // counting, stall detection, and WALLDUMP work on both hosts.
+      return raw.map((m: any) => {
+        if (m && (m.role !== undefined || m.info?.role !== undefined)) return m; // V1-shaped already
+        if (m && (m.type !== undefined || m.content !== undefined)) {
+          const ts = m.time?.created !== undefined ? new Date(m.time.created).toISOString() : undefined;
+          return { ...m, role: m.type, parts: Array.isArray(m.content) ? m.content : undefined, ts };
+        }
+        return m;
+      });
     },
     async abort(id: string): Promise<void> {
       try { await ctx.session.interrupt({ sessionID: id, continue: false }); } catch { /* */ }

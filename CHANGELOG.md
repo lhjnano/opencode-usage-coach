@@ -718,3 +718,25 @@ Both changes originate from the performance-analysis ledger (사실 33~36 ·
   generations (5.1 3.1% → 5.2 5.5% → 5.3 7.1%; 5.4 preliminary 35.7% at n=14);
   free-tier is bimodal (mimo 0.5% vs x-preview 25%). September's absolute spike
   (74) = 5.3/flash volume surge compounded by the rate increase. 사실 37.
+
+## [0.19.5] - 2026-11-24
+
+### Fixed
+- **V2 message-shape blindness (사실 38) — the root cause of STALLED=0.** The
+  watchdog probed only `role`/`parts`/`ts`, but the V2 session context returns
+  `{type, content, time:{created}}`: step counts read 0, timestamps read none,
+  and the per-poll `lastTs = now()` fallback made "progress" always true — so
+  stall detection could structurally never fire and only the 30-minute wall cut
+  hangs. Now: dual-shape probes everywhere, `messages()` normalizes V2 items to
+  the canonical shape, and a missing ts no longer refreshes the stall baseline.
+  Regression test: a frozen V2 stream with UC_STALL_MIN=1 now takes the STALLED
+  branch (~60s) with a meaningful WALLDUMP — impossible before this fix.
+- WALLDUMP (`summarizeMsgs`) reads the V2 shape (`type`/`content`/`time.created`).
+
+### Analysis
+- UC-1 first verdict (부분 확정): "no text part" cannot identify hangs — the
+  context endpoint does not stream part content live, so healthy long
+  generations look identical mid-flight (verified by completing the same task
+  and diffing the transcript: 39kB reasoning materialized only at the end).
+  Observable progress = item-count changes (per completed turn); single-turn
+  marathons remain a blind spot (next: event-stream/log-endpoint micro-signals).

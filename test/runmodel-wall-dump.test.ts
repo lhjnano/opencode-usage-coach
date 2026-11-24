@@ -69,3 +69,24 @@ test("malformed messages never throw — sig-err fallback", () => {
   assert.ok(typeof s === "string" && s.length > 0);
   assert.ok(s.startsWith("sig-err:") || s.includes("last="), `bounded output: ${s}`);
 });
+
+// ── V2 message shape (사실 38): {type, content, time:{created}} ───────────────
+
+test("V2 shape: type/content/time items produce a real signature", () => {
+  const NOW2 = Date.now();
+  const msgs = [
+    { type: "model-switched", time: { created: NOW2 - 300000 } },
+    { type: "user", text: "task", time: { created: NOW2 - 290000 } },
+    { type: "assistant", content: [{ type: "reasoning", text: "x".repeat(1500) }], time: { created: NOW2 - 45000 } },
+  ];
+  const s = summarizeMsgs(msgs as any, NOW2);
+  assert.match(s, /n=3 asst=1 textMsgs=0\/1/);
+  assert.match(s, /last=assistant\[reasoningx1\(1\.5kB\)\]/);
+  assert.match(s, /tsAge=45s/);
+});
+
+test("V2 shape: assistant WITH text content counts textMsgs", () => {
+  const NOW2 = Date.now();
+  const msgs = [{ type: "assistant", content: [{ type: "text", text: "hello" }], time: { created: NOW2 - 2000 } }];
+  assert.match(summarizeMsgs(msgs as any, NOW2), /asst=1 textMsgs=1\/1/);
+});
