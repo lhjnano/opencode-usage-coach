@@ -2387,6 +2387,7 @@ Note: Changes take effect immediately for new generate/grade calls.`,
 // src/quota.ts
 import { spawn } from "child_process";
 var TTL_MS = Number(process.env.UC_TTL_MS ?? 6e4);
+var QUOTA_STALE_MIN = Number(process.env.UC_QUOTA_STALE_MIN ?? 30);
 var num = (e, d) => {
   try {
     const v = Number(process.env[e]);
@@ -2489,7 +2490,7 @@ function parseQuotaResponse(rawText) {
     if (!text || text === "[]") return null;
     const u = JSON.parse(text)[0]?.usage;
     if (!u) return null;
-    const result = { weekly: null, monthly: null, fiveHour: null };
+    const result = { weekly: null, monthly: null, fiveHour: null, payloadUpdatedAt: u.updatedAt };
     const entries = [
       { key: "primary", slot: u.primary },
       { key: "secondary", slot: u.secondary },
@@ -2571,7 +2572,14 @@ function coach(q, lighter) {
   }
   const wkR = q.weekly ? humanRemaining(q.weekly.resetsAt) : "";
   const h5R = q.fiveHour ? humanRemaining(q.fiveHour.resetsAt) : "";
-  const stop = (r) => ({ decision: "STOP", advice: `STOP recommend \u2014 ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
+  let staleMinAge = -1;
+  if (q.payloadUpdatedAt) {
+    const t = Date.parse(q.payloadUpdatedAt);
+    if (!Number.isNaN(t)) staleMinAge = Math.round((Date.now() - t) / 6e4);
+  }
+  const stale = staleMinAge >= 0 && staleMinAge > QUOTA_STALE_MIN;
+  const staleTag = stale ? ` [STALE payload \u2014 age ${staleMinAge}m > ${QUOTA_STALE_MIN}m; STOP downgraded]` : "";
+  const stop = (r) => stale ? { decision: "THROTTLE", advice: `Throttle (STOP downgraded) \u2014 ${r}.${staleTag} window data is stale; verify before stopping.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 } : { decision: "STOP", advice: `STOP recommend \u2014 ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 };
   const thr = (r) => ({ decision: "THROTTLE", advice: `Throttle recommend \u2014 ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
   if (h5 !== null && h5 >= STOP_5H) return stop(`5h window ${h5}% (${h5R})`);
   if (wk !== null && wk >= STOP_WK) return stop(`weekly ${wk}% (${wkR})`);
@@ -3927,7 +3935,7 @@ async function runModel(session, model, prompt, directory, track, maxSteps = DEF
           lastProgressAt = Date.now();
         }
         if (step > maxSteps) {
-          log(`runModel(${model}): STEP LIMIT exceeded (${step} > ${maxSteps}), aborting session ${id}`);
+          log(`runModel(${model}): STEP LIMIT exceeded (${step} > ${maxSteps}, elapsed ${Math.round((Date.now() - subStart) / 1e3)}s), aborting session ${id}`);
           timedOut = true;
           try {
             await session.abort(id);

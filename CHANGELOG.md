@@ -685,3 +685,20 @@ curated ones — intended end state of the redesign).
   replacing the flat single-file bundle. cli.json no longer needs a plugins
   entry — the terminal loads the TUI entrypoint from the server's active
   plugin list.
+
+## [0.19.3] - 2026-11-24
+
+### Added
+- **UC-3 quota freshness guard** — a codexbar payload whose `updatedAt` is older
+  than `UC_QUOTA_STALE_MIN` (default 30, `0` disables) can no longer issue a hard
+  STOP: the verdict is downgraded to THROTTLE with a `[STALE payload — age Nm]`
+  marker. Directly prevents the 2026-09-30 incident class (stale weekly=100% on
+  an unlimited plan hard-blocking the harness). `parseQuotaResponse` now captures
+  the payload's `updatedAt`.
+- **UC-2 step-limit elapsed logging** — `STEP LIMIT exceeded` log lines now
+  include the sub-session's elapsed seconds, unblocking the bottleneck-ladder
+  unit-cost measurement for the #2 ceiling (282 events, cost unmeasured).
+
+Both changes originate from the performance-analysis ledger (사실 33~36 ·
+기각 11~13 · 사다리 opencode-usage-coach-하니스루프.csv · UC-2/UC-3 in
+[작업] 후보 리스트).

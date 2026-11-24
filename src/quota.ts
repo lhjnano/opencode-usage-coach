@@ -18,11 +18,14 @@ import { spawn } from "node:child_process";
 import { log, writeState } from "./index.js";
 
 export type QuotaWindow = { resetDescription?: string; usedPercent?: number; resetsAt?: string; windowMinutes?: number };
-export type Quota = { weekly: QuotaWindow | null; monthly: QuotaWindow | null; fiveHour: QuotaWindow | null };
+export type Quota = { weekly: QuotaWindow | null; monthly: QuotaWindow | null; fiveHour: QuotaWindow | null; payloadUpdatedAt?: string };
 export type Decision = "GO" | "THROTTLE" | "STOP";
 export type Coaching = { decision: Decision; advice: string; weekly: number; monthly: number; fiveHour: number; model?: string; provider?: string; isFree?: boolean };
 
 const TTL_MS = Number(process.env.UC_TTL_MS ?? 60000);
+// UC-3: codexbar payload staleness threshold (minutes). A payload whose updatedAt is
+// older than this cannot issue a hard STOP (downgraded to THROTTLE). 0 disables.
+const QUOTA_STALE_MIN = Number(process.env.UC_QUOTA_STALE_MIN ?? 30);
 
 // Quota thresholds (override via env). Provider + lighter model come from config/env (see init).
 const num = (e: string, d: number) => { try { const v = Number(process.env[e]); return Number.isFinite(v) && v >= 0 ? v : d; } catch { return d; } };
@@ -125,10 +128,10 @@ export function parseQuotaResponse(rawText: string): Quota | null {
   try {
     const text = (rawText || "").trim();
     if (!text || text === "[]") return null;
-    const u = (JSON.parse(text)[0]?.usage) as { primary?: QuotaWindow; secondary?: QuotaWindow; tertiary?: QuotaWindow } | undefined;
+    const u = (JSON.parse(text)[0]?.usage) as { primary?: QuotaWindow; secondary?: QuotaWindow; tertiary?: QuotaWindow; updatedAt?: string } | undefined;
     if (!u) return null;
 
-    const result: Quota = { weekly: null, monthly: null, fiveHour: null };
+    const result: Quota = { weekly: null, monthly: null, fiveHour: null, payloadUpdatedAt: u.updatedAt };
     const entries = [
       { key: "primary", slot: u.primary },
       { key: "secondary", slot: u.secondary },
@@ -214,7 +217,21 @@ export function coach(q: Quota | null, lighter: string): Coaching {
   }
   const wkR = q.weekly ? humanRemaining(q.weekly.resetsAt) : "";
   const h5R = q.fiveHour ? humanRemaining(q.fiveHour.resetsAt) : "";
-  const stop = (r: string): Coaching => ({ decision: "STOP", advice: `STOP recommend — ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
+  // UC-3 freshness guard (사실 35 · 사다리 4위): a stale codexbar payload (observed as
+  // weekly=100% with resetsAt on an unlimited plan) must not hard-block the harness.
+  // If the payload's updatedAt is older than QUOTA_STALE_MIN minutes, STOP is downgraded
+  // to THROTTLE with a stale-marked advice. Missing/invalid timestamp = treated fresh
+  // (backward compat).
+  let staleMinAge = -1;
+  if (q.payloadUpdatedAt) {
+    const t = Date.parse(q.payloadUpdatedAt);
+    if (!Number.isNaN(t)) staleMinAge = Math.round((Date.now() - t) / 60000);
+  }
+  const stale = staleMinAge >= 0 && staleMinAge > QUOTA_STALE_MIN;
+  const staleTag = stale ? ` [STALE payload — age ${staleMinAge}m > ${QUOTA_STALE_MIN}m; STOP downgraded]` : "";
+  const stop = (r: string): Coaching => stale
+    ? { decision: "THROTTLE", advice: `Throttle (STOP downgraded) — ${r}.${staleTag} window data is stale; verify before stopping.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 }
+    : { decision: "STOP", advice: `STOP recommend — ${r}. window nearly exhausted. stop now or it will be force-blocked.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 };
   const thr = (r: string): Coaching => ({ decision: "THROTTLE", advice: `Throttle recommend — ${r}. switch to lighter model (${lighter}) or wait for window reset.`, weekly: wk ?? -1, monthly: mo ?? -1, fiveHour: h5 ?? -1 });
   if (h5 !== null && h5 >= STOP_5H) return stop(`5h window ${h5}% (${h5R})`);
   if (wk !== null && wk >= STOP_WK) return stop(`weekly ${wk}% (${wkR})`);

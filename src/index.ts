@@ -1143,7 +1143,7 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
         }
         // Step-limit enforcement: abort the sub-session if it exceeds maxSteps.
         if (step > maxSteps) {
-          log(`runModel(${model}): STEP LIMIT exceeded (${step} > ${maxSteps}), aborting session ${id}`);
+          log(`runModel(${model}): STEP LIMIT exceeded (${step} > ${maxSteps}, elapsed ${Math.round((Date.now() - subStart) / 1000)}s), aborting session ${id}`);
           timedOut = true;
           try { await session.abort(id); } catch { /* */ }
           signalTimeout();
