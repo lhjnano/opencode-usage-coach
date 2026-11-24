@@ -40,7 +40,7 @@ test("runModel: no-ts V2 stream with UC_STALL_MIN=1 now fires STALLED (not wall-
   // NOTE: STALL_MS is module-level const read at import — the plugin process
   // reads it at startup. Here we re-import fresh with the env set (tsx caches
   // by URL; a query suffix forces a fresh module graph).
-  const { runModel: rm } = await import(`/home/lhjnano/idea/opencode-usage-coach/src/index.js?stall=${Date.now()}`);
+  const { runModel: rm } = await import(new URL(`../src/index.js?stall=${Date.now()}`, import.meta.url).href);
   const msgs = [
     { type: "model-switched", time: { created: Date.now() - 120000 } },
     { type: "user", text: "go", time: { created: Date.now() - 119000 } },
