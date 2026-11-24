@@ -3864,6 +3864,40 @@ function writeHarnessCfg(updates) {
     throw new Error(`Failed to write harness config: ${String(e)}`, { cause: e });
   }
 }
+function summarizeMsgs(msgs, now = Date.now()) {
+  try {
+    const list = Array.isArray(msgs) ? msgs : [];
+    const roles = list.map((m) => String(m?.role ?? m?.info?.role ?? "?"));
+    const nAssistant = roles.filter((r) => r === "assistant").length;
+    const textMsgs = list.filter((m) => {
+      if (String(m?.role ?? m?.info?.role ?? "?") !== "assistant") return false;
+      const parts = Array.isArray(m?.parts) ? m.parts : Array.isArray(m?.info?.parts) ? m.info.parts : [];
+      return parts.some((p) => p?.type === "text" && String(p?.text ?? "").length > 0);
+    }).length;
+    const last = list[list.length - 1];
+    let lastDesc = "none";
+    let tsAge = -1;
+    if (last) {
+      const parts = Array.isArray(last?.parts) ? last.parts : Array.isArray(last?.info?.parts) ? last.info.parts : [];
+      const byType = /* @__PURE__ */ new Map();
+      for (const p of parts) {
+        const t2 = String(p?.type ?? "?");
+        const rec = byType.get(t2) ?? { n: 0, b: 0 };
+        rec.n += 1;
+        if (t2 === "text" || t2 === "reasoning") rec.b += String(p?.text ?? p?.thinking ?? "").length;
+        byType.set(t2, rec);
+      }
+      const pDesc = [...byType.entries()].map(([t2, r]) => `${t2}x${r.n}${t2 === "text" || t2 === "reasoning" ? `(${r.b >= 1024 ? (r.b / 1024).toFixed(1) + "kB" : r.b + "b"})` : ""}`).join(",") || "noparts";
+      lastDesc = `${roles[roles.length - 1] ?? "?"}[${pDesc}]`;
+      const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
+      const t = ts ? Date.parse(String(ts)) : NaN;
+      if (!Number.isNaN(t)) tsAge = Math.max(0, Math.round((now - t) / 1e3));
+    }
+    return `n=${list.length} asst=${nAssistant} textMsgs=${textMsgs}/${nAssistant} last=${lastDesc} tsAge=${tsAge}s`;
+  } catch (e) {
+    return `sig-err:${String(e?.message ?? e).slice(0, 60)}`;
+  }
+}
 async function runModel(session, model, prompt, directory, track, maxSteps = DEFAULT_MAX_STEPS, signal) {
   const t0 = Date.now();
   const subStart = Date.now();
@@ -3877,6 +3911,7 @@ async function runModel(session, model, prompt, directory, track, maxSteps = DEF
   let lastTsSeen = "";
   let lastProgressAt = Date.now();
   let lastPollOk = true;
+  let lastSig = "(no poll)";
   let signalTimeout;
   const timeoutSignal = new Promise((resolve3) => {
     signalTimeout = resolve3;
@@ -3921,6 +3956,7 @@ async function runModel(session, model, prompt, directory, track, maxSteps = DEF
               const role = m?.role ?? m?.info?.role;
               return role === "assistant";
             }).length;
+            lastSig = summarizeMsgs(msgList);
             const last = msgList[msgList.length - 1];
             const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
             if (ts) lastTs = String(ts);
@@ -3947,7 +3983,7 @@ async function runModel(session, model, prompt, directory, track, maxSteps = DEF
         if (STALL_MS > 0 && lastPollOk && Date.now() - lastProgressAt > STALL_MS) {
           stalled = true;
           timedOut = true;
-          log(`runModel(${model}): STALLED \u2014 no progress for ${Math.round((Date.now() - lastProgressAt) / 1e3)}s (step=${step}, maxSteps=${maxSteps}), aborting session ${id}`);
+          log(`runModel(${model}): STALLED \u2014 no progress for ${Math.round((Date.now() - lastProgressAt) / 1e3)}s (step=${step}, maxSteps=${maxSteps}), aborting session ${id} WALLDUMP[${lastSig}]`);
           try {
             await session.abort(id);
           } catch {
@@ -3972,7 +4008,7 @@ async function runModel(session, model, prompt, directory, track, maxSteps = DEF
     wallTimer = setTimeout(() => {
       if (!timedOut) {
         timedOut = true;
-        log(`runModel(${model}): WALL-CLOCK timeout after ${WALL_TIMEOUT_MS / 1e3}s, aborting session ${id}`);
+        log(`runModel(${model}): WALL-CLOCK timeout after ${WALL_TIMEOUT_MS / 1e3}s, aborting session ${id} WALLDUMP[${lastSig}]`);
         try {
           session.abort(id);
         } catch {

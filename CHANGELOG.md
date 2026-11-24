@@ -702,3 +702,19 @@ curated ones — intended end state of the redesign).
 Both changes originate from the performance-analysis ledger (사실 33~36 ·
 기각 11~13 · 사다리 opencode-usage-coach-하니스루프.csv · UC-2/UC-3 in
 [작업] 후보 리스트).
+
+## [0.19.4] - 2026-11-24
+
+### Added
+- **UC-1 hang-signature instrument** — WALL-CLOCK and STALLED abort log lines now
+  carry `WALLDUMP[n=.. asst=.. textMsgs=k/N last=assistant[reasoningx2(1.4kB)] tsAge=..s]`:
+  the poller's last view of the message stream, capturing whether it ever produced
+  a non-empty TEXT part. This is the missing evidence channel for redefining the
+  stall signature (사실 34 · 기각 11 — the current progress rule sees reasoning-only
+  streams as progress). Bounded one-liner; malformed messages degrade to sig-err.
+
+### Analysis
+- UC-4 closed (확정): wall-clock hang rate degrades monotonically across glm
+  generations (5.1 3.1% → 5.2 5.5% → 5.3 7.1%; 5.4 preliminary 35.7% at n=14);
+  free-tier is bimodal (mimo 0.5% vs x-preview 25%). September's absolute spike
+  (74) = 5.3/flash volume surge compounded by the rate increase. 사실 37.

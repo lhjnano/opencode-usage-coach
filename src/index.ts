@@ -1060,6 +1060,43 @@ function writeHarnessCfg(updates: HarnessCfg): string {
 // When `track` is provided, the poller also writes live progress to harness.json.
 // All session ops go through the version-agnostic SessionOps facade (see rt.ts) —
 // runModel never touches the raw V1 client.
+export function summarizeMsgs(msgs: any[], now: number = Date.now()): string {
+  // UC-1 hang-signature instrument: one bounded, parseable line capturing what the
+  // watchdog could NOT see at abort time — whether the stream ever produced text.
+  try {
+    const list = Array.isArray(msgs) ? msgs : [];
+    const roles = list.map((m: any) => String(m?.role ?? m?.info?.role ?? "?"));
+    const nAssistant = roles.filter((r) => r === "assistant").length;
+    const textMsgs = list.filter((m: any) => {
+      if (String(m?.role ?? m?.info?.role ?? "?") !== "assistant") return false;
+      const parts: any[] = Array.isArray(m?.parts) ? m.parts : Array.isArray(m?.info?.parts) ? m.info.parts : [];
+      return parts.some((p: any) => p?.type === "text" && String(p?.text ?? "").length > 0);
+    }).length;
+    const last = list[list.length - 1];
+    let lastDesc = "none";
+    let tsAge = -1;
+    if (last) {
+      const parts: any[] = Array.isArray(last?.parts) ? last.parts : Array.isArray(last?.info?.parts) ? last.info.parts : [];
+      const byType = new Map<string, { n: number; b: number }>();
+      for (const p of parts) {
+        const t = String(p?.type ?? "?");
+        const rec = byType.get(t) ?? { n: 0, b: 0 };
+        rec.n += 1;
+        if (t === "text" || t === "reasoning") rec.b += String(p?.text ?? p?.thinking ?? "").length;
+        byType.set(t, rec);
+      }
+      const pDesc = [...byType.entries()].map(([t, r]) => `${t}x${r.n}${(t === "text" || t === "reasoning") ? `(${r.b >= 1024 ? (r.b / 1024).toFixed(1) + "kB" : r.b + "b"})` : ""}`).join(",") || "noparts";
+      lastDesc = `${roles[roles.length - 1] ?? "?"}[${pDesc}]`;
+      const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
+      const t = ts ? Date.parse(String(ts)) : NaN;
+      if (!Number.isNaN(t)) tsAge = Math.max(0, Math.round((now - t) / 1000));
+    }
+    return `n=${list.length} asst=${nAssistant} textMsgs=${textMsgs}/${nAssistant} last=${lastDesc} tsAge=${tsAge}s`;
+  } catch (e: any) {
+    return `sig-err:${String(e?.message ?? e).slice(0, 60)}`;
+  }
+}
+
 async function runModel(session: SessionOps, model: string, prompt: string, directory: string, track?: { sessionID: string; taskId: number }, maxSteps: number = DEFAULT_MAX_STEPS, signal?: AbortSignal): Promise<string> {
   const t0 = Date.now();
   const subStart = Date.now();
@@ -1074,6 +1111,9 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
   let lastTsSeen = "";
   let lastProgressAt = Date.now();
   let lastPollOk = true;
+  // UC-1: last observed message-stream signature, refreshed by the poller and
+  // dumped on WALL-CLOCK / STALLED aborts (the hang evidence the watchdog lacked).
+  let lastSig = "(no poll)";
   // Deferred promise: resolves when the step limit is exceeded (races against prompt).
   let signalTimeout!: () => void;
   const timeoutSignal = new Promise<void>((resolve) => { signalTimeout = resolve; });
@@ -1129,6 +1169,7 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
               const role = m?.role ?? m?.info?.role;
               return role === "assistant";
             }).length;
+            lastSig = summarizeMsgs(msgList);
             const last = msgList[msgList.length - 1];
             const ts = last?.ts ?? last?.info?.updatedAt ?? last?.info?.completedAt ?? last?.updatedAt;
             if (ts) lastTs = String(ts);
@@ -1154,7 +1195,7 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
         if (STALL_MS > 0 && lastPollOk && Date.now() - lastProgressAt > STALL_MS) {
           stalled = true;
           timedOut = true;
-          log(`runModel(${model}): STALLED — no progress for ${Math.round((Date.now() - lastProgressAt) / 1000)}s (step=${step}, maxSteps=${maxSteps}), aborting session ${id}`);
+          log(`runModel(${model}): STALLED — no progress for ${Math.round((Date.now() - lastProgressAt) / 1000)}s (step=${step}, maxSteps=${maxSteps}), aborting session ${id} WALLDUMP[${lastSig}]`);
           try { await session.abort(id); } catch { /* */ }
           signalTimeout();
           return;
@@ -1175,7 +1216,7 @@ async function runModel(session: SessionOps, model: string, prompt: string, dire
     wallTimer = setTimeout(() => {
       if (!timedOut) {
         timedOut = true;
-        log(`runModel(${model}): WALL-CLOCK timeout after ${WALL_TIMEOUT_MS / 1000}s, aborting session ${id}`);
+        log(`runModel(${model}): WALL-CLOCK timeout after ${WALL_TIMEOUT_MS / 1000}s, aborting session ${id} WALLDUMP[${lastSig}]`);
         try { session.abort(id); } catch { /* */ }
         signalTimeout();
       }
